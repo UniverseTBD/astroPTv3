@@ -16,6 +16,7 @@ dependencies = [
     "numpy>=1.26",
     "pyyaml>=6.0",
     "lsdb",
+    "hats",
     "huggingface-hub",
 ]
 
@@ -45,6 +46,11 @@ nanotron = { path = "../nanotron", editable = true }
 # deliberate while the PR is WIP -- re-run `uv lock -P lsdb` to pick up
 # upstream fixes; re-pin to a release once it merges and ships.
 lsdb = { git = "https://github.com/astronomy-commons/lsdb", branch = "selective-x-match" }
+# hats from git main for astronomy-commons/hats#764 (merged 2026-10-13,
+# not in a release yet; PyPI's 0.11.0 lacks it). Without it,
+# nested-pandas >= 0.7.1 reads hub partitions as local files, at ~4x the
+# range requests. Re-pin to a release once one newer than 0.11.0 ships.
+hats = { git = "https://github.com/astronomy-commons/hats", branch = "main" }
 
 [build-system]
 requires = ["hatchling"]
