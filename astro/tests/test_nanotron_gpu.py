@@ -239,6 +239,10 @@ def test_forward_loss_parity(nt, matched_models):
     assert nt_loss == pytest.approx(hf_loss, rel=REL_TOL), f"NT={nt_loss}, HF={hf_loss}"
     for name in names:
         nt_mod = nt_out[f"{name}_loss"].item()
+        if name not in hf_out.modality_losses:
+            # absent from this batch: HF omits the key, nanotron reports 0.0
+            assert nt_mod == 0.0, f"{name}: NT={nt_mod} for an absent modality"
+            continue
         hf_mod = hf_out.modality_losses[name].item()
         assert nt_mod == pytest.approx(hf_mod, rel=REL_TOL), (
             f"{name}: NT={nt_mod}, HF={hf_mod}"
