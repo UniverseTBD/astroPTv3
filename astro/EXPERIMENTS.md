@@ -938,6 +938,46 @@ produce realistic noise. Full detail (tables, spatial-texture stats,
 ruled-out head defects, reproduction): git history at
 `astro/docs/jetformer_noise_diagnosis.md` (deleted 2026-09-28).
 
+## 13. Standard throughput benchmark validation (issue #45)
+
+`benchmark_throughput.py` now bounds the real nanotron training loop without
+changing the YAML horizon or LR/noise schedules; operational instructions and
+clock definitions are in [`docs/training.md` §8](docs/training.md#8-standard-throughput-benchmark).
+
+Functional checks on a shared H200 NVL host used idle devices only (GPUs 2/3),
+with 2 warmup + 5 measured steps and the tiny YAML's unchanged 50-step horizon.
+The distributed checks used copies of that YAML with the stated DP/TP setting,
+one loader worker/rank, and console logging every third step. The single-GPU
+check used the existing YAML unchanged (zero workers). All streamed live
+LegacySurvey data; no caches were flushed and cache state was unknown.
+
+| topology | exact step records | measured non-pad tokens (global) | all returned payload bytes | result |
+|---|---:|---:|---:|---|
+| DP1 / TP1 | 7 | 15,300 | 8,708,962,755 | complete |
+| DP2 / TP1 | 7 per rank | 30,600 | 13,745,150,931 | complete |
+| DP1 / TP2 | 7 per rank | 15,300 | 17,417,925,510 | complete |
+
+The TP run demonstrates tokens counted once but both replicas' downloaded
+payloads counted. Probes, worker-specific filenames, warmup exclusion,
+unchanged horizon, and absence of checkpoint outputs were checked against raw
+logs. Startup/first-batch waits were ~53–70s/~48–64s, while the measured windows
+were only ~0.10–0.41s: **these are execution/accounting checks, not representative
+throughput measurements or a scaling comparison**. Runs on different loader
+worker settings are different workloads. Raw local output directories are
+`/tmp/astropt3-issue45-live-{single,dp2,tp2}-1` on the validation host.
+The single-GPU and TP2 checks were repeated after shutdown/output-safety
+hardening in `...-single-2` and `...-tp2-2`; all counts in the table were
+unchanged. CPU regressions cover cleanup failures, waiting for fetch threads
+and worker termination, and rejecting stale node-local output before writing.
+
+Environment: Python 3.13.15, torch 2.8.0+cu128, flash-attn 2.8.3, driver
+615.71.09, LSDB `5102a8a9e8c848b26f2b2c1360412d169fdc88cf`;
+rank metadata also records HATS and other package versions and dirty revisions.
+Offline CPU suite and parameter-count gate passed. Multi-node, mixed DP+TP,
+remote checkpoint staging, and representative long-window throughput are not
+validated by these runs; DESI attribution and DP2/TP2 arithmetic have offline
+coverage, not live coverage here.
+
 ## Open items / not pursued
 
 - **`chunk=2`**: not tested after the section-7 re-tune; the win at 4 was

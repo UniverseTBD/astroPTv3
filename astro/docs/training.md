@@ -172,3 +172,100 @@ automated checkpoint sweep.
 
 For a bounded live check with Hub access:
 `uv run pytest -m network tests/test_lsdb_stream.py`.
+
+## 8. Standard throughput benchmark
+
+Use the **training environment** and the same torchrun arguments as training.
+One invocation measures one YAML; it does not resize the workload for your
+hardware. The output directory must be new and, for multi-node launches,
+on storage shared by **all** ranks. A fresh run ID is broadcast and checked
+against the manifest on every rank before any rank-local output is written.
+
+```bash
+CUDA_DEVICE_MAX_CONNECTIONS=1 \
+torchrun --nproc_per_node=<YAML dp*tp on this node> \
+    --rdzv-backend=c10d --rdzv-endpoint=localhost:0 \
+    astro/scripts/benchmark_throughput.py \
+    --config-file astro/configs/nanotron/<config>.yaml \
+    --warmup-steps 10 --steps 200 --output /shared/benchmarks/<new-run>
+```
+
+The counts are examples, not representative-window guarantees. For the
+50-step tiny YAML, use e.g. `--warmup-steps 2 --steps 5`. Supply an external
+cap description with `--bandwidth-cap '...'` and known cache state with
+`--cache-state '...'`; both otherwise say `unknown`. These options **record**
+context; they never apply throttling or flush caches. Repeats are manual.
+Use your existing launcher/job wall-time limit, including for live checks.
+
+### What runs and what is saved
+
+The script uses nanotron's `DistributedTrainer`, `get_dataloader`, and
+unchanged training loop. It executes warmup + measured optimizer steps
+**in addition to** any resumed step. The YAML training horizon, LR/noise
+schedules, model, modalities, worker count, batching and parallelism remain
+unchanged. A run that would exceed the remaining horizon fails. Initial,
+periodic and final checkpoint writes, evaluation, profiling, uploads and
+external tracker calls are disabled; all overrides are recorded. Explicit
+local initialization/resume is preserved and the resolved checkpoint is
+recorded. A missing explicit resume fails rather than starting randomly.
+Stage remote checkpoints locally first; the initial runner supports one
+AstroPT streaming stage and PP=CP=EP=1, with DP/TP selected by the YAML.
+
+- `baseline.yaml`: original YAML including comments; `effective.yaml`:
+  benchmark overrides applied; `resolved.yaml`: nanotron's resolved defaults.
+- `run.json`: schema version, requested window, baseline and overrides.
+- `rankN.json`: status, actual rank/topology/device, host CPU/RAM, software,
+  code revisions/dirty state, initialization and loader/catalog context.
+- `trainer.rankN.log`, `steps.rankN.jsonl`, `bytes.rankN.{main,wW}.jsonl`,
+  `probe.rankN.{main,wW}.json`: raw local diagnostics and instrumentation.
+- `result.json`: versioned summary; the terminal prints the primary rates.
+
+After a crash or launcher termination, regenerate the report once processes
+have exited (no collection service is needed):
+
+```bash
+python astro/scripts/bench_report.py --telemetry /shared/benchmarks/<run> \
+    --out /shared/benchmarks/<run>/result.json
+```
+
+Failed/missing ranks, missing or duplicate steps, malformed logs, or absent
+byte probes produce a **partial** report and nonzero reporting exit status,
+not a successful benchmark. Interrupted runs retain their diagnostics.
+
+### Clock boundaries and interpretation
+
+Startup is runner `main()` entry through the synchronized training boundary,
+including imports, setup/resume, and a single retained first-batch fetch.
+`first_batch_s` separately measures iterator creation through that fetch;
+it is a **subset of startup**, not an additional training step. That batch
+is consumed and counted once in training. Warmup begins after startup;
+measured timing begins at the end of the last warmup step (or immediately
+when warmup is zero) and ends after the final measured step.
+
+With telemetry enabled, CUDA synchronization and a world barrier close every
+step. Continuous rank-local wall clocks include streaming stalls, packing,
+compute, console logging and inter-step telemetry work. Throughput uses the
+largest rank's **whole measured-window duration**, not an average of step
+rates or a sum of slowest-rank step durations. Per-step distributions remain
+diagnostics. Synchronization/instrumentation impose overhead; compare runs
+using this same policy. No GPU theoretical-FLOPs lookup is needed.
+
+Useful tokens exclude padding. Logical tokens and per-modality loss tokens
+are summed over DP and counted only once across TP (TP0), then divided by
+**actual GPU world size** for per-GPU rates. Modality mix and packing efficiency
+travel with the rate: a different mix is a different workload. Object counts
+are presentations, **not unique astronomical coverage**.
+
+Payload bytes count every returned HF range/stream-read payload across all
+ranks/workers, including duplicated downloads and prefetch, with Legacy/DESI
+source attribution. They exclude HTTP overhead and failed/unreturned partial
+transfers. The observed payload rate divides whole-run bytes by the maximum
+rank duration from runner entry through loader shutdown (including explicit
+fetch-thread/worker joins, bounded by your launcher wall-time limit). It is **not connection
+capacity**, nor bytes consumed exclusively by measured steps. Cache state is
+unknown unless supplied. A short window (<200 measured steps or <60 seconds)
+is flagged as limited evidence, not promoted to a stable hardware comparison.
+
+Multi-node and any unexercised DP/TP topology require a bounded live validation
+on suitable hardware before claiming support; CPU arithmetic tests alone do
+not establish distributed training correctness.
