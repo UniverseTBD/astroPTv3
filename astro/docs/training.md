@@ -175,97 +175,79 @@ For a bounded live check with Hub access:
 
 ## 8. Standard throughput benchmark
 
-Use the **training environment** and the same torchrun arguments as training.
-One invocation measures one YAML; it does not resize the workload for your
-hardware. The output directory must be new and, for multi-node launches,
-on storage shared by **all** ranks. A fresh run ID is broadcast and checked
-against the manifest on every rank before any rank-local output is written.
+Measures one real training YAML on the hardware it is launched on, using the
+training environment and the usual torchrun arguments:
 
 ```bash
 CUDA_DEVICE_MAX_CONNECTIONS=1 \
 torchrun --nproc_per_node=<YAML dp*tp on this node> \
-    --rdzv-backend=c10d --rdzv-endpoint=localhost:0 \
+    --rdzv-backend=c10d --rdzv-endpoint=localhost:0 --log-dir <logs> --tee 3 \
     astro/scripts/benchmark_throughput.py \
     --config-file astro/configs/nanotron/<config>.yaml \
     --warmup-steps 10 --steps 200 --output /shared/benchmarks/<new-run>
 ```
 
-The counts are examples, not representative-window guarantees. For the
-50-step tiny YAML, use e.g. `--warmup-steps 2 --steps 5`. Supply an external
-cap description with `--bandwidth-cap '...'` and known cache state with
-`--cache-state '...'`; both otherwise say `unknown`. These options **record**
-context; they never apply throttling or flush caches. Repeats are manual.
-Use your existing launcher/job wall-time limit, including for live checks.
+`--output` must be a new directory, on storage every rank can see. The script
+runs nanotron's own trainer and loader for warmup + measured steps on top of
+any resumed step. The YAML horizon, LR/noise schedules, model, data and
+parallelism stay unchanged; checkpoints, eval, profiling, uploads and
+trackers are disabled and the overrides recorded. Explicit local
+initialization/resume is honoured, and an unresolvable resume fails rather than
+starting from random weights. Supported: one AstroPT streaming stage, PP=CP=EP=1.
+`--bandwidth-cap` and `--cache-state` only record context; nothing is throttled
+or flushed. Use these counts as examples; for the 50-step tiny YAML try
+`--warmup-steps 2 --steps 5`.
 
-### What runs and what is saved
+Outputs: `baseline.yaml`/`effective.yaml`/`resolved.yaml`, `run.json` (window
+and overrides), `rankN.json` (status, topology, host, GPU/CPU/RAM, software,
+code revisions, loader settings), raw `steps.rankN.jsonl` and
+`bytes.rankN.{main,wW}.jsonl`, and `result.json`, which the terminal
+summarises. Regenerate the report after a crash with
+`python astro/scripts/bench_report.py --telemetry <run> --out <run>/result.json`.
+A failed rank, a missing or extra step, or a missing byte log gives a
+`partial` report, no headline rates, and a nonzero exit.
 
-The script uses nanotron's `DistributedTrainer`, `get_dataloader`, and
-unchanged training loop. It executes warmup + measured optimizer steps
-**in addition to** any resumed step. The YAML training horizon, LR/noise
-schedules, model, modalities, worker count, batching and parallelism remain
-unchanged. A run that would exceed the remaining horizon fails. Initial,
-periodic and final checkpoint writes, evaluation, profiling, uploads and
-external tracker calls are disabled; all overrides are recorded. Explicit
-local initialization/resume is preserved and the resolved checkpoint is
-recorded. A missing explicit resume fails rather than starting randomly.
-Stage remote checkpoints locally first; the initial runner supports one
-AstroPT streaming stage and PP=CP=EP=1, with DP/TP selected by the YAML.
+**Reading it.** Every step ends with a CUDA sync and a world barrier, so the
+measured window is synchronized wall time including loader stalls; compare runs
+under this same policy. Throughput is non-padding tokens over that window,
+counted once per TP group and summed over DP, then divided by world size for
+the per-GPU rate. The first batch (stream open and first fetch) lands in warmup and is
+reported as `first_step_loader_wait_s`. Modality mix and packing travel with the
+rate: a different mix is a different workload, and row counts are
+presentations, not unique objects. Payload bytes count every returned HF
+payload, duplicates and prefetch included, by source, from script start to the
+end of training on each rank. That rate is not link capacity. Windows under 200 steps
+or 60 s are flagged as limited evidence. CPU tests do not establish
+distributed correctness: validate an unexercised topology live first.
 
-- `baseline.yaml`: original YAML including comments; `effective.yaml`:
-  benchmark overrides applied; `resolved.yaml`: nanotron's resolved defaults.
-- `run.json`: schema version, requested window, baseline and overrides.
-- `rankN.json`: status, actual rank/topology/device, host CPU/RAM, software,
-  code revisions/dirty state, initialization and loader/catalog context.
-- `trainer.rankN.log`, `steps.rankN.jsonl`, `bytes.rankN.{main,wW}.jsonl`,
-  `probe.rankN.{main,wW}.json`: raw local diagnostics and instrumentation.
-- `result.json`: versioned summary; the terminal prints the primary rates.
+**MFU.** `metrics.mfu` and the terminal report include estimated MFU with its
+busy / non-stalled-time / packing decomposition. Each rank records the GPU
+actually selected by CUDA, its rated **dense BF16** peak and the vendor source
+URL in `rankN.json`. The lookup distinguishes H200 NVL (835.5 TFLOP/s) from
+SXM (989.5); it also recognizes H100 NVL, H100 80GB HBM3, A100-SXM4-80GB and
+A100 80GB PCIe. Unlisted/ambiguous names and reduced-memory slices have an
+unknown peak; no family-name fallback or full-device credit for MIG is used.
+Non-BF16 runs and old logs without FLOP metadata report MFU as unavailable
+(`null`), not zero; throughput reporting still works.
 
-After a crash or launcher termination, regenerate the report once processes
-have exited (no collection service is needed):
+The runner saves nanotron's backbone FLOPs/token and per-modality forward
+FLOPs/token as `flops_estimate`. The report prices **measured** nonpadding
+tokens and loss tokens, counts TP replicas once, and divides total estimated
+training FLOPs by measured seconds times the **sum of all participating GPU
+peaks**. Modality costs include forward + backward (3× forward). This remains
+an **upper-bound estimate**, not profiled executed FLOPs: the existing formula
+assumes full-sequence attention rather than shorter packed-document attention.
+GPU peaks are rated specifications, not measurements of current clocks or
+power limits. Offline reporting uses captured metadata, never the GPU on the
+machine regenerating the report.
 
-```bash
-python astro/scripts/bench_report.py --telemetry /shared/benchmarks/<run> \
-    --out /shared/benchmarks/<run>/result.json
-```
-
-Failed/missing ranks, missing or duplicate steps, malformed logs, or absent
-byte probes produce a **partial** report and nonzero reporting exit status,
-not a successful benchmark. Interrupted runs retain their diagnostics.
-
-### Clock boundaries and interpretation
-
-Startup is runner `main()` entry through the synchronized training boundary,
-including imports, setup/resume, and a single retained first-batch fetch.
-`first_batch_s` separately measures iterator creation through that fetch;
-it is a **subset of startup**, not an additional training step. That batch
-is consumed and counted once in training. Warmup begins after startup;
-measured timing begins at the end of the last warmup step (or immediately
-when warmup is zero) and ends after the final measured step.
-
-With telemetry enabled, CUDA synchronization and a world barrier close every
-step. Continuous rank-local wall clocks include streaming stalls, packing,
-compute, console logging and inter-step telemetry work. Throughput uses the
-largest rank's **whole measured-window duration**, not an average of step
-rates or a sum of slowest-rank step durations. Per-step distributions remain
-diagnostics. Synchronization/instrumentation impose overhead; compare runs
-using this same policy. No GPU theoretical-FLOPs lookup is needed.
-
-Useful tokens exclude padding. Logical tokens and per-modality loss tokens
-are summed over DP and counted only once across TP (TP0), then divided by
-**actual GPU world size** for per-GPU rates. Modality mix and packing efficiency
-travel with the rate: a different mix is a different workload. Object counts
-are presentations, **not unique astronomical coverage**.
-
-Payload bytes count every returned HF range/stream-read payload across all
-ranks/workers, including duplicated downloads and prefetch, with Legacy/DESI
-source attribution. They exclude HTTP overhead and failed/unreturned partial
-transfers. The observed payload rate divides whole-run bytes by the maximum
-rank duration from runner entry through loader shutdown (including explicit
-fetch-thread/worker joins, bounded by your launcher wall-time limit). It is **not connection
-capacity**, nor bytes consumed exclusively by measured steps. Cache state is
-unknown unless supplied. A short window (<200 measured steps or <60 seconds)
-is flagged as limited evidence, not promoted to a stable hardware comparison.
-
-Multi-node and any unexercised DP/TP topology require a bounded live validation
-on suitable hardware before claiming support; CPU arithmetic tests alone do
-not establish distributed training correctness.
+**NIC link speed.** Each rank's `network` metadata records physical interfaces,
+up/down state and negotiated link speed in Mbit/s. The terminal shows the
+fastest active physical NIC **per host** in decimal Gbit/s; ranks sharing a
+host do not multiply its capacity. Linux sysfs distinguishes physical devices
+from virtual/loopback interfaces; unknown speeds and unavailable sysfs are
+reported as unavailable. `max_active_link_speed_mbps` is the largest *known*
+active speed, not a sum of ports or a bonded-link capacity. This is not an
+internet speed test, not necessarily the interface used for Hugging Face,
+and not guaranteed downlink bandwidth. It remains separate from observed
+whole-run payload MiB/s; no network configuration or active speed test is run.

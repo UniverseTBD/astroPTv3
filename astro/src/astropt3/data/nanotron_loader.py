@@ -15,7 +15,6 @@ import re
 import time
 import zlib
 from collections.abc import Mapping
-from contextlib import closing
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
@@ -507,6 +506,10 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
         self.collator = PackedCollator(config, seq_len=seq_len)
 
     def _open_records(self, worker):
+        worker_id = worker.id if worker else 0
+        retry_generation = 0
+        consecutive_failures = 0
+        draw = 0
         # InfiniteStream's own submit-next-before-returning-current prefetch
         # (catalog_streams.CatalogIterator.__next__) only overlaps with
         # anything when given a real dask client -- with client=None it calls
@@ -530,20 +533,7 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
             threads_per_worker=_PARTITIONS_PER_CHUNK,
             dashboard_address=":0",
         )
-        executors = [worker.executor for worker in dask_cluster.workers.values()]
-        try:
-            with dask_cluster, Client(dask_cluster) as dask_client:
-                yield from self._stream_records(worker, dask_client)
-        finally:
-            # Dask's close has a timeout; the job wall-time limit bounds this final join.
-            for executor in executors:
-                executor.shutdown(wait=True)
-
-    def _stream_records(self, worker, dask_client):
-        worker_id = worker.id if worker else 0
-        retry_generation = 0
-        consecutive_failures = 0
-        draw = 0
+        dask_client = Client(dask_cluster)
         while True:
             catalog = stream = iterator = None
             try:
@@ -730,37 +720,37 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
         install_byte_probe(self.rank, worker.id if worker else None)
-        with closing(self._open_records(worker)) as records:
-            rows: list[list] = [[] for _ in range(self.micro_batch_size)]
-            used = [0] * self.micro_batch_size
+        records = self._open_records(worker)
+        rows: list[list] = [[] for _ in range(self.micro_batch_size)]
+        used = [0] * self.micro_batch_size
 
-            for record in records:
-                objects = self._replica_objects(record)
-                for obj in objects:
-                    if len(obj) > self.seq_len:
-                        raise ValueError(
-                            f"object of length {len(obj)} exceeds seq_len {self.seq_len}"
-                        )
+        for record in records:
+            objects = self._replica_objects(record)
+            for obj in objects:
+                if len(obj) > self.seq_len:
+                    raise ValueError(
+                        f"object of length {len(obj)} exceeds seq_len {self.seq_len}"
+                    )
+            placement = self._place(objects, used)
+            if placement is None:
+                batch = self.collator.collate_rows(rows)
+                expected_shape = (self.micro_batch_size, self.seq_len)
+                if batch["input_ids"].shape != expected_shape:
+                    raise AssertionError(
+                        f"packing mismatch: {batch['input_ids'].shape} != {expected_shape}"
+                    )
+                yield flatten_packed_batch(batch, self.config, self.seq_len)
+                rows = [[] for _ in range(self.micro_batch_size)]
+                used = [0] * self.micro_batch_size
                 placement = self._place(objects, used)
                 if placement is None:
-                    batch = self.collator.collate_rows(rows)
-                    expected_shape = (self.micro_batch_size, self.seq_len)
-                    if batch["input_ids"].shape != expected_shape:
-                        raise AssertionError(
-                            f"packing mismatch: {batch['input_ids'].shape} != {expected_shape}"
-                        )
-                    yield flatten_packed_batch(batch, self.config, self.seq_len)
-                    rows = [[] for _ in range(self.micro_batch_size)]
-                    used = [0] * self.micro_batch_size
-                    placement = self._place(objects, used)
-                    if placement is None:
-                        raise AssertionError(
-                            f"record {record.get('object_id')!r} cannot be placed "
-                            f"into {self.micro_batch_size} rows x {self.seq_len} tokens"
-                        )
-                for obj, row_index in zip(objects, placement, strict=True):
-                    rows[row_index].append(obj)
-                    used[row_index] += len(obj)
+                    raise AssertionError(
+                        f"record {record.get('object_id')!r} cannot be placed "
+                        f"into {self.micro_batch_size} rows x {self.seq_len} tokens"
+                    )
+            for obj, row_index in zip(objects, placement, strict=True):
+                rows[row_index].append(obj)
+                used[row_index] += len(obj)
 
 
 def build_astropt3_dataloader(

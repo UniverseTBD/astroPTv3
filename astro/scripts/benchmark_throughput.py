@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import json
 import os
 import platform
@@ -16,10 +15,8 @@ import socket
 import subprocess
 import sys
 import time
-import traceback
 import uuid
-from contextlib import contextmanager
-from importlib.metadata import PackageNotFoundError, distribution, version
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import yaml
@@ -30,16 +27,14 @@ REPO = Path(__file__).resolve().parents[2]
 def prepare_config(baseline: dict, output: Path, world_size: int,
                    warmup_steps: int, steps: int) -> tuple[dict, dict]:
     """Validate without CUDA/nanotron imports; never change a workload knob."""
-    if warmup_steps < 0 or steps <= 0:
-        raise ValueError("warmup-steps must be >= 0 and steps must be > 0")
+    if warmup_steps < 1 or steps < 1:
+        # Warmup absorbs the first batch (stream open + first fetch).
+        raise ValueError("warmup-steps and steps must both be >= 1")
     if os.environ.get("NANOTRON_BENCHMARK", "0") != "0":
         raise ValueError("Unset NANOTRON_BENCHMARK (its legacy mode exits at step four)")
     parallel = baseline["parallelism"]
-    if any(parallel.get(key, 1) != 1 for key in
-           ("pp", "context_parallel_size", "expert_parallel_size")):
+    if any(parallel.get(key, 1) != 1 for key in ("pp", "context_parallel_size", "expert_parallel_size")):
         raise ValueError("AstroPT benchmarking requires PP=CP=EP=1")
-    if any(type(parallel.get(key, 1)) is not int or parallel.get(key, 1) < 1 for key in ("dp", "tp")):
-        raise ValueError("YAML dp and tp must be positive integers")
     if parallel.get("dp", 1) * parallel.get("tp", 1) != world_size:
         raise ValueError("launch WORLD_SIZE must equal YAML dp * tp")
     if not baseline["model"]["model_config"].get("is_astropt3_config"):
@@ -50,16 +45,10 @@ def prepare_config(baseline: dict, output: Path, world_size: int,
     if warmup_steps + steps > baseline["tokens"]["train_steps"]:
         raise ValueError("warmup + measured steps exceed the unchanged YAML horizon")
     # Remote resume currently depends on S3 upload settings in nanotron.
-    checkpoints = baseline["checkpoints"]
-    resume = checkpoints.get("resume_checkpoint_path")
-    init_path = baseline["model"]["init_method"].get("path")
-    for path in (resume, init_path):
+    for path in (baseline["checkpoints"].get("resume_checkpoint_path"),
+                 baseline["model"]["init_method"].get("path")):
         if path and "://" in str(path):
             raise ValueError("stage remote initialization/resume locally before benchmarking")
-    if resume:
-        path = Path(resume)
-        if not ((path / "latest.txt").is_file() or (path / "model_config.json").is_file()):
-            raise ValueError(f"explicit resume checkpoint not found: {path}")
 
     effective = copy.deepcopy(baseline)
     overrides = {
@@ -105,7 +94,7 @@ def create_output(output: Path, baseline_text: str, effective: dict, manifest: d
 
 
 def validate_output(output: Path, manifest: dict) -> None:
-    """Check rank zero's fresh nonce before touching any rank-local files."""
+    """Check rank zero's fresh run ID before touching any rank-local files."""
     try:
         stored = json.loads((output / "run.json").read_text())
     except (OSError, ValueError) as error:
@@ -114,33 +103,79 @@ def validate_output(output: Path, manifest: dict) -> None:
         raise ValueError("ranks disagree on config/run ID or output is not shared storage")
 
 
-@contextmanager
-def local_log(path: Path):
-    """Capture native libraries and worker output too, not just Python prints."""
-    sys.stdout.flush()
-    sys.stderr.flush()
-    saved = [os.dup(fd) for fd in (1, 2)]
-    try:
-        with path.open("w") as handle:
-            os.dup2(handle.fileno(), 1)
-            os.dup2(handle.fileno(), 2)
-            yield
-    finally:
-        sys.stdout.flush()
-        sys.stderr.flush()
-        for fd, original in zip((1, 2), saved, strict=True):
-            os.dup2(original, fd)
-            os.close(original)
-
-
 def revision(path: Path) -> dict:
     def git(*args):
         return subprocess.check_output(["git", "-C", str(path), *args], text=True).strip()
     try:
-        status = git("status", "--porcelain")
-        return {"commit": git("rev-parse", "HEAD"), "dirty": bool(status), "status": status}
+        return {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))}
     except (OSError, subprocess.CalledProcessError) as error:
         return {"error": str(error)}
+
+
+def gpu_peak(name: str, vram_bytes: int) -> dict:
+    """Rated dense BF16 peaks; exact variants only, never a family-name guess."""
+    h200 = "https://www.nvidia.com/en-us/data-center/h200/"
+    h100 = "https://www.nvidia.com/en-us/data-center/h100/"
+    a100 = "https://www.nvidia.com/en-us/data-center/a100/"
+    # NVIDIA's Hopper tables quote sparse throughput: dense is half that value.
+    variants = {
+        "H200 NVL": (835.5, 141e9, h200),
+        "H200 SXM": (989.5, 141e9, h200),
+        "H100 NVL": (835.5, 94e9, h100),
+        "H100 80GB HBM3": (989.5, 80e9, h100),
+        "A100-SXM4-80GB": (312.0, 80e9, a100),
+        "A100 80GB PCIe": (312.0, 80e9, a100),
+    }
+    # Reduced-memory devices may be MIG/vGPU slices even if the name is unchanged.
+    variant = variants.get(name.removeprefix("NVIDIA "))
+    if variant is None or vram_bytes < variant[1]:
+        return {"peak_tflops_per_gpu": None, "peak_source": None}
+    return {"peak_tflops_per_gpu": variant[0], "peak_source": variant[2]}
+
+
+def network_context(sys_class_net: Path = Path("/sys/class/net")) -> dict:
+    """Negotiated physical NIC speeds, not internet bandwidth or route capacity."""
+    import psutil
+
+    result: dict = {"interfaces": [], "max_active_link_speed_mbps": None,
+                    "fastest_active_interfaces": []}
+    if not sys_class_net.is_dir():
+        return {**result, "unavailable_reason": "Linux network sysfs is unavailable"}
+    try:
+        stats = psutil.net_if_stats()
+    except (OSError, NotImplementedError) as error:
+        return {**result, "unavailable_reason": str(error)}
+    for name, nic in sorted(stats.items()):
+        if not (sys_class_net / name / "device").exists():
+            continue  # virtual interfaces can advertise misleading synthetic speeds
+        result["interfaces"].append({
+            "name": name, "is_up": nic.isup,
+            "link_speed_mbps": nic.speed if nic.speed > 0 else None,
+        })
+    active = [nic for nic in result["interfaces"] if nic["is_up"] and nic["link_speed_mbps"]]
+    if active:
+        result["max_active_link_speed_mbps"] = max(nic["link_speed_mbps"] for nic in active)
+        result["fastest_active_interfaces"] = [
+            nic["name"] for nic in active
+            if nic["link_speed_mbps"] == result["max_active_link_speed_mbps"]
+        ]
+    else:
+        result["unavailable_reason"] = "No active physical NIC with a known link speed"
+    return result
+
+
+def capture_flop_estimate(trainer) -> dict:
+    """Persist the model's existing arithmetic so offline reports need no CUDA."""
+    from nanotron.models.astropt3 import modality_flops_per_token
+
+    world = trainer.parallel_context.world_pg.size()
+    sequence = trainer.sequence_length
+    tflops, _ = trainer.unwrapped_model.get_flops_per_sec(1.0, sequence, 1)
+    return {
+        "dtype": str(trainer.config.model.dtype),
+        "backbone_flops_per_token": tflops * world * 1e12 / sequence,
+        "modality_forward_flops_per_token": modality_flops_per_token(trainer.model_config),
+    }
 
 
 def capture_context(torch, trainer, loader) -> dict:
@@ -149,42 +184,26 @@ def capture_context(torch, trainer, loader) -> dict:
     from astropt3.data import nanotron_loader as data
 
     device = torch.cuda.get_device_properties(torch.cuda.current_device())
+    cpuinfo = Path("/proc/cpuinfo")
+    cpu_model = next((line.split(":", 1)[1].strip() for line in cpuinfo.read_text().splitlines()
+                      if line.startswith("model name")), None) if cpuinfo.exists() else None
     packages = {}
-    for name in ("torch", "flash-attn", "nanotron", "astropt3", "transformers", "lsdb",
-                 "hats", "dask", "distributed", "huggingface-hub", "fsspec", "numpy"):
+    for name in ("torch", "flash-attn", "nanotron", "lsdb", "hats", "huggingface-hub"):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:
             packages[name] = "unknown"
-    try:
-        lsdb_source = json.loads(distribution("lsdb").read_text("direct_url.json") or "null")
-    except (PackageNotFoundError, json.JSONDecodeError):
-        lsdb_source = None
-    cpu_model = platform.processor()
-    cpuinfo = Path("/proc/cpuinfo")
-    if cpuinfo.exists():
-        cpu_model = next((line.split(":", 1)[1].strip() for line in cpuinfo.read_text().splitlines()
-                          if line.startswith("model name")), cpu_model)
     dataset = loader.dataset
-    try:
-        driver = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"], text=True
-        ).splitlines()[0]
-    except (OSError, subprocess.CalledProcessError, IndexError):
-        driver = "unknown"
     return {
-        "host": socket.gethostname(), "local_rank": int(os.environ["LOCAL_RANK"]),
-        "local_world_size": int(os.environ.get("LOCAL_WORLD_SIZE", "1")),
+        "host": socket.gethostname(),
         "gpu": {"name": device.name, "vram_bytes": device.total_memory,
-                "uuid": str(getattr(device, "uuid", "unknown"))},
-        "cpu": {"model": cpu_model, "logical_count": os.cpu_count(),
-                "affinity_count": len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None},
+                **gpu_peak(device.name, device.total_memory)},
+        "flops_estimate": capture_flop_estimate(trainer),
+        "network": network_context(),
+        "cpu": {"model": cpu_model or platform.processor(), "count": os.cpu_count()},
         "ram_bytes": psutil.virtual_memory().total,
-        "software": {"python": platform.python_version(), "platform": platform.platform(),
-                     "cuda_runtime": torch.version.cuda, "driver": driver,
-                     "packages": packages, "lsdb_source": lsdb_source},
-        "code": {"astropt3": revision(REPO), "nanotron": revision(REPO / "nanotron"),
-                 "uv_lock_sha256": hashlib.sha256((REPO / "astro/uv.lock").read_bytes()).hexdigest()},
+        "software": {"python": platform.python_version(), "cuda": torch.version.cuda, **packages},
+        "code": {"astropt3": revision(REPO), "nanotron": revision(REPO / "nanotron")},
         "num_loading_workers": loader.num_workers,
         "loader": {
             "legacy_catalog": data.LEGACY_CATALOG, "legacy_columns": dataset.columns,
@@ -193,18 +212,9 @@ def capture_context(torch, trainer, loader) -> dict:
             "crossmatch_radius_arcsec": data._CROSSMATCH_RADIUS_ARCSEC,
             "count_fraction_threshold": data._CROSSMATCH_COUNT_FRACTION_THRESHOLD,
             "partitions_per_chunk": data._PARTITIONS_PER_CHUNK,
-            "dask_processes": False, "dask_workers_per_reader": 1,
-            "dask_threads_per_reader": data._PARTITIONS_PER_CHUNK,
-            "prefetch_factor": loader.prefetch_factor, "pin_memory": loader.pin_memory,
-            "max_net_retries": data._MAX_NET_RETRIES, "max_net_retry_wait_s": data._MAX_NET_RETRY_WAIT,
         },
-        "initialization": {
-            "configured": trainer.config.model.init_method.__class__.__name__,
-            "resolved_resume_checkpoint": str(trainer.init_checkpoint_path) if trainer.init_checkpoint_path else None,
-            "load_optimizer": trainer.config.checkpoints.load_optimizer,
-            "load_lr_scheduler": trainer.config.checkpoints.load_lr_scheduler,
-            "stream_position": "fresh cursorless stream (including on resume)",
-        },
+        "init_method": trainer.config.model.init_method.__class__.__name__,
+        "resumed_from": str(trainer.init_checkpoint_path) if trainer.init_checkpoint_path else None,
     }
 
 
@@ -219,42 +229,27 @@ def run_training(output: Path, warmup_steps: int, steps: int, state: dict, start
         get_dataloader,
     )
 
-    loader = trainer = None
     try:
         trainer = DistributedTrainer(str(output / "effective.yaml"), benchmark=True)
         if trainer.config.checkpoints.resume_checkpoint_path and trainer.init_checkpoint_path is None:
             raise ValueError("explicit resume could not be resolved; refusing random initialization")
-        state.update({
-            "start_step": trainer.metadata.last_train_step,
-            "dp_rank": dist.get_rank(trainer.parallel_context.dp_pg),
-            "tp_rank": dist.get_rank(trainer.parallel_context.tp_pg),
-        })
-        if state["start_step"] + warmup_steps + steps > trainer.config.tokens.train_steps:
-            raise ValueError("not enough remaining YAML horizon after resume")
         dataloaders = get_dataloader(trainer)
-        loader = next(iter(dataloaders.values()))
-        state.update(capture_context(torch, trainer, loader))
+        state.update(
+            start_step=trainer.metadata.last_train_step,
+            dp_rank=dist.get_rank(trainer.parallel_context.dp_pg),
+            tp_rank=dist.get_rank(trainer.parallel_context.tp_pg),
+            **capture_context(torch, trainer, next(iter(dataloaders.values()))),
+        )
         if state["rank"] == 0:
             trainer.config.save_as_yaml(output / "resolved.yaml")
-        write_json(output / f"rank{state['rank']}.json", state)
-        state["first_batch_s"] = loader.prime()
-        state["first_batch_ready_s"] = time.perf_counter() - started
         trainer.train(dataloaders, max_steps=warmup_steps + steps)
-        state["startup_s"] = trainer.telemetry_started_at - started
-        state["status"] = "complete"
+        state.update(status="complete", startup_s=trainer.telemetry_started_at - started,
+                     whole_run_s=time.perf_counter() - started, ended_at=time.time())
     except BaseException as error:
         state.update(status="failed", error=f"{type(error).__name__}: {error}")
         raise
     finally:
-        try:
-            if loader is not None:
-                loader.close()
-        except BaseException as error:
-            state.update(status="failed", error=f"loader shutdown: {type(error).__name__}: {error}")
-            raise
-        finally:
-            state["whole_run_s"] = time.perf_counter() - started
-            write_json(output / f"rank{state['rank']}.json", state)
+        write_json(output / f"rank{state['rank']}.json", state)
 
 
 def main(argv=None):
@@ -280,63 +275,41 @@ def main(argv=None):
                         ("dp", "tp", "pp", "context_parallel_size", "expert_parallel_size")},
         "warmup_steps": args.warmup_steps, "steps": args.steps,
         "baseline_config": baseline, "overrides": overrides,
-        "config_sha256": hashlib.sha256(baseline_text.encode()).hexdigest(),
         "bandwidth_cap": args.bandwidth_cap, "cache_state": args.cache_state,
-        "timing_policy": "CUDA synchronize + world barrier at every step boundary; continuous rank-local wall clock",
     }
     import torch
     import torch.distributed as dist
 
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     dist.init_process_group(backend="nccl")
-    publication: list[str | None] = [None, None]
+    # Rank zero creates the directory; every rank then checks it sees that same fresh run.
+    publication: list[str | None] = [None, uuid.uuid4().hex]
     if rank == 0:
-        publication[1] = uuid.uuid4().hex
         manifest["run_id"] = publication[1]
         try:
             create_output(output, baseline_text, effective, manifest)
         except Exception as error:
             publication[0] = f"{type(error).__name__}: {error}"
     dist.broadcast_object_list(publication, src=0)
-    if publication[0]:
-        dist.destroy_process_group()
-        raise RuntimeError(publication[0])
     manifest["run_id"] = publication[1]
+    report = None
     try:
+        if publication[0]:
+            raise RuntimeError(publication[0])
         validate_output(output, manifest)
-    except BaseException:
-        dist.destroy_process_group()
-        raise
-    os.environ["ASTROPT3_TELEMETRY_DIR"] = str(output)
-    state = {"rank": rank, "status": "running"}
-    write_json(output / f"rank{rank}.json", state)
-    print(f"[benchmark rank {rank}] local logs: {output / f'trainer.rank{rank}.log'}", flush=True)
-    try:
-        with local_log(output / f"trainer.rank{rank}.log"):
-            try:
-                run_training(output, args.warmup_steps, args.steps, state, started)
-            except BaseException as error:
-                state.update(status="failed", error=f"{type(error).__name__}: {error}")
-                write_json(output / f"rank{rank}.json", state)
-                traceback.print_exc()
-                raise
+        os.environ["ASTROPT3_TELEMETRY_DIR"] = str(output)
+        run_training(output, args.warmup_steps, args.steps, {"rank": rank}, started)
         dist.barrier()
-        if rank == 0:
+    finally:
+        if rank == 0 and not publication[0]:
             from bench_report import build_report, render
 
             report = build_report(output, None, "throughput", 60.0)
             write_json(output / "result.json", report)
             print(render(report))
-            if report["status"] != "complete":
-                raise RuntimeError("benchmark inputs incomplete; see result.json")
-    except BaseException:
-        if rank == 0:
-            from bench_report import build_report
-
-            write_json(output / "result.json", build_report(output, None, "throughput", 60.0))
-        raise
-    finally:
         dist.destroy_process_group()
+    if report is not None and report["status"] != "complete":
+        raise SystemExit("benchmark inputs incomplete; see result.json")
 
 
 if __name__ == "__main__":

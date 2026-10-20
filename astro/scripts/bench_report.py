@@ -6,17 +6,14 @@ Usage:
 
 Reads what the instruments wrote during a benchmark window:
 
-- ``bytes.dp*.w*.jsonl``  — one line per ``_fetch_range`` payload (§3)
-- ``steps.dp*.jsonl``     — one line per step, with the decomposed MFU (§2a)
+- ``bytes.rank*.jsonl``   — one line per returned payload (§3)
+- ``steps.rank*.jsonl``   — one line per step, with the decomposed MFU (§2a)
 - ``{object_log}.dp*``    — one line per emitted sequence (the no-replay audit)
 
-A directory containing ``run.json`` instead selects the schema-v1 benchmark
-report: all world ranks must complete the exact warmup and measurement window.
-Token counters count presentations, not unique corpus coverage; payload bytes
-cover the whole run (including prefetch), not measured-window consumption.
-
-Legacy logs report the four metrics of §2 plus the timing distribution. Two rules
-from the ADR are enforced here rather than left to the reader:
+(older runs wrote ``bytes.dp*``/``steps.dp*``; both are read) and reports the
+four metrics of §2 plus the timing distribution. A directory written by
+``benchmark_throughput.py`` (it has ``run.json``) gets the schema-v1 report
+instead. Two rules from the ADR are enforced here rather than left to the reader:
 
 - MFU is only ever printed decomposed (§11 refuses the headline number);
 - ``E_AR`` is broken into primary and replay tokens, because replay raises it
@@ -30,6 +27,7 @@ import json
 import math
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 MIB = 1024 * 1024
 TIB = 1024**4
@@ -37,11 +35,12 @@ TIB = 1024**4
 
 def _read_jsonl(paths):
     for path in paths:
-        with open(path) as handle:
-            for line in handle:
-                line = line.strip()
-                if line:
-                    yield json.loads(line)
+        text = Path(path).read_text()
+        # Only newline-terminated lines are records: a loader worker may still
+        # be appending its byte log while the benchmark reports.
+        for line in text.split("\n")[:-1]:
+            if line.strip():
+                yield json.loads(line)
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -53,17 +52,8 @@ def percentile(values: list[float], fraction: float) -> float:
     return ordered[index]
 
 
-def _byte_paths(directory: Path) -> list[Path]:
-    return sorted({
-        path
-        for pattern in ("bytes.dp*.w*.jsonl", "bytes.dp*.main.jsonl",
-                        "bytes.rank*.w*.jsonl", "bytes.rank*.main.jsonl")
-        for path in directory.glob(pattern)
-    })
-
-
 def summarise_bytes(directory: Path) -> dict:
-    return _summarise_byte_records(_read_jsonl(_byte_paths(directory)))
+    return _summarise_byte_records(_read_jsonl(sorted(directory.glob("bytes.*.jsonl"))))
 
 
 def _summarise_byte_records(records) -> dict:
@@ -102,19 +92,18 @@ def _step_seconds(record: dict) -> float:
 
 
 def summarise_steps(directory: Path, slow_threshold: float) -> dict:
-    rank_files = sorted({path for pattern in ("steps.dp*.jsonl", "steps.rank*.jsonl")
-                         for path in directory.glob(pattern)})
-    series = [list(_read_jsonl([path])) for path in rank_files]
+    paths = sorted(directory.glob("steps.*.jsonl"))
+    return _summarise_step_series([list(_read_jsonl([path])) for path in paths], slow_threshold)
+
+
+def _summarise_step_series(series: list[list[dict]], slow_threshold: float) -> dict:
+    """Aggregate one record list per rank file (world rank; DP rank in older logs)."""
     records = [record for entries in series for record in entries]
     if not records:
         return {}
-    n_ranks = max(record.get("world_size", 0) for record in records) or len(rank_files)
-    logical = [record for record in records if record.get("tp_rank", 0) == 0]
-    dp_ranks = (
-        len({record["dp_rank"] for record in logical})
-        if all("dp_rank" in record for record in logical)
-        else sum(any(record.get("tp_rank", 0) == 0 for record in entries) for entries in series)
-    )
+    n_ranks = max(record.get("world_size", 0) for record in records) or len(series)
+    # Older logs lack tp_rank: each file is then one DP rank.
+    dp_ranks = sum(any(record.get("tp_rank", 0) == 0 for record in entries) for entries in series)
 
     # Every DP rank writes its own series for the SAME steps — they run
     # concurrently, so concatenating them would report 2x the steps. Group by
@@ -270,333 +259,175 @@ def summarise_objects(prefix: Path | None) -> dict:
     }
 
 
-def _reject_constant(value):
-    raise ValueError(f"non-finite JSON value: {value}")
-
-
-def _benchmark_records(path: Path, diagnostics: list[str], *, jsonl=False):
-    """Retain valid records, but never turn a damaged log into a successful run."""
+def _load(path: Path, jsonl: bool = False) -> Any:
     try:
-        text = path.read_text()
-    except (OSError, UnicodeError) as exc:
-        diagnostics.append(f"{path.name}: {exc}")
-        return []
-    records = []
-    for line, content in enumerate(text.splitlines() if jsonl else [text], 1):
-        if jsonl and not content.strip():
+        return list(_read_jsonl([path])) if jsonl else json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{path.name}: {exc}") from exc
+
+
+def _benchmark_mfu(metas: list[dict], series: list[list[dict]], seconds: float,
+                   packing: float, stall_share: float) -> dict:
+    """Price measured TP0 tokens only; all participating GPUs supply capacity."""
+    def number(value, label, *, positive=False):
+        if (type(value) not in (int, float) or not math.isfinite(value)
+                or value < 0 or (positive and value == 0)):
+            raise ValueError(f"{label} must be a finite {'positive' if positive else 'nonnegative'} number")
+        return value
+
+    peaks, flops = [], 0.0
+    for rank, (meta, records) in enumerate(zip(metas, series, strict=True)):
+        peak = meta.get("gpu", {}).get("peak_tflops_per_gpu")
+        costs = meta.get("flops_estimate")
+        if peak is None or costs is None:
+            return {"mfu": None, "unavailable_reason":
+                    f"rank {rank}: unknown GPU variant/slice or missing FLOP metadata"}
+        peaks.append(number(peak, f"rank {rank} GPU peak", positive=True))
+        if costs["dtype"] not in ("bfloat16", "torch.bfloat16"):
+            return {"mfu": None, "unavailable_reason": "MFU peak lookup supports BF16 runs only"}
+        backbone = number(costs["backbone_flops_per_token"], "backbone FLOPs/token", positive=True)
+        modalities = {name: number(cost, f"{name} forward FLOPs/token")
+                      for name, cost in costs["modality_forward_flops_per_token"].items()}
+        if meta["tp_rank"] != 0:
             continue
-        label = f"{path.name}:{line}"
-        try:
-            record = json.loads(content, parse_constant=_reject_constant)
-            if not isinstance(record, dict):
-                raise ValueError("expected a JSON object")
-            records.append((label, record))
-        except ValueError as exc:
-            diagnostics.append(f"{label}: {exc}")
-    return records
-
-
-def _number(record, key, *, integer=False, positive=False):
-    value = record.get(key)
-    valid_type = type(value) is int if integer else type(value) in (int, float)
-    if not valid_type or not math.isfinite(value) or value < 0 or (positive and value == 0):
-        raise ValueError(f"{key} must be a {'positive' if positive else 'nonnegative'} "
-                         f"{'integer' if integer else 'finite number'}")
-    return value
-
-
-def _distribution(values, slow):
+        for record in records:
+            flops += backbone * number(record["tokens_nonpad"], "nonpadding tokens")
+            flops += 3 * sum(number(count, f"{name} loss tokens") * modalities[name]
+                             for name, count in record["loss_tokens"].items())
+    number(seconds, "measured seconds", positive=True)
+    number(flops, "estimated model FLOPs")
+    if not 0 <= packing <= 1 or not 0 <= stall_share <= 1:
+        raise ValueError("MFU packing and stall share must be in [0, 1]")
+    mfu = flops / (seconds * sum(peaks) * 1e12)
     return {
-        "mean": sum(values) / len(values),
-        "p50": percentile(values, 0.50),
-        "p95": percentile(values, 0.95),
-        "p99": percentile(values, 0.99),
-        "max": max(values),
-        "total_s": sum(values),
-        "slow_steps": sum(value > slow for value in values),
-        "slow_threshold_s": slow,
+        "mfu": mfu,
+        "mfu_busy": mfu / ((1 - stall_share) * packing) if packing and stall_share < 1 else None,
+        "stall_share": stall_share, "utilisation_packing": packing,
+        "model_flops": flops, "model_tflops_per_gpu": flops / seconds / len(metas) / 1e12,
+        "peak_tflops_by_rank": peaks,
+        "method": "Estimated upper bound: nanotron full-sequence attention FLOPs, padding excluded, "
+                  "plus modality forward FLOPs x3 for forward/backward. Not profiled executed FLOPs.",
     }
 
 
 def build_benchmark_report(directory: Path, slow: float = 60.0) -> dict:
-    diagnostics: list[str] = []
-    report = {
-        "schema_version": 1,
-        "status": "partial",
-        "telemetry_dir": str(directory),
-        "run": {},
-        "ranks": {},
-        "diagnostics": diagnostics,
-        "warnings": [],
-        "metrics": {},
-        "wire": {},
-        "count_semantics": "Token, target-value and row counts are presentations, "
-                           "not unique-object counts or corpus coverage. Useful tokens "
-                           "are nonpadding tokens (including structural tokens).",
-    }
-    runs = _benchmark_records(directory / "run.json", diagnostics)
-    if not runs:
-        return report
-    run = report["run"] = runs[0][1]
+    """Schema-v1 report: ``complete`` only if every world rank ran the exact window."""
+    report = {"schema_version": 1, "status": "partial", "telemetry_dir": str(directory),
+              "diagnostics": [], "warnings": []}
+    problems = report["diagnostics"]
     try:
-        if _number(run, "schema_version", integer=True) != 1:
-            raise ValueError("unsupported schema_version (expected 1)")
-        world = _number(run, "world_size", integer=True, positive=True)
-        warmup = _number(run, "warmup_steps", integer=True)
-        measured = _number(run, "steps", integer=True, positive=True)
-        topology = run.get("parallelism")
-        if not isinstance(topology, dict):
-            raise ValueError("parallelism must be an object")
-        for key in ("dp", "tp", "pp", "context_parallel_size", "expert_parallel_size"):
-            _number(topology, key, integer=True, positive=True)
-        if any(topology[key] != 1 for key in ("pp", "context_parallel_size", "expert_parallel_size")):
-            raise ValueError("schema v1 requires pp=context_parallel_size=expert_parallel_size=1")
-        if topology["dp"] * topology["tp"] != world:
-            raise ValueError("world_size must equal dp * tp")
-        for key in ("baseline_config", "overrides"):
-            if not isinstance(run.get(key), dict):
-                raise ValueError(f"{key} must be an object")
-    except ValueError as exc:
-        diagnostics.append(f"run.json: {exc}")
+        run = report["run"] = _load(directory / "run.json")
+        world, warmup, measured = run["world_size"], run["warmup_steps"], run["steps"]
+        metas = [_load(directory / f"rank{rank}.json") for rank in range(world)]
+        series = [_load(directory / f"steps.rank{rank}.jsonl", jsonl=True) for rank in range(world)]
+    except (ValueError, KeyError) as exc:
+        problems.append(f"{type(exc).__name__}: {exc}")
+        return report
+    report["ranks"] = {str(rank): meta for rank, meta in enumerate(metas)}
+    for rank, (meta, records) in enumerate(zip(metas, series, strict=True)):
+        if meta.get("status") != "complete":
+            problems.append(f"rank {rank}: status is {meta.get('status')!r}, not 'complete'")
+        start = meta.get("start_step", 0)
+        if [record.get("step") for record in records] != list(range(start + 1, start + warmup + measured + 1)):
+            problems.append(f"steps.rank{rank}.jsonl: expected exactly steps {start + 1}-{start + warmup + measured}")
+        for consumer in [f"w{worker}" for worker in range(meta.get("num_loading_workers", 0))] or ["main"]:
+            if not (directory / f"bytes.rank{rank}.{consumer}.jsonl").is_file():
+                problems.append(f"bytes.rank{rank}.{consumer}.jsonl: missing (byte probe never installed)")
+    if problems:
         return report
 
-    for pattern, expected in (
-        ("rank*.json", {f"rank{rank}.json" for rank in range(world)}),
-        ("steps.rank*.jsonl", {f"steps.rank{rank}.jsonl" for rank in range(world)}),
-    ):
-        actual = {path.name for path in directory.glob(pattern)}
-        if actual - expected:
-            diagnostics.append(f"Unexpected files: {sorted(actual - expected)}")
-    ranks, all_steps, identities, starts = {}, {}, set(), set()
-    expected_payloads, expected_probes = {}, set()
-    report["observed_step_records"] = {}
-    for rank in range(world):
-        metadata = _benchmark_records(directory / f"rank{rank}.json", diagnostics)
-        records = _benchmark_records(directory / f"steps.rank{rank}.jsonl", diagnostics, jsonl=True)
-        report["observed_step_records"][str(rank)] = len(records)
-        if not metadata:
-            continue
-        label, meta = metadata[0]
-        report["ranks"][str(rank)] = meta
-        try:
-            if _number(meta, "rank", integer=True) != rank:
-                raise ValueError(f"rank identity does not match filename (expected {rank})")
-            dp = _number(meta, "dp_rank", integer=True)
-            tp = _number(meta, "tp_rank", integer=True)
-            if dp >= topology["dp"] or tp >= topology["tp"]:
-                raise ValueError("dp_rank/tp_rank outside configured topology")
-            if (dp, tp) in identities:
-                raise ValueError(f"duplicate logical rank identity {(dp, tp)}")
-            identities.add((dp, tp))
-            if meta.get("status") != "complete":
-                raise ValueError(f"rank status is {meta.get('status')!r}, not 'complete'")
-            start = _number(meta, "start_step", integer=True)
-            starts.add(start)
-            for key in ("startup_s", "first_batch_s", "whole_run_s"):
-                _number(meta, key, positive=key == "whole_run_s")
-            workers = _number(meta, "num_loading_workers", integer=True)
-            ranks[rank] = meta
-        except ValueError as exc:
-            diagnostics.append(f"{label}: {exc}")
-            continue
-        for worker in range(workers) if workers else [None]:
-            consumer = "main" if worker is None else f"w{worker}"
-            stem = f"rank{rank}.{consumer}"
-            expected_probes.add(f"probe.{stem}.json")
-            expected_payloads[f"bytes.{stem}.jsonl"] = (rank, dp, worker)
-            if not (directory / f"bytes.{stem}.jsonl").is_file():
-                diagnostics.append(f"bytes.{stem}.jsonl: missing payload log (empty is valid)")
-            for label, probe in _benchmark_records(directory / f"probe.{stem}.json", diagnostics):
-                try:
-                    for key, expected in (("rank", rank), ("dp_rank", dp)):
-                        if _number(probe, key, integer=True) != expected:
-                            raise ValueError(f"{key} identity mismatch (expected {expected})")
-                    if "worker" not in probe or probe["worker"] != worker:
-                        raise ValueError(f"worker identity mismatch (expected {worker})")
-                    if worker is not None:
-                        _number(probe, "worker", integer=True)
-                    _number(probe, "pid", integer=True, positive=True)
-                    instruments = probe.get("instruments")
-                    if not isinstance(instruments, list) or not all(
-                        name in instruments for name in ("_fetch_range", "stream.read")
-                    ):
-                        raise ValueError("instruments must include _fetch_range and stream.read")
-                except ValueError as exc:
-                    diagnostics.append(f"{label}: {exc}")
-        steps = all_steps[rank] = {}
-        previous_elapsed, previous_step = 0.0, start
-        for label, record in records:
-            try:
-                for key, expected in (("rank", rank), ("dp_rank", dp), ("tp_rank", tp), ("world_size", world)):
-                    if _number(record, key, integer=True) != expected:
-                        raise ValueError(f"{key} identity mismatch (expected {expected})")
-                step = _number(record, "step", integer=True)
-                if step in steps:
-                    raise ValueError(f"duplicate step {step}")
-                elapsed = _number(record, "elapsed_s", positive=True)
-                _number(record, "step_seconds", positive=True)
-                _number(record, "loader_wait_s")
-                if elapsed <= previous_elapsed:
-                    raise ValueError("elapsed_s must increase in step-log order")
-                if step <= previous_step:
-                    raise ValueError("steps must increase in step-log order")
-                for key in ("tokens_nonpad", "tokens_total", "rows", "micro_batches"):
-                    _number(record, key, integer=True, positive=key == "micro_batches")
-                if record["tokens_nonpad"] > record["tokens_total"]:
-                    raise ValueError("tokens_nonpad exceeds tokens_total")
-                for key in ("loss_tokens", "target_values"):
-                    if not isinstance(record.get(key), dict):
-                        raise ValueError(f"{key} must be an object of modality counts")
-                    for modality in record[key]:
-                        _number(record[key], modality, integer=True)
-                steps[step] = record
-                previous_elapsed, previous_step = elapsed, step
-            except ValueError as exc:
-                diagnostics.append(f"{label}: {exc}")
-        expected_steps = set(range(start + 1, start + warmup + measured + 1))
-        if set(steps) != expected_steps:
-            diagnostics.append(f"rank {rank}: missing steps {sorted(expected_steps - steps.keys())}; "
-                               f"unexpected steps {sorted(steps.keys() - expected_steps)}")
-    expected_identities = {(dp, tp) for dp in range(topology["dp"]) for tp in range(topology["tp"])}
-    if identities != expected_identities:
-        diagnostics.append("logical dp_rank/tp_rank identities do not cover the configured topology")
-    if len(starts) > 1:
-        diagnostics.append("start_step differs across ranks")
-
-    for pattern, expected in (("probe.rank*.json", expected_probes),
-                              ("bytes.rank*.jsonl", set(expected_payloads))):
-        unexpected = {path.name for path in directory.glob(pattern)} - expected
-        if unexpected:
-            diagnostics.append(f"Unexpected instrumentation files: {sorted(unexpected)}")
-    payloads = []
-    for path in _byte_paths(directory):
-        for label, record in _benchmark_records(path, diagnostics, jsonl=True):
-            try:
-                if not isinstance(record.get("source"), str) or not record["source"]:
-                    raise ValueError("source must be a nonempty string")
-                _number(record, "bytes", integer=True)
-                _number(record, "t")
-                _number(record, "wait_s")
-                if path.name in expected_payloads:
-                    for key, expected in zip(("rank", "dp_rank", "worker"), expected_payloads[path.name], strict=True):
-                        if key in record and (record[key] != expected or type(record[key]) is not type(expected)):
-                            raise ValueError(f"{key} identity mismatch (expected {expected})")
-                payloads.append(record)
-            except ValueError as exc:
-                diagnostics.append(f"{label}: {exc}")
-    wire = report["wire"] = _summarise_byte_records(payloads)
-    wire["whole_run_bytes_per_s"] = None
-    wire["interval"] = (
-        "All returned payload bytes from script entry through fetcher shutdown (loader close) / "
-        "max(rank whole_run_s), using local durations, not cross-node clocks. "
-        "Includes prefetch and repeated returns; not measured-window consumption or link capacity."
-    )
-    if diagnostics:
-        return report
-
-    start = next(iter(starts))
-    step_ids = range(start + warmup + 1, start + warmup + measured + 1)
-    warmup_times = {
-        rank: records[start + warmup]["elapsed_s"] if warmup else 0.0
-        for rank, records in all_steps.items()
-    }
-    elapsed = max(records[start + warmup + measured]["elapsed_s"] - warmup_times[rank]
-                  for rank, records in all_steps.items())
-    durations = [max(records[step]["step_seconds"] for records in all_steps.values()) for step in step_ids]
-    waits = [max(records[step]["loader_wait_s"] for records in all_steps.values()) for step in step_ids]
-    logical = [records[step] for rank, records in all_steps.items()
-               if ranks[rank]["tp_rank"] == 0 for step in step_ids]
-    counts: dict = {key: sum(record[key] for record in logical)
-                    for key in ("tokens_nonpad", "tokens_total", "rows", "micro_batches")}
-    loss_tokens, target_values = Counter(), Counter()
-    for record in logical:
-        loss_tokens.update(record["loss_tokens"])
-        target_values.update(record["target_values"])
-    counts.update(loss_tokens=dict(loss_tokens), target_values=dict(target_values))
-    loss_total = sum(loss_tokens.values())
-    timing = {
-        "startup_s": max(meta["startup_s"] for meta in ranks.values()),
-        "first_batch_s": max(meta["first_batch_s"] for meta in ranks.values()),
-        "warmup_s": max(warmup_times.values()),
-        "measured_s": elapsed,
-        "whole_run_s": max(meta["whole_run_s"] for meta in ranks.values()),
-        "warmup_steps": warmup,
-        "measured_steps": measured,
-        "interval": "max across all world ranks of last.elapsed_s - warmup_end.elapsed_s "
-                    "(warmup_end=0 with no warmup); absolute steps are offset by start_step.",
-    }
-    report["metrics"] = {
-        "timing": timing,
-        "counts": counts,
-        "throughput": {
-            "useful_tokens_per_s": counts["tokens_nonpad"] / elapsed,
-            "useful_tokens_per_s_per_gpu": counts["tokens_nonpad"] / elapsed / world,
-            "loss_tokens_per_s": loss_total / elapsed,
-            "rows_per_s": counts["rows"] / elapsed,
-        },
-        "modalities": {
-            name: {
-                "loss_tokens": loss_tokens[name],
-                "loss_tokens_per_s": loss_tokens[name] / elapsed,
-                "share": loss_tokens[name] / loss_total if loss_total else 0.0,
-                "target_values": target_values[name],
-                "target_values_per_s": target_values[name] / elapsed,
-            }
-            for name in sorted(loss_tokens.keys() | target_values.keys())
-        },
-        "packing": counts["tokens_nonpad"] / counts["tokens_total"] if counts["tokens_total"] else 0.0,
-        "step_seconds": _distribution(durations, slow),
-        "waits": {
-            "loader_wait_s": sum(waits),
-            "stall_share": sum(waits) / sum(durations),
-            "interval": "sum(per-step max-rank loader_wait_s) / sum(per-step max-rank step_seconds); "
-                        "time-weighted, not the mean of per-step ratios or a critical-path decomposition.",
-        },
-    }
-    wire["whole_run_bytes_per_s"] = wire["total_bytes"] / timing["whole_run_s"]
-    if measured < 200 or elapsed < 60:
-        report["warnings"].append(
-            "Short measured window (<200 steps OR <60s heuristic); "
-            "startup, stalls and modality mix may dominate."
+    try:
+        # Every step ends with a CUDA sync and a world barrier, so the summed
+        # slowest-rank step times are the window's synchronized wall time.
+        window = _summarise_step_series([records[warmup:] for records in series], slow)
+        seconds = window["step_seconds"]["total_s"]
+        stalls = window.pop("mfu")  # legacy per-step MFU is not the benchmark's GPU-aware estimate
+        mfu = _benchmark_mfu(metas, [records[warmup:] for records in series], seconds,
+                             stalls["utilisation_packing"], stalls["stall_share"])
+        # Payload: everything returned (t + wait_s) between script entry and the end
+        # of training on each rank, on that rank's own host clock, so a report
+        # rebuilt after in-flight prefetch lands gives the same total.
+        ended_at = [meta["ended_at"] for meta in metas]
+        wire = _summarise_byte_records(
+            record for record in _read_jsonl(sorted(directory.glob("bytes.rank*.jsonl")))
+            if record["t"] + record["wait_s"] <= ended_at[record["rank"]]
         )
-    report["status"] = "complete"
+        whole_run_s = max(meta["whole_run_s"] for meta in metas)
+        wire["bytes_per_s"] = wire["total_bytes"] / whole_run_s
+        metrics = {
+            "useful_tokens_per_s": window["tokens_nonpad"] / seconds,
+            "useful_tokens_per_s_per_gpu": window["tokens_nonpad"] / seconds / world,
+            "loss_tokens_per_s": {name: count / seconds for name, count in window["loss_tokens"].items()},
+            "packing": stalls["utilisation_packing"],
+            "stall_share": stalls["stall_share"],
+            "mfu": mfu,
+            "timing": {
+                "startup_s": max(meta["startup_s"] for meta in metas),
+                "first_step_loader_wait_s": max(records[0]["loader_wait_s"] for records in series),
+                "warmup_s": max(records[warmup - 1]["elapsed_s"] for records in series) if warmup else 0.0,
+                "measured_s": seconds,
+                "whole_run_s": whole_run_s,
+            },
+            "window": window,
+        }
+    except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+        problems.append(f"malformed input: {type(exc).__name__}: {exc}")
+        return report
+    report.update(status="complete", metrics=metrics, wire=wire)
+    if measured < 200 or seconds < 60:
+        report["warnings"].append("short window (<200 steps or <60 s): limited evidence, "
+                                  "not a stable hardware comparison")
     return report
 
 
 def _render_benchmark(report: dict) -> str:
-    lines = [f"# Benchmark v{report['schema_version']} — {report['status'].upper()}"]
+    lines = [f"# Throughput benchmark (schema v{report['schema_version']}): {report['status'].upper()}"]
     if report["status"] != "complete":
-        lines.append("No headline throughput: incomplete or invalid benchmark input.")
-        lines.extend(f"  ERROR: {message}" for message in report["diagnostics"])
-        return "\n".join(lines)
+        return "\n".join(lines + [f"  {problem}" for problem in report["diagnostics"]])
     metrics, wire = report["metrics"], report["wire"]
-    rate, timing, steps = metrics["throughput"], metrics["timing"], metrics["step_seconds"]
+    timing, window = metrics["timing"], metrics["window"]
+    steps = window["step_seconds"]
     lines += [
-        f"Useful tokens/s: {rate['useful_tokens_per_s']:,.1f} global; "
-        f"{rate['useful_tokens_per_s_per_gpu']:,.1f}/GPU ({report['run']['world_size']} GPUs)",
-        f"Packing: {metrics['packing']:.1%}; row presentations/s: {rate['rows_per_s']:,.1f}",
-        f"Timing (max across ranks): startup {timing['startup_s']:.2f}s; "
-        f"first batch {timing['first_batch_s']:.2f}s; warmup {timing['warmup_steps']} steps / "
-        f"{timing['warmup_s']:.2f}s; measured {timing['measured_steps']} steps / {timing['measured_s']:.2f}s",
-        f"Steps (max rank per step): mean {steps['mean']:.2f}s; p50 {steps['p50']:.2f}s; "
-        f"p95 {steps['p95']:.2f}s; p99 {steps['p99']:.2f}s; max {steps['max']:.2f}s; "
-        f"slow(>{steps['slow_threshold_s']:g}s) {steps['slow_steps']}",
-        f"Loader waits (per-step max ranks): {metrics['waits']['loader_wait_s']:.2f}s; "
-        f"time-weighted stall share {metrics['waits']['stall_share']:.1%}",
-        "Modalities (loss-token presentations/s; share of loss tokens; target values/s):",
+        f"Useful tokens/s: {metrics['useful_tokens_per_s']:,.1f} "
+        f"({metrics['useful_tokens_per_s_per_gpu']:,.1f}/GPU over {report['run']['world_size']} GPUs)",
+        f"Packing {metrics['packing']:.1%}; stall share {metrics['stall_share']:.1%}; "
+        f"{window['rows_per_s']:,.1f} rows/s",
+        f"Timing: startup {timing['startup_s']:.1f}s; first-step loader wait "
+        f"{timing['first_step_loader_wait_s']:.1f}s; warmup {timing['warmup_s']:.1f}s; "
+        f"measured {window['n_steps']} steps / {timing['measured_s']:.1f}s",
+        f"Step seconds: mean {steps['mean']:.2f}  p50 {steps['p50']:.2f}  p95 {steps['p95']:.2f}  "
+        f"p99 {steps['p99']:.2f}  slow(>{steps['slow_threshold_s']:.0f}s) {steps['slow_steps']}",
+        f"Payload: {wire['total_mib']:,.1f} MiB, {wire['bytes_per_s'] / MIB:,.2f} MiB/s over the whole run",
+        "Composition: " + ", ".join(f"{name} {share:.1%}" for name, share in window["composition"].items()),
     ]
-    for name, stats in metrics["modalities"].items():
-        lines.append(f"  {name}: {stats['loss_tokens_per_s']:,.1f}/s; {stats['share']:.1%}; "
-                     f"{stats['target_values_per_s']:,.1f} values/s")
-    lines += [
-        f"Payload: {wire['total_bytes']:,} bytes ({wire['total_mib']:.2f} MiB); "
-        f"{wire['whole_run_bytes_per_s'] / MIB:.2f} MiB/s over whole run {timing['whole_run_s']:.2f}s; "
-        f"summed fetch wait {wire['fetch_wait_s']:.2f}s",
-        wire["interval"],
-        report["count_semantics"],
-    ]
-    lines.extend(f"WARNING: {message}" for message in report["warnings"])
-    return "\n".join(lines)
+    mfu = metrics["mfu"]
+    if mfu["mfu"] is None:
+        lines.append(f"MFU: unavailable ({mfu['unavailable_reason']})")
+    else:
+        busy = f"{mfu['mfu_busy']:.2%}" if mfu["mfu_busy"] is not None else "unavailable"
+        lines += [
+            f"MFU estimate: {mfu['mfu']:.2%} = busy {busy} x non-stalled "
+            f"{1 - mfu['stall_share']:.3f} x packing {mfu['utilisation_packing']:.3f}; "
+            f"{mfu['model_tflops_per_gpu']:.2f} estimated TFLOP/s/GPU",
+            mfu["method"],
+        ]
+        devices = Counter((meta["gpu"]["name"], meta["gpu"]["peak_tflops_per_gpu"])
+                          for meta in report["ranks"].values())
+        lines.append("GPU dense BF16 peaks: " + "; ".join(
+            f"{count} x {name}: {peak:g} TFLOP/s each" for (name, peak), count in devices.items()))
+    seen_hosts = set()
+    for rank, meta in report["ranks"].items():
+        host = meta.get("host", f"rank {rank}")
+        if host in seen_hosts:
+            continue
+        seen_hosts.add(host)
+        network = meta.get("network", {})
+        speed = network.get("max_active_link_speed_mbps")
+        link = (f"{speed / 1000:g} Gbit/s ({', '.join(network['fastest_active_interfaces'])})"
+                if speed is not None else "unavailable")
+        lines.append(f"Fastest active physical NIC [{host}]: {link}")
+    lines.append("NIC link speed is not internet/downlink capacity or a measurement of the HF route.")
+    return "\n".join(lines + [f"WARNING: {warning}" for warning in report["warnings"]])
 
 
 def build_report(directory: Path, object_log: Path | None, arm: str, slow: float):
@@ -715,21 +546,15 @@ def main():
     parser.add_argument("--out", default=None, help="optional JSON output path")
     args = parser.parse_args()
 
-    directory = Path(args.telemetry)
-    if args.out:
-        raw_paths = {p.resolve() for pattern in ("run.json", "rank*.json", "probe.*.json", "*.jsonl")
-                     for p in directory.glob(pattern)}
-        if Path(args.out).resolve() in raw_paths:
-            parser.error("--out must not overwrite raw benchmark inputs")
     report = build_report(
-        directory,
+        Path(args.telemetry),
         Path(args.object_log) if args.object_log else None,
         args.arm,
         args.slow_seconds,
     )
     print(render(report))
     if args.out:
-        Path(args.out).write_text(json.dumps(report, indent=2, allow_nan=False))
+        Path(args.out).write_text(json.dumps(report, indent=2))
     return 1 if report.get("status") == "partial" else 0
 
 

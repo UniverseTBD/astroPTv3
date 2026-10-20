@@ -15,9 +15,8 @@ Two halves, because the numbers live in different processes:
   (non-padding tokens, loss-bearing tokens and target values per modality,
   packing utilisation) plus the measured wait on ``next()``.
 
-``scripts/bench_report.py`` reports measured-step tokens separately from
-whole-run payload bytes: prefetch is not measured-window consumption.
-Its legacy optional ``--object-log`` join (distinct base
+The two halves are joined offline by ``scripts/bench_report.py`` on
+(rank, wall-clock window). Its optional ``--object-log`` join (distinct base
 objects and replica counts via ``#n`` suffixes) needs a per-object log the
 loader no longer writes (ADR 0015 dropped ``object_id_log`` with the rest of
 the dataset-checkpoint machinery); byte and step-counter telemetry are
@@ -104,20 +103,14 @@ def install_byte_probe(rank: int = 0, worker: int | None = None) -> bool:
 
     world_rank = int(os.environ.get("RANK", rank))
     consumer = "main" if worker is None else f"w{worker}"
-    stem = f"rank{world_rank}.{consumer}"
-    log_path = directory / f"bytes.{stem}.jsonl"
-    log_path.touch()
+    log_path = directory / f"bytes.rank{world_rank}.{consumer}.jsonl"
+    log_path.touch()  # an empty log still proves the probe was installed
     lock = Lock()
-    (directory / f"probe.{stem}.json").write_text(json.dumps({
-        "rank": world_rank, "dp_rank": rank, "worker": worker,
-        "pid": os.getpid(), "instruments": ["_fetch_range", "stream.read"],
-    }))
 
     def record(file, payload, start, began, clock):
         path = str(getattr(file, "path", ""))
         entry = {
-            "t": began, "completed_t": time.time(),
-            "wait_s": time.perf_counter() - clock,
+            "t": began, "wait_s": time.perf_counter() - clock,
             "rank": world_rank, "dp_rank": rank, "worker": worker,
             "source": source_of_path(path), "path": path,
             "start": start, "end": start + len(payload), "bytes": len(payload),
@@ -259,36 +252,6 @@ class TelemetryLoader:
 
     def __init__(self, loader):
         self._loader = loader
-        self._iterator = None
-        self._first = None
-
-    def prime(self) -> float:
-        """Fetch and retain batch one; startup wait is not a training stall."""
-        if self._iterator is not None:
-            raise RuntimeError("loader already started")
-        began = time.perf_counter()
-        self._iterator = iter(self._loader)
-        self._first = next(self._iterator)
-        return time.perf_counter() - began
-
-    def close(self) -> None:
-        """Stop prefetch before reporting the whole-run payload total."""
-        iterator, self._iterator = self._iterator, None
-        self._first = None
-        if iterator is None:
-            return
-        if hasattr(iterator, "_shutdown_workers"):
-            workers = list(iterator._workers)
-            iterator._shutdown_workers()
-            # PyTorch may terminate overdue workers without joining them.
-            for worker in workers:
-                worker.join()
-        else:
-            # PyTorch exposes no public close for a single-process iterator.
-            fetcher = getattr(iterator, "_dataset_fetcher", None)
-            source = getattr(fetcher, "dataset_iter", iterator)
-            if hasattr(source, "close"):
-                source.close()
 
     def __getattr__(self, name):
         return getattr(self._loader, name)
@@ -297,16 +260,11 @@ class TelemetryLoader:
         return len(self._loader)
 
     def __iter__(self):
-        if self._iterator is None:
-            self._iterator = iter(self._loader)
-        if self._first is not None:
-            batch, self._first = self._first, None
-            observe_micro_batch(batch, 0.0)
-            yield batch
+        iterator = iter(self._loader)
         while True:
             began = time.perf_counter()
             try:
-                batch = next(self._iterator)
+                batch = next(iterator)
             except StopIteration:
                 return
             observe_micro_batch(batch, time.perf_counter() - began)

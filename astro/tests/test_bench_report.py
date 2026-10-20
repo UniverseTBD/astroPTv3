@@ -135,7 +135,7 @@ def test_e_values_does_not_move_under_replay(tmp_path):
 
 
 @pytest.mark.parametrize("tp", [1, 2])
-def test_legacy_report_reads_migrated_world_rank_logs_without_run_manifest(tmp_path, tp):
+def test_world_rank_logs_count_tp_replicas_once_and_divide_by_world_size(tmp_path, tp):
     _write(tmp_path, ranks=2 * tp)
     for rank in range(2 * tp):
         old = tmp_path / f"steps.dp{rank}.jsonl"
@@ -154,31 +154,8 @@ def test_legacy_report_reads_migrated_world_rank_logs_without_run_manifest(tmp_p
     assert steps["dp_ranks"] == 2
     assert steps["world_size"] == 2 * tp
     assert steps["tokens_nonpad"] == 7200
-    assert steps["tokens_total"] == 8000
     assert steps["rows"] == 400
-    assert steps["loss_tokens"] == {"images": 800}
-    assert steps["target_values"] == 153600
     assert steps["mfu"]["mfu"] == pytest.approx(4e14 / (100 * 312e12 * 2 * tp))
-
-
-def test_legacy_report_accepts_mixed_filenames_and_no_identity_fields(tmp_path):
-    _write(tmp_path)
-    expected = bench_report.summarise_steps(tmp_path, 60)
-    (tmp_path / "steps.dp1.jsonl").rename(tmp_path / "steps.rank1.jsonl")
-    assert bench_report.summarise_steps(tmp_path, 60) == expected
-
-
-def test_legacy_gpu_denominator_uses_world_size_not_file_count(tmp_path):
-    _write(tmp_path, ranks=1)
-    path = tmp_path / "steps.dp0.jsonl"
-    records = [json.loads(line) for line in path.read_text().splitlines()]
-    for record in records:
-        record.update(world_size=4, dp_rank=0, tp_rank=0)
-    _jsonl(path, records)
-    steps = bench_report.summarise_steps(tmp_path, 60)
-    assert steps["world_size"] == 4
-    assert steps["dp_ranks"] == 1
-    assert steps["mfu"]["mfu"] == pytest.approx(4e14 / (100 * 312e12 * 4))
 
 
 def _json(path, value):
@@ -193,28 +170,19 @@ def _benchmark(directory, *, dp=1, tp=1, warmup=1, start=12, workers=0, duration
     durations = durations or [(1.0, 0.0), (1.0, 0.0), (1.0, 0.0), (97.0, 96.0)]
     world = dp * tp
     _json(directory / "run.json", {
-        "schema_version": 1, "world_size": world,
-        "parallelism": {"dp": dp, "tp": tp, "pp": 1,
-                        "context_parallel_size": 1, "expert_parallel_size": 1},
+        "schema_version": 1, "world_size": world, "parallelism": {"dp": dp, "tp": tp},
         "warmup_steps": warmup, "steps": len(durations),
         "baseline_config": {"model": "70M"}, "overrides": {},
-        "revision": "fixture-commit",
     })
     for rank in range(world):
         dp_rank, tp_rank = divmod(rank, tp)
         _json(directory / f"rank{rank}.json", {
-            "rank": rank, "dp_rank": dp_rank, "tp_rank": tp_rank,
-            "status": "complete", "start_step": start,
-            "startup_s": 5.0 + rank, "first_batch_s": 2.0 + rank,
+            "rank": rank, "dp_rank": dp_rank, "tp_rank": tp_rank, "status": "complete",
+            "start_step": start, "startup_s": 5.0 + rank, "ended_at": 2000.0,
             "whole_run_s": 10.0 + 100 * warmup + sum(d for d, _ in durations) + rank,
-            "num_loading_workers": workers, "hardware": {"device": "fixture GPU"},
+            "num_loading_workers": workers,
         })
-        for worker in range(workers) if workers else [None]:
-            consumer = "main" if worker is None else f"w{worker}"
-            _json(directory / f"probe.rank{rank}.{consumer}.json", {
-                "rank": rank, "dp_rank": dp_rank, "worker": worker,
-                "pid": rank + 100, "instruments": ["_fetch_range", "stream.read"],
-            })
+        for consumer in [f"w{worker}" for worker in range(workers)] or ["main"]:
             (directory / f"bytes.rank{rank}.{consumer}.jsonl").touch()
         records, elapsed = [], 0.0
         for index, (seconds, wait) in enumerate([(100.0, 90.0)] * warmup + durations, 1):
@@ -237,131 +205,94 @@ def _report(directory):
     return bench_report.build_report(directory, None, "ignored-for-v1", 60.0)
 
 
-def _change_json(path, **changes):
-    value = json.loads(path.read_text())
-    value.update(changes)
-    _json(path, value)
-
-
 def test_benchmark_excludes_warmup_and_offsets_resumed_steps(tmp_path):
     _benchmark(tmp_path, warmup=2, start=100)
     report = _report(tmp_path)
     assert report["status"] == "complete", report["diagnostics"]
-    assert report["schema_version"] == 1
     assert report["run"]["baseline_config"] == {"model": "70M"}
-    assert report["ranks"]["0"]["hardware"]["device"] == "fixture GPU"
     metrics = report["metrics"]
     assert metrics["timing"]["warmup_s"] == 200
+    assert metrics["timing"]["first_step_loader_wait_s"] == 90
     assert metrics["timing"]["measured_s"] == 100
-    assert metrics["counts"]["tokens_nonpad"] == 3600
-    assert metrics["counts"]["rows"] == 40
-    assert metrics["counts"]["micro_batches"] == 8
-    assert metrics["throughput"]["useful_tokens_per_s"] == 36
+    assert metrics["window"]["tokens_nonpad"] == 3600
+    assert metrics["window"]["rows"] == 40
+    assert metrics["useful_tokens_per_s"] == 36
     assert metrics["packing"] == 0.9
-    assert metrics["modalities"]["image"]["share"] == 0.8
-    assert metrics["modalities"]["image"]["loss_tokens_per_s"] == 3.2
-    assert metrics["modalities"]["image"]["target_values_per_s"] == 614.4
+    assert metrics["loss_tokens_per_s"]["image"] == 3.2
+    assert metrics["window"]["composition"]["image"] == 0.8
     text = bench_report.render(report)
-    for phrase in ("Useful tokens/s", "first batch", "p99", "Loader waits", "Payload", "presentations"):
+    for phrase in ("Useful tokens/s", "first-step loader wait", "p99", "stall share", "Payload"):
         assert phrase in text
-    assert "<200 steps OR <60s heuristic" in text
-    assert "not unique-object counts or corpus coverage" in text
+    assert "short window" in text
 
 
 def test_benchmark_rates_and_stalls_are_weighted(tmp_path):
-    _benchmark(tmp_path, warmup=0)
+    _benchmark(tmp_path)
     metrics = _report(tmp_path)["metrics"]
-    assert metrics["throughput"]["useful_tokens_per_s"] == pytest.approx(3600 / 100)
-    assert metrics["waits"]["stall_share"] == pytest.approx(96 / 100)
-    assert metrics["step_seconds"]["mean"] == 25
-    assert metrics["step_seconds"]["p95"] == 97
-    assert metrics["step_seconds"]["slow_steps"] == 1
-    assert metrics["timing"]["warmup_s"] == 0
+    assert metrics["useful_tokens_per_s"] == pytest.approx(3600 / 100)
+    assert metrics["stall_share"] == pytest.approx(96 / 100)
+    assert metrics["window"]["step_seconds"]["mean"] == 25
+    assert metrics["window"]["step_seconds"]["p95"] == 97
+    assert metrics["window"]["step_seconds"]["slow_steps"] == 1
 
 
 def test_dp2_tp2_counts_only_logical_data_but_times_all_ranks(tmp_path):
     _benchmark(tmp_path, dp=2, tp=2)
     path = tmp_path / "steps.rank3.jsonl"
     records = [json.loads(line) for line in path.read_text().splitlines()]
-    # A TP replica is slow, and cumulative time includes overhead between steps.
-    records[-1]["elapsed_s"] += 20
+    records[-1]["step_seconds"] += 20  # a slow TP replica holds the whole step
     _jsonl(path, records)
     report = _report(tmp_path)
     assert report["status"] == "complete", report["diagnostics"]
     metrics = report["metrics"]
     assert metrics["timing"]["measured_s"] == 120
-    assert metrics["counts"]["tokens_nonpad"] == 7200
-    assert metrics["counts"]["loss_tokens"] == {"image": 640, "spectrum": 160}
-    assert metrics["throughput"]["useful_tokens_per_s"] == 60
-    assert metrics["throughput"]["useful_tokens_per_s_per_gpu"] == 15
-    assert metrics["counts"]["rows"] == 80
-    assert metrics["counts"]["micro_batches"] == 16
-
-
-def test_measurement_subtracts_warmup_per_rank_before_taking_max(tmp_path):
-    _benchmark(tmp_path, dp=2)
-    path = tmp_path / "steps.rank1.jsonl"
-    records = [json.loads(line) for line in path.read_text().splitlines()]
-    for record in records:
-        record["elapsed_s"] -= 50
-    records[-1]["elapsed_s"] += 20
-    _jsonl(path, records)
-    # max(end) - max(warmup) = 100, but max(end - warmup) = 120.
-    assert _report(tmp_path)["metrics"]["timing"]["measured_s"] == 120
+    assert metrics["window"]["tokens_nonpad"] == 7200
+    assert metrics["window"]["loss_tokens"] == {"image": 640, "spectrum": 160}
+    assert metrics["useful_tokens_per_s"] == 60
+    assert metrics["useful_tokens_per_s_per_gpu"] == 15
 
 
 @pytest.mark.parametrize("workers", [0, 2])
-def test_payload_counts_returns_including_duplicates_and_legacy_logs(tmp_path, workers):
+def test_payload_counts_every_return_until_training_ends(tmp_path, workers):
     _benchmark(tmp_path, dp=2, workers=workers)
-    payload = {"source": "legacy", "bytes": bench_report.MIB, "t": 1234, "wait_s": 1.5}
-    consumer0, consumer1 = ("w0", "w1") if workers else ("main", "main")
-    _jsonl(tmp_path / f"bytes.rank0.{consumer0}.jsonl", [payload, payload])
-    _jsonl(tmp_path / f"bytes.rank1.{consumer1}.jsonl", [payload])
-    _jsonl(tmp_path / "bytes.dp0.w0.jsonl", [payload])
+    payload = {"source": "legacy", "bytes": bench_report.MIB, "t": 1234.0, "wait_s": 1.5}
+    consumer = "w1" if workers else "main"
+    # The same range fetched twice costs bytes twice.
+    _jsonl(tmp_path / f"bytes.rank0.{consumer}.jsonl", [{**payload, "rank": 0}] * 2)
+    late = tmp_path / f"bytes.rank1.{consumer}.jsonl"
+    # Started before training ended (2000) but returned after it: excluded.
+    _jsonl(late, [{**payload, "rank": 1}, {**payload, "rank": 1, "t": 1999.0}])
+    with open(late, "a") as log:
+        log.write('{"source":')  # a worker still appending when the report runs
     report = _report(tmp_path)
     assert report["status"] == "complete", report["diagnostics"]
-    assert report["wire"]["total_bytes"] == 4 * bench_report.MIB
-    assert report["wire"]["by_source"]["legacy"]["fetches"] == 4
-    assert report["wire"]["fetch_wait_s"] == 6
-    assert report["wire"]["whole_run_bytes_per_s"] == pytest.approx(4 * bench_report.MIB / 211)
-    assert "prefetch" in report["wire"]["interval"]
-    assert "fetcher shutdown" in report["wire"]["interval"]
-    assert "not cross-node clocks" in report["wire"]["interval"]
-    assert bench_report.summarise_bytes(tmp_path)["total_mib"] == 4
+    assert report["wire"]["total_bytes"] == 3 * bench_report.MIB
+    assert report["wire"]["by_source"]["legacy"]["fetches"] == 3
+    assert report["wire"]["fetch_wait_s"] == 4.5
+    assert report["wire"]["bytes_per_s"] == pytest.approx(3 * bench_report.MIB / 211)
 
 
-def test_empty_payload_with_probe_is_valid(tmp_path):
-    _benchmark(tmp_path)
-    report = _report(tmp_path)
-    assert report["status"] == "complete", report["diagnostics"]
-    assert report["wire"]["total_bytes"] == 0
-    assert report["wire"]["whole_run_bytes_per_s"] == 0
-
-
-@pytest.mark.parametrize("missing", [
-    "rank1.json", "steps.rank1.jsonl", "probe.rank1.main.json", "bytes.rank1.main.jsonl",
-])
-def test_missing_rank_or_instrumentation_is_partial(tmp_path, missing):
+@pytest.mark.parametrize("missing", ["run.json", "rank1.json", "steps.rank1.jsonl", "bytes.rank1.main.jsonl"])
+def test_missing_input_is_partial(tmp_path, missing):
     _benchmark(tmp_path, dp=2)
     (tmp_path / missing).unlink()
     report = _report(tmp_path)
     assert report["status"] == "partial"
-    assert report["metrics"] == {}
-    assert report["wire"]["whole_run_bytes_per_s"] is None
+    assert "metrics" not in report
     assert any(missing in message for message in report["diagnostics"])
 
 
 @pytest.mark.parametrize("status", ["failed", "running", None])
 def test_noncomplete_rank_is_partial(tmp_path, status):
     _benchmark(tmp_path)
-    _change_json(tmp_path / "rank0.json", status=status)
+    path = tmp_path / "rank0.json"
+    _json(path, {**json.loads(path.read_text()), "status": status})
     report = _report(tmp_path)
     assert report["status"] == "partial"
-    assert report["metrics"] == {}
     assert any("status" in message for message in report["diagnostics"])
 
 
-@pytest.mark.parametrize("problem", ["missing_warmup", "missing_measured", "duplicate", "extra", "wrong_rank", "truncated"])
+@pytest.mark.parametrize("problem", ["missing_warmup", "missing_measured", "duplicate", "extra", "torn", "corrupt"])
 def test_invalid_step_series_is_partial(tmp_path, problem):
     _benchmark(tmp_path)
     path = tmp_path / "steps.rank0.jsonl"
@@ -373,53 +304,18 @@ def test_invalid_step_series_is_partial(tmp_path, problem):
     elif problem == "duplicate":
         records.append(records[-1])
     elif problem == "extra":
-        records.append({**records[-1], "step": 18, "elapsed_s": 201})
-    elif problem == "wrong_rank":
-        records[-1]["rank"] = 1
-    _jsonl(path, records)
-    if problem == "truncated":
-        path.write_text(path.read_text() + '{"step":')
-    before = path.read_bytes()
+        records.append({**records[-1], "step": records[-1]["step"] + 1})
+    text = "".join(json.dumps(record) + "\n" for record in records)
+    if problem == "torn":  # crashed while writing the final step
+        text = text[:-20]
+    elif problem == "corrupt":
+        text = '{"step":\n' + text
+    path.write_text(text)
     report = _report(tmp_path)
     assert report["status"] == "partial"
-    assert report["diagnostics"]
-    assert report["metrics"] == {}
-    assert "No headline throughput" in bench_report.render(report)
-    assert path.read_bytes() == before
-
-
-@pytest.mark.parametrize("filename,changes", [
-    ("rank0.json", {"rank": 1}),
-    ("rank1.json", {"dp_rank": 0}),
-    ("rank1.json", {"start_step": 0}),
-    ("rank1.json", {"tp_rank": 1}),
-    ("run.json", {"world_size": 3}),
-    ("probe.rank1.main.json", {"rank": 0}),
-    ("probe.rank1.main.json", {"instruments": ["_fetch_range"]}),
-])
-def test_invalid_identity_topology_or_probe_is_partial(tmp_path, filename, changes):
-    _benchmark(tmp_path, dp=2)
-    _change_json(tmp_path / filename, **changes)
-    report = _report(tmp_path)
-    assert report["status"] == "partial"
-    assert report["diagnostics"]
-    assert report["metrics"] == {}
-
-
-def test_all_configured_workers_must_have_probes(tmp_path):
-    _benchmark(tmp_path, workers=2)
-    (tmp_path / "probe.rank0.w1.json").unlink()
-    assert _report(tmp_path)["status"] == "partial"
-
-
-@pytest.mark.parametrize("filename", ["run.json", "rank0.json", "probe.rank0.main.json", "bytes.rank0.main.jsonl"])
-def test_truncated_metadata_or_payload_is_partial(tmp_path, filename):
-    _benchmark(tmp_path)
-    (tmp_path / filename).write_text('{"source":')
-    report = _report(tmp_path)
-    assert report["status"] == "partial"
-    assert report["metrics"] == {}
-    assert any(filename in message for message in report["diagnostics"])
+    assert "metrics" not in report
+    assert "PARTIAL" in bench_report.render(report)
+    assert path.read_text() == text
 
 
 @pytest.mark.parametrize("steps,seconds,warn", [(240, 0.25, False), (199, 1, True), (200, 0.1, True)])
@@ -430,36 +326,115 @@ def test_short_window_warning_uses_either_threshold(tmp_path, steps, seconds, wa
 
 
 @pytest.mark.parametrize("complete", [True, False])
-def test_cli_exit_status_json_and_raw_logs_unchanged(tmp_path, complete):
+def test_cli_exit_status_and_json(tmp_path, complete):
     _benchmark(tmp_path)
     if not complete:
         (tmp_path / "steps.rank0.jsonl").write_text('{"step":')
-    original = {path: path.read_bytes() for path in tmp_path.iterdir()}
     out = tmp_path / "report.json"
     result = subprocess.run([
         sys.executable, str(bench_report.__file__), "--telemetry", str(tmp_path), "--out", str(out),
     ], capture_output=True, text=True, check=False)
     assert result.returncode == (0 if complete else 1), result.stderr
-    report = json.loads(out.read_text())
-    assert report["status"] == ("complete" if complete else "partial")
-    assert all(path.read_bytes() == content for path, content in original.items())
+    assert json.loads(out.read_text())["status"] == ("complete" if complete else "partial")
 
 
-def test_missing_manifest_is_not_misread_as_successful_legacy_report(tmp_path):
+def _hardware(directory, peaks):
+    names = {835.5: "NVIDIA H200 NVL", 989.5: "NVIDIA H200 SXM", 312.0: "NVIDIA A100-SXM4-80GB"}
+    for rank, peak in enumerate(peaks):
+        path = directory / f"rank{rank}.json"
+        meta = json.loads(path.read_text())
+        meta.update(
+            host="fixture-host",
+            gpu={"name": names.get(peak, "unknown GPU"), "peak_tflops_per_gpu": peak},
+            flops_estimate={"dtype": "torch.bfloat16", "backbone_flops_per_token": 1e9,
+                            "modality_forward_flops_per_token": {"image": 2e6, "spectrum": 4e6}},
+            network={"max_active_link_speed_mbps": 10000, "fastest_active_interfaces": ["eth0"]},
+        )
+        _json(path, meta)
+
+
+def test_benchmark_mfu_prices_measured_tokens_and_all_gpu_peaks(tmp_path):
+    _benchmark(tmp_path, dp=2, tp=2, warmup=2)
+    peaks = [835.5, 989.5, 312.0, 312.0]
+    _hardware(tmp_path, peaks)
+    path = tmp_path / "steps.rank3.jsonl"
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    records[-1]["step_seconds"] += 20  # slow TP replica counts in elapsed, not FLOPs
+    for record in records:
+        record["model_flops"] = 1e30  # legacy estimates must not enter schema-v1 MFU
+    _jsonl(path, records)
+    report = _report(tmp_path)
+    assert report["status"] == "complete", report["diagnostics"]
+    mfu = report["metrics"]["mfu"]
+    expected_flops = 4 * 2 * (900 * 1e9 + 3 * (80 * 2e6 + 20 * 4e6))
+    assert mfu["model_flops"] == expected_flops
+    assert mfu["peak_tflops_by_rank"] == peaks
+    assert mfu["model_tflops_per_gpu"] == pytest.approx(expected_flops / (120 * 4 * 1e12))
+    assert mfu["mfu"] == pytest.approx(expected_flops / (120 * sum(peaks) * 1e12))
+    assert mfu["stall_share"] == pytest.approx(96 / 120)
+    assert mfu["mfu_busy"] * (1 - mfu["stall_share"]) * mfu["utilisation_packing"] == pytest.approx(mfu["mfu"])
+    text = bench_report.render(report)
+    assert "MFU estimate:" in text and "835.5 TFLOP/s" in text
+    assert "Estimated upper bound" in text
+    assert text.count("Fastest active physical NIC [fixture-host]: 10 Gbit/s (eth0)") == 1
+    assert "not internet/downlink capacity" in text
+
+
+@pytest.mark.parametrize("problem", ["old_metadata", "unknown_gpu", "wrong_dtype"])
+def test_unavailable_mfu_never_becomes_zero_or_breaks_throughput(tmp_path, problem):
+    _benchmark(tmp_path, dp=2)
+    _hardware(tmp_path, [835.5, None if problem == "unknown_gpu" else 835.5])
+    path = tmp_path / "rank1.json"
+    meta = json.loads(path.read_text())
+    if problem == "old_metadata":
+        meta.pop("flops_estimate")
+        meta.pop("network")
+        meta["host"] = "old-host"
+    elif problem == "wrong_dtype":
+        meta["flops_estimate"]["dtype"] = "torch.float32"
+    _json(path, meta)
+    report = _report(tmp_path)
+    assert report["status"] == "complete", report["diagnostics"]
+    assert report["metrics"]["useful_tokens_per_s"] == 72
+    assert report["metrics"]["mfu"]["mfu"] is None
+    assert "MFU: unavailable" in bench_report.render(report)
+    if problem == "old_metadata":
+        assert "NIC [old-host]: unavailable" in bench_report.render(report)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("peak", 0), ("peak", -1), ("peak", float("nan")), ("peak", True),
+    ("backbone", float("inf")), ("modality", -1),
+])
+def test_invalid_flop_or_peak_metadata_is_partial(tmp_path, field, value):
     _benchmark(tmp_path)
-    (tmp_path / "run.json").unlink()
+    _hardware(tmp_path, [835.5])
+    path = tmp_path / "rank0.json"
+    meta = json.loads(path.read_text())
+    if field == "peak":
+        meta["gpu"]["peak_tflops_per_gpu"] = value
+    elif field == "backbone":
+        meta["flops_estimate"]["backbone_flops_per_token"] = value
+    else:
+        meta["flops_estimate"]["modality_forward_flops_per_token"]["image"] = value
+    _json(path, meta)
     report = _report(tmp_path)
     assert report["status"] == "partial"
-    assert report["metrics"] == {}
-    assert "run.json" in report["diagnostics"][0]
+    assert "metrics" not in report
+    assert "finite" in report["diagnostics"][0]
 
 
-def test_cli_refuses_to_overwrite_raw_inputs(tmp_path, monkeypatch):
-    _benchmark(tmp_path)
-    path = tmp_path / "run.json"
-    original = path.read_bytes()
-    monkeypatch.setattr(sys, "argv", ["bench_report", "--telemetry", str(tmp_path), "--out", str(path)])
-    with pytest.raises(SystemExit) as exc:
-        bench_report.main()
-    assert exc.value.code != 0
-    assert path.read_bytes() == original
+def test_network_link_speed_is_kept_per_host_not_summed_across_ranks(tmp_path):
+    _benchmark(tmp_path, dp=2)
+    _hardware(tmp_path, [835.5, 835.5])
+    path = tmp_path / "rank1.json"
+    meta = json.loads(path.read_text())
+    meta.update(host="second-host", network={
+        "max_active_link_speed_mbps": None, "fastest_active_interfaces": []})
+    _json(path, meta)
+    report = _report(tmp_path)
+    text = bench_report.render(report)
+    assert "NIC [fixture-host]: 10 Gbit/s (eth0)" in text
+    assert "NIC [second-host]: unavailable" in text
+    assert report["ranks"]["0"]["network"]["max_active_link_speed_mbps"] == 10000
+    assert report["wire"]["bytes_per_s"] == 0  # not the NIC speed

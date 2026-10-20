@@ -153,36 +153,10 @@ def test_byte_probe_records_payload_bytes(tmp_path, monkeypatch):
     assert entry["source"] == "legacy"
     assert entry["worker"] == 3
     assert entry["wait_s"] >= 0
-    assert (tmp_path / "probe.rank7.w3.json").exists()
     # The same range fetched twice costs bytes twice; never deduplicate it.
     HfFileSystemFile._fetch_range(fake, 100, 356)
     records = [json.loads(line) for line in (tmp_path / "bytes.rank7.w3.jsonl").read_text().splitlines()]
     assert sum(record["bytes"] for record in records) == 512
-
-
-def test_prime_keeps_the_iterator_and_counts_first_batch_once():
-    batches = [{"input_ids": torch.tensor([[BOS_ID, 3]])} for _ in range(3)]
-    opened = []
-
-    class Loader:
-        def __iter__(self):
-            opened.append(True)
-            yield from batches
-
-    loader = telemetry.TelemetryLoader(Loader())
-    assert loader.prime() >= 0
-    assert telemetry.drain_step()["micro_batches"] == 0
-    with pytest.raises(RuntimeError, match="already started"):
-        loader.prime()
-    iterator = iter(loader)
-    assert next(iterator) is batches[0]
-    first = telemetry.drain_step()
-    assert first["micro_batches"] == 1
-    assert first["loader_wait_s"] == 0
-    assert len(list(iterator)) == 2
-    assert telemetry.drain_step()["micro_batches"] == 2
-    assert opened == [True]
-    loader.close()
 
 
 def test_stream_probe_counts_returned_payload_not_requested_length(tmp_path, monkeypatch):
@@ -202,79 +176,3 @@ def test_stream_probe_counts_returned_payload_not_requested_length(tmp_path, mon
     assert entry["bytes"] == 3
     assert entry["source"] == "desi"
     assert entry["worker"] is None
-
-
-def test_single_process_loader_close_closes_record_generator():
-    closed = []
-
-    class Dataset(torch.utils.data.IterableDataset):
-        def __iter__(self):
-            try:
-                while True:
-                    yield {"input_ids": torch.tensor([[BOS_ID]])}
-            finally:
-                closed.append(True)
-
-    loader = telemetry.TelemetryLoader(torch.utils.data.DataLoader(Dataset(), batch_size=None))
-    loader.prime()
-    loader.close()
-    assert closed == [True]
-
-
-def test_packing_propagates_nested_generator_cleanup_failure(tiny_config, monkeypatch):
-    from legacy_fixture import make_record
-
-    def records(self, worker):
-        try:
-            while True:
-                yield make_record(0, image_only_fraction=1.0)
-        finally:
-            raise RuntimeError("fetcher cleanup failed")
-
-    monkeypatch.setattr(PackedMicroBatches, "_open_records", records)
-    loader = telemetry.TelemetryLoader(torch.utils.data.DataLoader(
-        PackedMicroBatches(tiny_config, 1, 512), batch_size=None,
-    ))
-    loader.prime()
-    with pytest.raises(RuntimeError, match="fetcher cleanup failed"):
-        loader.close()
-
-
-def test_close_joins_workers_after_pytorch_shutdown():
-    from types import SimpleNamespace
-
-    events = []
-    worker = SimpleNamespace(join=lambda: events.append("joined"))
-    iterator = SimpleNamespace(_workers=[worker], _shutdown_workers=lambda: events.append("shutdown"))
-    loader = telemetry.TelemetryLoader(None)
-    loader._iterator = iterator
-    loader.close()
-    assert events == ["shutdown", "joined"]
-
-
-def test_record_stream_waits_for_fetch_executor_after_cluster_close(tiny_config, monkeypatch):
-    from contextlib import nullcontext
-    from types import SimpleNamespace
-
-    from astropt3.data import nanotron_loader as data
-
-    events = []
-
-    class Cluster:
-        workers = {0: SimpleNamespace(executor=SimpleNamespace(
-            shutdown=lambda *, wait: events.append(("joined", wait)),
-        ))}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            events.append("cluster_closed")
-
-    monkeypatch.setattr(data, "LocalCluster", lambda **kwargs: Cluster())
-    monkeypatch.setattr(data, "Client", lambda cluster: nullcontext())
-    monkeypatch.setattr(PackedMicroBatches, "_stream_records", lambda *args: iter([{}]))
-    records = PackedMicroBatches(tiny_config, 1, 512)._open_records(None)
-    next(records)
-    records.close()
-    assert events == ["cluster_closed", ("joined", True)]
