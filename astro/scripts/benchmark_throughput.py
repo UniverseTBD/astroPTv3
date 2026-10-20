@@ -112,56 +112,27 @@ def revision(path: Path) -> dict:
         return {"error": str(error)}
 
 
-def gpu_peak(name: str, vram_bytes: int) -> dict:
-    """Rated dense BF16 peaks; exact variants only, never a family-name guess."""
-    h200 = "https://www.nvidia.com/en-us/data-center/h200/"
-    h100 = "https://www.nvidia.com/en-us/data-center/h100/"
-    a100 = "https://www.nvidia.com/en-us/data-center/a100/"
-    # NVIDIA's Hopper tables quote sparse throughput: dense is half that value.
-    variants = {
-        "H200 NVL": (835.5, 141e9, h200),
-        "H200 SXM": (989.5, 141e9, h200),
-        "H100 NVL": (835.5, 94e9, h100),
-        "H100 80GB HBM3": (989.5, 80e9, h100),
-        "A100-SXM4-80GB": (312.0, 80e9, a100),
-        "A100 80GB PCIe": (312.0, 80e9, a100),
-    }
-    # Reduced-memory devices may be MIG/vGPU slices even if the name is unchanged.
-    variant = variants.get(name.removeprefix("NVIDIA "))
-    if variant is None or vram_bytes < variant[1]:
-        return {"peak_tflops_per_gpu": None, "peak_source": None}
-    return {"peak_tflops_per_gpu": variant[0], "peak_source": variant[2]}
+# Dense BF16 TFLOP/s (half NVIDIA's sparse datasheet figures) and the smallest
+# memory a full device reports: MIG/vGPU slices can keep the full-device name.
+DENSE_BF16_PEAKS = {
+    "H200 NVL": (835.5, 141e9), "H200 SXM": (989.5, 141e9), "H100 NVL": (835.5, 94e9),
+    "H100 80GB HBM3": (989.5, 80e9), "A100-SXM4-80GB": (312.0, 80e9), "A100 80GB PCIe": (312.0, 80e9),
+}
 
 
-def network_context(sys_class_net: Path = Path("/sys/class/net")) -> dict:
-    """Negotiated physical NIC speeds, not internet bandwidth or route capacity."""
+def gpu_peak(name: str, vram_bytes: int) -> float | None:
+    """Exact variants only, never a family-name guess."""
+    peak, min_vram = DENSE_BF16_PEAKS.get(name.removeprefix("NVIDIA "), (None, 0.0))
+    return peak if vram_bytes >= min_vram else None
+
+
+def nic_link_speeds(sys_class_net: Path = Path("/sys/class/net")) -> dict:
+    """Negotiated Mbit/s of each up physical NIC (None if unknown); not route capacity."""
     import psutil
 
-    result: dict = {"interfaces": [], "max_active_link_speed_mbps": None,
-                    "fastest_active_interfaces": []}
-    if not sys_class_net.is_dir():
-        return {**result, "unavailable_reason": "Linux network sysfs is unavailable"}
-    try:
-        stats = psutil.net_if_stats()
-    except (OSError, NotImplementedError) as error:
-        return {**result, "unavailable_reason": str(error)}
-    for name, nic in sorted(stats.items()):
-        if not (sys_class_net / name / "device").exists():
-            continue  # virtual interfaces can advertise misleading synthetic speeds
-        result["interfaces"].append({
-            "name": name, "is_up": nic.isup,
-            "link_speed_mbps": nic.speed if nic.speed > 0 else None,
-        })
-    active = [nic for nic in result["interfaces"] if nic["is_up"] and nic["link_speed_mbps"]]
-    if active:
-        result["max_active_link_speed_mbps"] = max(nic["link_speed_mbps"] for nic in active)
-        result["fastest_active_interfaces"] = [
-            nic["name"] for nic in active
-            if nic["link_speed_mbps"] == result["max_active_link_speed_mbps"]
-        ]
-    else:
-        result["unavailable_reason"] = "No active physical NIC with a known link speed"
-    return result
+    return {name: nic.speed if nic.speed > 0 else None
+            for name, nic in sorted(psutil.net_if_stats().items())
+            if nic.isup and (sys_class_net / name / "device").exists()}  # skips virtual NICs
 
 
 def capture_flop_estimate(trainer) -> dict:
@@ -197,9 +168,9 @@ def capture_context(torch, trainer, loader) -> dict:
     return {
         "host": socket.gethostname(),
         "gpu": {"name": device.name, "vram_bytes": device.total_memory,
-                **gpu_peak(device.name, device.total_memory)},
+                "peak_tflops_per_gpu": gpu_peak(device.name, device.total_memory)},
         "flops_estimate": capture_flop_estimate(trainer),
-        "network": network_context(),
+        "nic_link_mbps": nic_link_speeds(),
         "cpu": {"model": cpu_model or platform.processor(), "count": os.cpu_count()},
         "ram_bytes": psutil.virtual_memory().total,
         "software": {"python": platform.python_version(), "cuda": torch.version.cuda, **packages},

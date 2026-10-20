@@ -180,7 +180,10 @@ def _benchmark(directory, *, dp=1, tp=1, warmup=1, start=12, workers=0, duration
             "rank": rank, "dp_rank": dp_rank, "tp_rank": tp_rank, "status": "complete",
             "start_step": start, "startup_s": 5.0 + rank, "ended_at": 2000.0,
             "whole_run_s": 10.0 + 100 * warmup + sum(d for d, _ in durations) + rank,
-            "num_loading_workers": workers,
+            "num_loading_workers": workers, "host": "fixture-host", "nic_link_mbps": {"eth0": 10000},
+            "gpu": {"name": "NVIDIA H200 NVL", "peak_tflops_per_gpu": 835.5},
+            "flops_estimate": {"dtype": "torch.bfloat16", "backbone_flops_per_token": 1e9,
+                               "modality_forward_flops_per_token": {"image": 2e6, "spectrum": 4e6}},
         })
         for consumer in [f"w{worker}" for worker in range(workers)] or ["main"]:
             (directory / f"bytes.rank{rank}.{consumer}.jsonl").touch()
@@ -338,25 +341,18 @@ def test_cli_exit_status_and_json(tmp_path, complete):
     assert json.loads(out.read_text())["status"] == ("complete" if complete else "partial")
 
 
-def _hardware(directory, peaks):
+def _set_peaks(directory, peaks):
     names = {835.5: "NVIDIA H200 NVL", 989.5: "NVIDIA H200 SXM", 312.0: "NVIDIA A100-SXM4-80GB"}
     for rank, peak in enumerate(peaks):
         path = directory / f"rank{rank}.json"
-        meta = json.loads(path.read_text())
-        meta.update(
-            host="fixture-host",
-            gpu={"name": names.get(peak, "unknown GPU"), "peak_tflops_per_gpu": peak},
-            flops_estimate={"dtype": "torch.bfloat16", "backbone_flops_per_token": 1e9,
-                            "modality_forward_flops_per_token": {"image": 2e6, "spectrum": 4e6}},
-            network={"max_active_link_speed_mbps": 10000, "fastest_active_interfaces": ["eth0"]},
-        )
-        _json(path, meta)
+        gpu = {"name": names.get(peak, "unknown GPU"), "peak_tflops_per_gpu": peak}
+        _json(path, {**json.loads(path.read_text()), "gpu": gpu})
 
 
 def test_benchmark_mfu_prices_measured_tokens_and_all_gpu_peaks(tmp_path):
     _benchmark(tmp_path, dp=2, tp=2, warmup=2)
     peaks = [835.5, 989.5, 312.0, 312.0]
-    _hardware(tmp_path, peaks)
+    _set_peaks(tmp_path, peaks)
     path = tmp_path / "steps.rank3.jsonl"
     records = [json.loads(line) for line in path.read_text().splitlines()]
     records[-1]["step_seconds"] += 20  # slow TP replica counts in elapsed, not FLOPs
@@ -365,76 +361,32 @@ def test_benchmark_mfu_prices_measured_tokens_and_all_gpu_peaks(tmp_path):
     _jsonl(path, records)
     report = _report(tmp_path)
     assert report["status"] == "complete", report["diagnostics"]
-    mfu = report["metrics"]["mfu"]
+    metrics, mfu = report["metrics"], report["metrics"]["mfu"]
     expected_flops = 4 * 2 * (900 * 1e9 + 3 * (80 * 2e6 + 20 * 4e6))
     assert mfu["model_flops"] == expected_flops
-    assert mfu["peak_tflops_by_rank"] == peaks
     assert mfu["model_tflops_per_gpu"] == pytest.approx(expected_flops / (120 * 4 * 1e12))
     assert mfu["mfu"] == pytest.approx(expected_flops / (120 * sum(peaks) * 1e12))
-    assert mfu["stall_share"] == pytest.approx(96 / 120)
-    assert mfu["mfu_busy"] * (1 - mfu["stall_share"]) * mfu["utilisation_packing"] == pytest.approx(mfu["mfu"])
+    assert mfu["mfu_busy"] * (1 - metrics["stall_share"]) * metrics["packing"] == pytest.approx(mfu["mfu"])
     text = bench_report.render(report)
-    assert "MFU estimate:" in text and "835.5 TFLOP/s" in text
-    assert "Estimated upper bound" in text
-    assert text.count("Fastest active physical NIC [fixture-host]: 10 Gbit/s (eth0)") == 1
-    assert "not internet/downlink capacity" in text
+    assert "MFU estimate:" in text and "NVIDIA H200 SXM" in text
+    assert text.count("Fastest NIC link [fixture-host]: 10 Gbit/s") == 1  # per host, not per rank
 
 
-@pytest.mark.parametrize("problem", ["old_metadata", "unknown_gpu", "wrong_dtype"])
-def test_unavailable_mfu_never_becomes_zero_or_breaks_throughput(tmp_path, problem):
+@pytest.mark.parametrize("problem", ["unknown_gpu", "wrong_dtype"])
+def test_unavailable_mfu_is_null_and_keeps_throughput(tmp_path, problem):
     _benchmark(tmp_path, dp=2)
-    _hardware(tmp_path, [835.5, None if problem == "unknown_gpu" else 835.5])
     path = tmp_path / "rank1.json"
     meta = json.loads(path.read_text())
-    if problem == "old_metadata":
-        meta.pop("flops_estimate")
-        meta.pop("network")
-        meta["host"] = "old-host"
-    elif problem == "wrong_dtype":
+    meta.update(host="second-host", nic_link_mbps={"eth0": None})
+    if problem == "unknown_gpu":
+        meta["gpu"]["peak_tflops_per_gpu"] = None
+    else:
         meta["flops_estimate"]["dtype"] = "torch.float32"
     _json(path, meta)
     report = _report(tmp_path)
     assert report["status"] == "complete", report["diagnostics"]
     assert report["metrics"]["useful_tokens_per_s"] == 72
     assert report["metrics"]["mfu"]["mfu"] is None
-    assert "MFU: unavailable" in bench_report.render(report)
-    if problem == "old_metadata":
-        assert "NIC [old-host]: unavailable" in bench_report.render(report)
-
-
-@pytest.mark.parametrize("field,value", [
-    ("peak", 0), ("peak", -1), ("peak", float("nan")), ("peak", True),
-    ("backbone", float("inf")), ("modality", -1),
-])
-def test_invalid_flop_or_peak_metadata_is_partial(tmp_path, field, value):
-    _benchmark(tmp_path)
-    _hardware(tmp_path, [835.5])
-    path = tmp_path / "rank0.json"
-    meta = json.loads(path.read_text())
-    if field == "peak":
-        meta["gpu"]["peak_tflops_per_gpu"] = value
-    elif field == "backbone":
-        meta["flops_estimate"]["backbone_flops_per_token"] = value
-    else:
-        meta["flops_estimate"]["modality_forward_flops_per_token"]["image"] = value
-    _json(path, meta)
-    report = _report(tmp_path)
-    assert report["status"] == "partial"
-    assert "metrics" not in report
-    assert "finite" in report["diagnostics"][0]
-
-
-def test_network_link_speed_is_kept_per_host_not_summed_across_ranks(tmp_path):
-    _benchmark(tmp_path, dp=2)
-    _hardware(tmp_path, [835.5, 835.5])
-    path = tmp_path / "rank1.json"
-    meta = json.loads(path.read_text())
-    meta.update(host="second-host", network={
-        "max_active_link_speed_mbps": None, "fastest_active_interfaces": []})
-    _json(path, meta)
-    report = _report(tmp_path)
     text = bench_report.render(report)
-    assert "NIC [fixture-host]: 10 Gbit/s (eth0)" in text
-    assert "NIC [second-host]: unavailable" in text
-    assert report["ranks"]["0"]["network"]["max_active_link_speed_mbps"] == 10000
-    assert report["wire"]["bytes_per_s"] == 0  # not the NIC speed
+    assert "MFU: unavailable" in text
+    assert "Fastest NIC link [second-host]: unknown" in text

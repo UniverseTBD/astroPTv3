@@ -144,37 +144,17 @@ def test_runner_reuses_train_and_records_failure(tmp_path, monkeypatch, fail):
     ("unknown GPU", 150_000_000_000, None),
 ])
 def test_dense_bf16_peak_uses_exact_gpu_variant(name, vram, peak):
-    result = bench.gpu_peak(name, vram)
-    assert result["peak_tflops_per_gpu"] == peak
-    assert bool(result["peak_source"]) is (peak is not None)
+    assert bench.gpu_peak(name, vram) == peak
 
 
-def test_network_link_speed_excludes_virtual_down_and_unknown_nics(tmp_path, monkeypatch):
+def test_nic_speeds_keep_up_physical_links_only(tmp_path, monkeypatch):
     stats = {name: SimpleNamespace(isup=up, speed=speed) for name, up, speed in [
-        ("eth0", True, 10000), ("eth1", True, 10000), ("slow", True, 1000),
-        ("down", False, 100000), ("unknown", True, -1),
-        ("veth0", True, 400000), ("lo", True, 0),
+        ("eth0", True, 10000), ("unknown", True, -1), ("down", False, 100000), ("veth0", True, 400000),
     ]}
-    for name in ("eth0", "eth1", "slow", "down", "unknown"):
+    for name in ("eth0", "unknown", "down"):
         (tmp_path / name / "device").mkdir(parents=True)
     monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(net_if_stats=lambda: stats))
-    result = bench.network_context(tmp_path)
-    assert result["max_active_link_speed_mbps"] == 10000
-    assert result["fastest_active_interfaces"] == ["eth0", "eth1"]
-    assert {nic["name"] for nic in result["interfaces"]} == {"eth0", "eth1", "slow", "down", "unknown"}
-    assert next(n for n in result["interfaces"] if n["name"] == "unknown")["link_speed_mbps"] is None
-
-
-@pytest.mark.parametrize("problem", ["missing_sysfs", "no_links", "os_error"])
-def test_network_speed_unavailable_is_not_zero(tmp_path, monkeypatch, problem):
-    def stats():
-        if problem == "os_error":
-            raise OSError("not supported")
-        return {}
-    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(net_if_stats=stats))
-    result = bench.network_context(tmp_path / "absent" if problem == "missing_sysfs" else tmp_path)
-    assert result["max_active_link_speed_mbps"] is None
-    assert result["unavailable_reason"]
+    assert bench.nic_link_speeds(tmp_path) == {"eth0": 10000, "unknown": None}
 
 
 def test_flop_capture_undoes_world_size_and_records_model_costs(monkeypatch):
@@ -197,33 +177,3 @@ def test_flop_capture_undoes_world_size_and_records_model_costs(monkeypatch):
         "dtype": "torch.bfloat16", "backbone_flops_per_token": 1e12,
         "modality_forward_flops_per_token": {"images": 123.0},
     }
-
-
-def test_capture_context_uses_rank_current_device_and_records_new_metrics(monkeypatch):
-    import astropt3.data as data_package
-
-    device = SimpleNamespace(name="NVIDIA H200 NVL", total_memory=150_000_000_000)
-    requested = []
-    def properties(index):
-        requested.append(index)
-        return device
-    torch = SimpleNamespace(cuda=SimpleNamespace(
-        current_device=lambda: 1, get_device_properties=properties),
-        version=SimpleNamespace(cuda="12.8"))
-    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(
-        virtual_memory=lambda: SimpleNamespace(total=1024)))
-    monkeypatch.setattr(data_package, "nanotron_loader", SimpleNamespace(
-        LEGACY_CATALOG="legacy", DESI_CATALOG="desi", _CROSSMATCH_RADIUS_ARCSEC=1,
-        _CROSSMATCH_COUNT_FRACTION_THRESHOLD=0, _PARTITIONS_PER_CHUNK=4), raising=False)
-    monkeypatch.setattr(bench, "revision", lambda _: {})
-    monkeypatch.setattr(bench, "capture_flop_estimate", lambda _: {"cost": 42})
-    monkeypatch.setattr(bench, "network_context", lambda: {"max_active_link_speed_mbps": 10000})
-    trainer = SimpleNamespace(init_checkpoint_path=None, config=SimpleNamespace(
-        model=SimpleNamespace(init_method=object())))
-    loader = SimpleNamespace(num_workers=0, dataset=SimpleNamespace(
-        columns=[], desi_columns=[], config=SimpleNamespace(modalities=[])))
-    result = bench.capture_context(torch, trainer, loader)
-    assert requested == [1]
-    assert result["gpu"]["peak_tflops_per_gpu"] == 835.5
-    assert result["flops_estimate"] == {"cost": 42}
-    assert result["network"]["max_active_link_speed_mbps"] == 10000

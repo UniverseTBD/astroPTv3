@@ -220,34 +220,11 @@ end of training on each rank. That rate is not link capacity. Windows under 200 
 or 60 s are flagged as limited evidence. CPU tests do not establish
 distributed correctness: validate an unexercised topology live first.
 
-**MFU.** `metrics.mfu` and the terminal report include estimated MFU with its
-busy / non-stalled-time / packing decomposition. Each rank records the GPU
-actually selected by CUDA, its rated **dense BF16** peak and the vendor source
-URL in `rankN.json`. The lookup distinguishes H200 NVL (835.5 TFLOP/s) from
-SXM (989.5); it also recognizes H100 NVL, H100 80GB HBM3, A100-SXM4-80GB and
-A100 80GB PCIe. Unlisted/ambiguous names and reduced-memory slices have an
-unknown peak; no family-name fallback or full-device credit for MIG is used.
-Non-BF16 runs and old logs without FLOP metadata report MFU as unavailable
-(`null`), not zero; throughput reporting still works.
-
-The runner saves nanotron's backbone FLOPs/token and per-modality forward
-FLOPs/token as `flops_estimate`. The report prices **measured** nonpadding
-tokens and loss tokens, counts TP replicas once, and divides total estimated
-training FLOPs by measured seconds times the **sum of all participating GPU
-peaks**. Modality costs include forward + backward (3× forward). This remains
-an **upper-bound estimate**, not profiled executed FLOPs: the existing formula
-assumes full-sequence attention rather than shorter packed-document attention.
-GPU peaks are rated specifications, not measurements of current clocks or
-power limits. Offline reporting uses captured metadata, never the GPU on the
-machine regenerating the report.
-
-**NIC link speed.** Each rank's `network` metadata records physical interfaces,
-up/down state and negotiated link speed in Mbit/s. The terminal shows the
-fastest active physical NIC **per host** in decimal Gbit/s; ranks sharing a
-host do not multiply its capacity. Linux sysfs distinguishes physical devices
-from virtual/loopback interfaces; unknown speeds and unavailable sysfs are
-reported as unavailable. `max_active_link_speed_mbps` is the largest *known*
-active speed, not a sum of ports or a bonded-link capacity. This is not an
-internet speed test, not necessarily the interface used for Hugging Face,
-and not guaranteed downlink bandwidth. It remains separate from observed
-whole-run payload MiB/s; no network configuration or active speed test is run.
+**MFU** is an estimate: measured non-padding and loss tokens (TP counted once)
+priced with nanotron's own FLOPs/token, which assumes full-sequence attention
+and so is an upper bound, divided by measured seconds times the sum of every
+GPU's rated dense BF16 peak. Peaks come from an exact-name table
+(`DENSE_BF16_PEAKS`; H200 NVL 835.5 vs SXM 989.5 TFLOP/s). An unlisted
+GPU, a MIG slice or a non-BF16 run reports MFU as `null`, never zero.
+`rankN.json` also records each up physical NIC's negotiated link speed. The
+terminal shows the fastest per host; it is not internet or HF-route bandwidth.

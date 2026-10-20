@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -266,47 +265,29 @@ def _load(path: Path, jsonl: bool = False) -> Any:
         raise ValueError(f"{path.name}: {exc}") from exc
 
 
-def _benchmark_mfu(metas: list[dict], series: list[list[dict]], seconds: float,
+def _benchmark_mfu(metas: list[dict], window: list[list[dict]], seconds: float,
                    packing: float, stall_share: float) -> dict:
-    """Price measured TP0 tokens only; all participating GPUs supply capacity."""
-    def number(value, label, *, positive=False):
-        if (type(value) not in (int, float) or not math.isfinite(value)
-                or value < 0 or (positive and value == 0)):
-            raise ValueError(f"{label} must be a finite {'positive' if positive else 'nonnegative'} number")
-        return value
-
-    peaks, flops = [], 0.0
-    for rank, (meta, records) in enumerate(zip(metas, series, strict=True)):
-        peak = meta.get("gpu", {}).get("peak_tflops_per_gpu")
-        costs = meta.get("flops_estimate")
-        if peak is None or costs is None:
-            return {"mfu": None, "unavailable_reason":
-                    f"rank {rank}: unknown GPU variant/slice or missing FLOP metadata"}
-        peaks.append(number(peak, f"rank {rank} GPU peak", positive=True))
-        if costs["dtype"] not in ("bfloat16", "torch.bfloat16"):
-            return {"mfu": None, "unavailable_reason": "MFU peak lookup supports BF16 runs only"}
-        backbone = number(costs["backbone_flops_per_token"], "backbone FLOPs/token", positive=True)
-        modalities = {name: number(cost, f"{name} forward FLOPs/token")
-                      for name, cost in costs["modality_forward_flops_per_token"].items()}
-        if meta["tp_rank"] != 0:
-            continue
-        for record in records:
-            flops += backbone * number(record["tokens_nonpad"], "nonpadding tokens")
-            flops += 3 * sum(number(count, f"{name} loss tokens") * modalities[name]
+    """Estimated MFU: measured TP0 tokens priced with the model's own FLOP counts,
+    over the rated dense BF16 peak of every participating GPU (docs/training.md §8)."""
+    peaks = [meta["gpu"]["peak_tflops_per_gpu"] for meta in metas]
+    if None in peaks:
+        return {"mfu": None, "unavailable_reason": "GPU variant not in the dense BF16 peak table"}
+    if any("bfloat16" not in meta["flops_estimate"]["dtype"] for meta in metas):
+        return {"mfu": None, "unavailable_reason": "peak table is BF16-only"}
+    flops = 0.0
+    for meta, records in zip(metas, window, strict=True):
+        costs = meta["flops_estimate"]
+        for record in records if meta["tp_rank"] == 0 else []:
+            flops += costs["backbone_flops_per_token"] * record["tokens_nonpad"]
+            # forward + backward = 3x the forward cost of each modality head
+            flops += 3 * sum(count * costs["modality_forward_flops_per_token"][name]
                              for name, count in record["loss_tokens"].items())
-    number(seconds, "measured seconds", positive=True)
-    number(flops, "estimated model FLOPs")
-    if not 0 <= packing <= 1 or not 0 <= stall_share <= 1:
-        raise ValueError("MFU packing and stall share must be in [0, 1]")
     mfu = flops / (seconds * sum(peaks) * 1e12)
     return {
         "mfu": mfu,
         "mfu_busy": mfu / ((1 - stall_share) * packing) if packing and stall_share < 1 else None,
-        "stall_share": stall_share, "utilisation_packing": packing,
-        "model_flops": flops, "model_tflops_per_gpu": flops / seconds / len(metas) / 1e12,
-        "peak_tflops_by_rank": peaks,
-        "method": "Estimated upper bound: nanotron full-sequence attention FLOPs, padding excluded, "
-                  "plus modality forward FLOPs x3 for forward/backward. Not profiled executed FLOPs.",
+        "model_flops": flops,
+        "model_tflops_per_gpu": flops / seconds / len(metas) / 1e12,
     }
 
 
@@ -387,9 +368,10 @@ def _render_benchmark(report: dict) -> str:
     metrics, wire = report["metrics"], report["wire"]
     timing, window = metrics["timing"], metrics["window"]
     steps = window["step_seconds"]
+    gpus = ", ".join(sorted({meta["gpu"]["name"] for meta in report["ranks"].values()}))
     lines += [
         f"Useful tokens/s: {metrics['useful_tokens_per_s']:,.1f} "
-        f"({metrics['useful_tokens_per_s_per_gpu']:,.1f}/GPU over {report['run']['world_size']} GPUs)",
+        f"({metrics['useful_tokens_per_s_per_gpu']:,.1f}/GPU over {report['run']['world_size']} x {gpus})",
         f"Packing {metrics['packing']:.1%}; stall share {metrics['stall_share']:.1%}; "
         f"{window['rows_per_s']:,.1f} rows/s",
         f"Timing: startup {timing['startup_s']:.1f}s; first-step loader wait "
@@ -405,28 +387,14 @@ def _render_benchmark(report: dict) -> str:
         lines.append(f"MFU: unavailable ({mfu['unavailable_reason']})")
     else:
         busy = f"{mfu['mfu_busy']:.2%}" if mfu["mfu_busy"] is not None else "unavailable"
-        lines += [
-            f"MFU estimate: {mfu['mfu']:.2%} = busy {busy} x non-stalled "
-            f"{1 - mfu['stall_share']:.3f} x packing {mfu['utilisation_packing']:.3f}; "
-            f"{mfu['model_tflops_per_gpu']:.2f} estimated TFLOP/s/GPU",
-            mfu["method"],
-        ]
-        devices = Counter((meta["gpu"]["name"], meta["gpu"]["peak_tflops_per_gpu"])
-                          for meta in report["ranks"].values())
-        lines.append("GPU dense BF16 peaks: " + "; ".join(
-            f"{count} x {name}: {peak:g} TFLOP/s each" for (name, peak), count in devices.items()))
-    seen_hosts = set()
-    for rank, meta in report["ranks"].items():
-        host = meta.get("host", f"rank {rank}")
-        if host in seen_hosts:
-            continue
-        seen_hosts.add(host)
-        network = meta.get("network", {})
-        speed = network.get("max_active_link_speed_mbps")
-        link = (f"{speed / 1000:g} Gbit/s ({', '.join(network['fastest_active_interfaces'])})"
-                if speed is not None else "unavailable")
-        lines.append(f"Fastest active physical NIC [{host}]: {link}")
-    lines.append("NIC link speed is not internet/downlink capacity or a measurement of the HF route.")
+        lines.append(f"MFU estimate: {mfu['mfu']:.2%} = busy {busy} x non-stalled "
+                     f"{1 - metrics['stall_share']:.3f} x packing {metrics['packing']:.3f}; "
+                     f"{mfu['model_tflops_per_gpu']:.2f} TFLOP/s/GPU")
+    hosts = {meta["host"]: [speed for speed in meta["nic_link_mbps"].values() if speed]
+             for meta in report["ranks"].values()}
+    for host, speeds in hosts.items():
+        lines.append(f"Fastest NIC link [{host}]: "
+                     + (f"{max(speeds) / 1000:g} Gbit/s" if speeds else "unknown"))
     return "\n".join(lines + [f"WARNING: {warning}" for warning in report["warnings"]])
 
 
