@@ -89,6 +89,7 @@ data_stages:
     data:
       dataset:
         is_astropt3_streaming: true # fixed LSDB InfiniteStream (ADR 0015)
+        crossmatch_desi: true # DESI-left CrossMatchStream, adds spectra (EXPERIMENTS §9)
       seed: 42
       # DataLoader workers are the only source concurrency; LSDB is synchronous.
       num_loading_workers: 8

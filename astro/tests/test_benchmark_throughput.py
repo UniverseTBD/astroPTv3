@@ -16,7 +16,7 @@ import benchmark_throughput as bench  # pyright: ignore[reportMissingImports]
 @pytest.fixture
 def baseline(monkeypatch):
     monkeypatch.delenv("NANOTRON_BENCHMARK", raising=False)
-    return yaml.safe_load((bench.REPO / "astro/configs/nanotron/astropt3-test-tiny.yaml").read_text())
+    return yaml.safe_load((bench.REPO / "astro/configs/nanotron/astropt3-70m-dp1.yaml").read_text())
 
 
 def test_overrides_preserve_workload_schedules_and_explicit_initialization(baseline, tmp_path):
@@ -29,7 +29,7 @@ def test_overrides_preserve_workload_schedules_and_explicit_initialization(basel
     assert baseline == before
     for key in ("model", "optimizer", "data_stages", "parallelism", "logging"):
         assert effective[key] == baseline[key]
-    assert effective["tokens"]["train_steps"] == 50
+    assert effective["tokens"]["train_steps"] == 10000
     assert effective["checkpoints"]["resume_checkpoint_path"] == str(tmp_path)
     assert effective["checkpoints"]["load_optimizer"] is False
     assert effective["checkpoints"]["checkpoint_interval"] == 0
@@ -43,7 +43,7 @@ def test_overrides_preserve_workload_schedules_and_explicit_initialization(basel
 
 @pytest.mark.parametrize("world,warmup,steps,match", [
     (2, 1, 2, "WORLD_SIZE"), (1, 0, 2, "warmup-steps"),
-    (1, 1, 0, "steps"), (1, 1, 50, "horizon"),
+    (1, 1, 0, "steps"), (1, 1, 10000, "horizon"),
 ])
 def test_invalid_launch_is_rejected(baseline, tmp_path, world, warmup, steps, match):
     with pytest.raises(ValueError, match=match):

@@ -293,7 +293,7 @@ def test_50step_synthetic_run_and_checkpoint_conversion(nt, tmp_path_factory):
     """torchrun 50 steps on synthetic data; convert; reload; reproduce loss."""
     workdir = tmp_path_factory.mktemp("nanotron_smoke")
     config = _load_yaml(
-        ASTRO_DIR / "configs" / "nanotron" / "astropt3-test-tiny.yaml"
+        ASTRO_DIR / "tests" / "fixtures" / "astropt3-test-tiny.yaml"
     )
     config["checkpoints"]["checkpoints_path"] = str(workdir / "checkpoints")
     config_path = workdir / "test-tiny.yaml"

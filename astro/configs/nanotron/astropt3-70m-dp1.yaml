@@ -1,26 +1,21 @@
-# 70M JETFORMER crossmatch spectra run, v3 (GH200-shaped, DP=2, ZeRO-1).
-# Streams the DESI-left crossmatch via lsdb.streams.CrossMatchStream
-# (astronomy-commons/lsdb#1584, branch selective-x-match); replaced the
-# retired v2-era manual desi_catalog.crossmatch(...) + InfiniteStream
-# path. Adopted 2026-09-24 after the v2-vs-v3 isolation bench
-# (EXPERIMENTS.md §9): the stream's semantics match the manual crossmatch
-# exactly (record mix and per-modality rates identical at threshold 0.0),
-# and it is kept for its multi-catalog capability and upstream alignment
-# (ADR 0015), accepting a measured ~6-12% non-pad tokens/s mechanism tax
-# at 70M scale -- expected to shrink at larger model sizes where step time
-# hides loader latency. count_fraction_threshold stays 0.0 (skip off):
-# at 0.5 the skip saved 31% Legacy bytes but cost ~20% tokens/s and image
-# coverage; re-enable only after lsdb moves the skip decision off the
-# loader's critical path. See nanotron_loader.py's _open_records and
-# outer_crossmatch.py. Fresh run/checkpoints_path -- this run's whole
-# history is on CrossMatchStream, not a resume of v2.
+# Single-GPU copy of astropt3-70m.yaml for benchmarks and tests: identical
+# per-GPU workload (model, mbs 16 x seq 4096, 8 loading workers/rank) with
+# parallelism.dp 32 -> 1, so GBS is 65.5k tokens/step instead of 2.10M. Not a
+# training recipe; run name and checkpoint path differ so it cannot touch the
+# pilot's checkpoints.
+#
+#   torchrun --nproc_per_node=1 ... astro/scripts/benchmark_throughput.py \
+#       --config-file astro/configs/nanotron/astropt3-70m-dp1.yaml \
+#       --warmup-steps 10 --steps 200 --output <new dir>
 general:
   project: astropt3
-  run: astropt3-70m-jetformer-crossmatch-v3-xmatchstream-t01
+  run: astropt3-70m-dp1
   seed: 42
   step: null
   consumed_train_samples: null
   benchmark_csv_path: null
+  # must stay true: flattened modality tensors differ in shape across DP
+  # ranks, which the DP input sanity check cannot handle
   ignore_sanity_checks: true
 logging:
   iteration_step_info_interval: 1
@@ -34,6 +29,8 @@ model:
   make_vocab_size_divisible_by: 1
   model_config:
     is_astropt3_config: true
+    # pinned pilot modalities (verified MMU schemas); written out explicitly
+    # here for the record — these match the dataclass defaults
     modalities:
       - name: images
         input_size: 192
@@ -50,11 +47,6 @@ model:
         max_positions: 1024
         loss_weight: 1.0
     spiral: true # center-outward image patch order (ADR 0004)
-    jetformer_flow_steps: 4
-    jetformer_flow_hidden: 128
-    jetformer_gmm_k: 4
-    jetformer_noise_max: 0.1
-    jetformer_noise_min: 0.0
     hidden_size: 512
     num_hidden_layers: 23
     num_attention_heads: 8
@@ -81,33 +73,34 @@ model:
     _fused_rotary_emb: true
     log_attn_probs: false
 parallelism:
-  dp: 2
-  pp: 1
+  dp: 1
+  pp: 1 # PP=1 everywhere by design
   tp: 1
   context_parallel_size: 1
   expert_parallel_size: 1
   pp_engine: 1f1b
-  tp_mode: ALL_REDUCE
+  tp_mode: ALL_REDUCE # required: modality modules are TP-replicated
   tp_linear_async_communication: false
   recompute_layer: false
 data_stages:
-  - name: jetformer-crossmatch-test
+  - name: pilot-stable
     start_training_step: 1
     data:
       dataset:
-        is_astropt3_streaming: true
-        crossmatch_desi: true
+        is_astropt3_streaming: true # fixed LSDB InfiniteStream (ADR 0015)
+        crossmatch_desi: true # DESI-left CrossMatchStream, adds spectra (EXPERIMENTS §9)
       seed: 42
+      # DataLoader workers are the only source concurrency; LSDB is synchronous.
       num_loading_workers: 8
 optimizer:
   accumulate_grad_in_fp32: true
   clip_grad: 1.0
   learning_rate_scheduler:
-    learning_rate: 0.001
-    lr_warmup_steps: 200
+    learning_rate: 0.001 # Pythia 70M peak LR
+    lr_warmup_steps: 2000 # min(2000, 1% of train_steps)
     lr_warmup_style: linear
-    lr_decay_style: cosine
-    lr_decay_steps: null
+    lr_decay_style: cosine # cosine to 0.1x peak
+    lr_decay_steps: null # defaults to train_steps - warmup
     lr_decay_starting_step: null
     min_decay_lr: 0.0001
   optimizer_factory:
@@ -116,26 +109,27 @@ optimizer:
     adam_eps: 1.0e-08
     name: adamW
     torch_adam_is_fused: true
-  weight_decay: 0.1
+  weight_decay: 0.1 # on >=2D params; norms excluded below
   weight_decay_exclude_named_params:
     - .*layernorm.*
     - .*layer_norm.*
   zero_stage: 1
 tokens:
   sequence_length: 4096
-  train_steps: 60000
+  train_steps:
+    10000 # placeholder ~21B tokens (~4 pilot epochs);
+    # token budget finalized at launch (Phase 5)
   micro_batch_size: 16
   batch_accumulation_per_replica: 1
   val_check_interval: 100
-  limit_val_batches: 0
-  limit_test_batches: 0
+  limit_val_batches: 0 # eval never runs in the trainer (ADR 0015 defers
+  limit_test_batches: 0 # source-backed val/probe sweeps)
 checkpoints:
-  checkpoints_path: >-
-    ../astroPTv3_checkpoints/astropt3-70m-jetformer-crossmatch-v3
+  checkpoints_path: ../astroPTv3_checkpoints/astropt3-70m-dp1
+  checkpoint_schedule: pythia # steps 1,2,4,...,512 + every interval
   checkpoint_interval: 1000
   save_initial_state: false
   save_final_state: true
-  checkpoint_schedule: pythia
 tokenizer:
   tokenizer_name_or_path: null
 profiler: null
