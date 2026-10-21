@@ -1,6 +1,7 @@
 """ADR 0014 §3 report aggregation — the arithmetic that decides the arms."""
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -131,3 +132,261 @@ def test_e_values_does_not_move_under_replay(tmp_path):
     )
     assert replayed["E_AR_per_mib"] == pytest.approx(2 * replayed["E_AR_primary_per_mib"])
     assert replayed["objects"]["duplicate_lines"] == 0
+
+
+@pytest.mark.parametrize("tp", [1, 2])
+def test_world_rank_logs_count_tp_replicas_once_and_divide_by_world_size(tmp_path, tp):
+    _write(tmp_path, ranks=2 * tp)
+    for rank in range(2 * tp):
+        old = tmp_path / f"steps.dp{rank}.jsonl"
+        records = [json.loads(line) for line in old.read_text().splitlines()]
+        for record in records:
+            record.update(rank=rank, dp_rank=rank // tp, tp_rank=rank % tp, world_size=2 * tp)
+            if rank % tp:
+                record["tokens_nonpad"] *= 1000
+                record["rows"] *= 1000
+        _jsonl(tmp_path / f"steps.rank{rank}.jsonl", records)
+        old.unlink()
+    report = _report(tmp_path)
+    assert "schema_version" not in report
+    steps = report["steps"]
+    assert steps["n_steps"] == 4
+    assert steps["dp_ranks"] == 2
+    assert steps["world_size"] == 2 * tp
+    assert steps["tokens_nonpad"] == 7200
+    assert steps["rows"] == 400
+    assert steps["mfu"]["mfu"] == pytest.approx(4e14 / (100 * 312e12 * 2 * tp))
+
+
+def _json(path, value):
+    path.write_text(json.dumps(value))
+
+
+def _jsonl(path, records):
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+
+def _benchmark(directory, *, dp=1, tp=1, warmup=1, start=12, workers=0, durations=None):
+    durations = durations or [(1.0, 0.0), (1.0, 0.0), (1.0, 0.0), (97.0, 96.0)]
+    world = dp * tp
+    _json(directory / "run.json", {
+        "schema_version": 1, "world_size": world, "parallelism": {"dp": dp, "tp": tp},
+        "warmup_steps": warmup, "steps": len(durations),
+        "baseline_config": {"model": "70M"}, "overrides": {},
+    })
+    for rank in range(world):
+        dp_rank, tp_rank = divmod(rank, tp)
+        _json(directory / f"rank{rank}.json", {
+            "rank": rank, "dp_rank": dp_rank, "tp_rank": tp_rank, "status": "complete",
+            "start_step": start, "startup_s": 5.0 + rank, "ended_at": 2000.0,
+            "whole_run_s": 10.0 + 100 * warmup + sum(d for d, _ in durations) + rank,
+            "num_loading_workers": workers, "host": "fixture-host", "nic_link_mbps": {"eth0": 10000},
+            "gpu": {"name": "NVIDIA H200 NVL", "peak_tflops_per_gpu": 835.5},
+            "flops_estimate": {"dtype": "torch.bfloat16", "backbone_flops_per_token": 1e9,
+                               "modality_forward_flops_per_token": {"image": 2e6, "spectrum": 4e6}},
+        })
+        for consumer in [f"w{worker}" for worker in range(workers)] or ["main"]:
+            (directory / f"bytes.rank{rank}.{consumer}.jsonl").touch()
+        records, elapsed = [], 0.0
+        for index, (seconds, wait) in enumerate([(100.0, 90.0)] * warmup + durations, 1):
+            elapsed += seconds
+            # Warmup and TP-replica counters must never enter useful throughput.
+            multiplier = 1000 if index <= warmup or tp_rank else 1
+            records.append({
+                "rank": rank, "dp_rank": dp_rank, "tp_rank": tp_rank,
+                "world_size": world, "step": start + index,
+                "elapsed_s": elapsed, "step_seconds": seconds, "loader_wait_s": wait,
+                "tokens_nonpad": 900 * multiplier, "tokens_total": 1000 * multiplier,
+                "rows": 10 * multiplier, "micro_batches": 2,
+                "loss_tokens": {"image": 80 * multiplier, "spectrum": 20 * multiplier},
+                "target_values": {"image": 15360 * multiplier, "spectrum": 5120 * multiplier},
+            })
+        _jsonl(directory / f"steps.rank{rank}.jsonl", records)
+
+
+def _report(directory):
+    return bench_report.build_report(directory, None, "ignored-for-v1", 60.0)
+
+
+def test_benchmark_excludes_warmup_and_offsets_resumed_steps(tmp_path):
+    _benchmark(tmp_path, warmup=2, start=100)
+    report = _report(tmp_path)
+    assert report["status"] == "complete", report["diagnostics"]
+    assert report["run"]["baseline_config"] == {"model": "70M"}
+    metrics = report["metrics"]
+    assert metrics["timing"]["warmup_s"] == 200
+    assert metrics["timing"]["first_step_loader_wait_s"] == 90
+    assert metrics["timing"]["measured_s"] == 100
+    assert metrics["window"]["tokens_nonpad"] == 3600
+    assert metrics["window"]["rows"] == 40
+    assert metrics["useful_tokens_per_s"] == 36
+    assert metrics["packing"] == 0.9
+    assert metrics["loss_tokens_per_s"]["image"] == 3.2
+    assert metrics["window"]["composition"]["image"] == 0.8
+    text = bench_report.render(report)
+    for phrase in ("Useful tokens/s", "first-step loader wait", "p99", "stall share", "Payload"):
+        assert phrase in text
+    assert "short window" in text
+
+
+def test_benchmark_rates_and_stalls_are_weighted(tmp_path):
+    _benchmark(tmp_path)
+    metrics = _report(tmp_path)["metrics"]
+    assert metrics["useful_tokens_per_s"] == pytest.approx(3600 / 100)
+    assert metrics["stall_share"] == pytest.approx(96 / 100)
+    assert metrics["window"]["step_seconds"]["mean"] == 25
+    assert metrics["window"]["step_seconds"]["p95"] == 97
+    assert metrics["window"]["step_seconds"]["slow_steps"] == 1
+
+
+def test_dp2_tp2_counts_only_logical_data_but_times_all_ranks(tmp_path):
+    _benchmark(tmp_path, dp=2, tp=2)
+    path = tmp_path / "steps.rank3.jsonl"
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    records[-1]["step_seconds"] += 20  # a slow TP replica holds the whole step
+    _jsonl(path, records)
+    report = _report(tmp_path)
+    assert report["status"] == "complete", report["diagnostics"]
+    metrics = report["metrics"]
+    assert metrics["timing"]["measured_s"] == 120
+    assert metrics["window"]["tokens_nonpad"] == 7200
+    assert metrics["window"]["loss_tokens"] == {"image": 640, "spectrum": 160}
+    assert metrics["useful_tokens_per_s"] == 60
+    assert metrics["useful_tokens_per_s_per_gpu"] == 15
+
+
+@pytest.mark.parametrize("workers", [0, 2])
+def test_payload_counts_every_return_until_training_ends(tmp_path, workers):
+    _benchmark(tmp_path, dp=2, workers=workers)
+    payload = {"source": "legacy", "bytes": bench_report.MIB, "t": 1234.0, "wait_s": 1.5}
+    consumer = "w1" if workers else "main"
+    # The same range fetched twice costs bytes twice.
+    _jsonl(tmp_path / f"bytes.rank0.{consumer}.jsonl", [{**payload, "rank": 0}] * 2)
+    late = tmp_path / f"bytes.rank1.{consumer}.jsonl"
+    # Started before training ended (2000) but returned after it: excluded.
+    _jsonl(late, [{**payload, "rank": 1}, {**payload, "rank": 1, "t": 1999.0}])
+    with open(late, "a") as log:
+        log.write('{"source":')  # a worker still appending when the report runs
+    report = _report(tmp_path)
+    assert report["status"] == "complete", report["diagnostics"]
+    assert report["wire"]["total_bytes"] == 3 * bench_report.MIB
+    assert report["wire"]["by_source"]["legacy"]["fetches"] == 3
+    assert report["wire"]["fetch_wait_s"] == 4.5
+    assert report["wire"]["bytes_per_s"] == pytest.approx(3 * bench_report.MIB / 211)
+
+
+@pytest.mark.parametrize("missing", ["run.json", "rank1.json", "steps.rank1.jsonl", "bytes.rank1.main.jsonl"])
+def test_missing_input_is_partial(tmp_path, missing):
+    _benchmark(tmp_path, dp=2)
+    (tmp_path / missing).unlink()
+    report = _report(tmp_path)
+    assert report["status"] == "partial"
+    assert "metrics" not in report
+    assert any(missing in message for message in report["diagnostics"])
+
+
+@pytest.mark.parametrize("status", ["failed", "running", None])
+def test_noncomplete_rank_is_partial(tmp_path, status):
+    _benchmark(tmp_path)
+    path = tmp_path / "rank0.json"
+    _json(path, {**json.loads(path.read_text()), "status": status})
+    report = _report(tmp_path)
+    assert report["status"] == "partial"
+    assert any("status" in message for message in report["diagnostics"])
+
+
+@pytest.mark.parametrize("problem", ["missing_warmup", "missing_measured", "duplicate", "extra", "torn", "corrupt"])
+def test_invalid_step_series_is_partial(tmp_path, problem):
+    _benchmark(tmp_path)
+    path = tmp_path / "steps.rank0.jsonl"
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    if problem == "missing_warmup":
+        records.pop(0)
+    elif problem == "missing_measured":
+        records.pop()
+    elif problem == "duplicate":
+        records.append(records[-1])
+    elif problem == "extra":
+        records.append({**records[-1], "step": records[-1]["step"] + 1})
+    text = "".join(json.dumps(record) + "\n" for record in records)
+    if problem == "torn":  # crashed while writing the final step
+        text = text[:-20]
+    elif problem == "corrupt":
+        text = '{"step":\n' + text
+    path.write_text(text)
+    report = _report(tmp_path)
+    assert report["status"] == "partial"
+    assert "metrics" not in report
+    assert "PARTIAL" in bench_report.render(report)
+    assert path.read_text() == text
+
+
+@pytest.mark.parametrize("steps,seconds,warn", [(240, 0.25, False), (199, 1, True), (200, 0.1, True)])
+def test_short_window_warning_uses_either_threshold(tmp_path, steps, seconds, warn):
+    _benchmark(tmp_path, warmup=0, durations=[(seconds, 0)] * steps)
+    report = _report(tmp_path)
+    assert bool(report["warnings"]) is warn
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_cli_exit_status_and_json(tmp_path, complete):
+    _benchmark(tmp_path)
+    if not complete:
+        (tmp_path / "steps.rank0.jsonl").write_text('{"step":')
+    out = tmp_path / "report.json"
+    result = subprocess.run([
+        sys.executable, str(bench_report.__file__), "--telemetry", str(tmp_path), "--out", str(out),
+    ], capture_output=True, text=True, check=False)
+    assert result.returncode == (0 if complete else 1), result.stderr
+    assert json.loads(out.read_text())["status"] == ("complete" if complete else "partial")
+
+
+def _set_peaks(directory, peaks):
+    names = {835.5: "NVIDIA H200 NVL", 989.5: "NVIDIA H200 SXM", 312.0: "NVIDIA A100-SXM4-80GB"}
+    for rank, peak in enumerate(peaks):
+        path = directory / f"rank{rank}.json"
+        gpu = {"name": names.get(peak, "unknown GPU"), "peak_tflops_per_gpu": peak}
+        _json(path, {**json.loads(path.read_text()), "gpu": gpu})
+
+
+def test_benchmark_mfu_prices_measured_tokens_and_all_gpu_peaks(tmp_path):
+    _benchmark(tmp_path, dp=2, tp=2, warmup=2)
+    peaks = [835.5, 989.5, 312.0, 312.0]
+    _set_peaks(tmp_path, peaks)
+    path = tmp_path / "steps.rank3.jsonl"
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    records[-1]["step_seconds"] += 20  # slow TP replica counts in elapsed, not FLOPs
+    for record in records:
+        record["model_flops"] = 1e30  # legacy estimates must not enter schema-v1 MFU
+    _jsonl(path, records)
+    report = _report(tmp_path)
+    assert report["status"] == "complete", report["diagnostics"]
+    metrics, mfu = report["metrics"], report["metrics"]["mfu"]
+    expected_flops = 4 * 2 * (900 * 1e9 + 3 * (80 * 2e6 + 20 * 4e6))
+    assert mfu["model_flops"] == expected_flops
+    assert mfu["model_tflops_per_gpu"] == pytest.approx(expected_flops / (120 * 4 * 1e12))
+    assert mfu["mfu"] == pytest.approx(expected_flops / (120 * sum(peaks) * 1e12))
+    assert mfu["mfu_busy"] * (1 - metrics["stall_share"]) * metrics["packing"] == pytest.approx(mfu["mfu"])
+    text = bench_report.render(report)
+    assert "MFU estimate:" in text and "NVIDIA H200 SXM" in text
+    assert text.count("Fastest NIC link [fixture-host]: 10 Gbit/s") == 1  # per host, not per rank
+
+
+@pytest.mark.parametrize("problem", ["unknown_gpu", "wrong_dtype"])
+def test_unavailable_mfu_is_null_and_keeps_throughput(tmp_path, problem):
+    _benchmark(tmp_path, dp=2)
+    path = tmp_path / "rank1.json"
+    meta = json.loads(path.read_text())
+    meta.update(host="second-host", nic_link_mbps={"eth0": None})
+    if problem == "unknown_gpu":
+        meta["gpu"]["peak_tflops_per_gpu"] = None
+    else:
+        meta["flops_estimate"]["dtype"] = "torch.float32"
+    _json(path, meta)
+    report = _report(tmp_path)
+    assert report["status"] == "complete", report["diagnostics"]
+    assert report["metrics"]["useful_tokens_per_s"] == 72
+    assert report["metrics"]["mfu"]["mfu"] is None
+    text = bench_report.render(report)
+    assert "MFU: unavailable" in text
+    assert "Fastest NIC link [second-host]: unknown" in text

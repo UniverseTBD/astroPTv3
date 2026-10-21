@@ -172,3 +172,59 @@ automated checkpoint sweep.
 
 For a bounded live check with Hub access:
 `uv run pytest -m network tests/test_lsdb_stream.py`.
+
+## 8. Standard throughput benchmark
+
+Measures one real training YAML on the hardware it is launched on, using the
+training environment and the usual torchrun arguments:
+
+```bash
+CUDA_DEVICE_MAX_CONNECTIONS=1 \
+torchrun --nproc_per_node=<YAML dp*tp on this node> \
+    --rdzv-backend=c10d --rdzv-endpoint=localhost:0 --log-dir <logs> --tee 3 \
+    astro/scripts/benchmark_throughput.py \
+    --config-file astro/configs/nanotron/<config>.yaml \
+    --warmup-steps 10 --steps 200 --output /shared/benchmarks/<new-run>
+```
+
+`--output` must be a new directory, on storage every rank can see. The script
+runs nanotron's own trainer and loader for warmup + measured steps on top of
+any resumed step. The YAML horizon, LR/noise schedules, model, data and
+parallelism stay unchanged; checkpoints, eval, profiling, uploads and
+trackers are disabled and the overrides recorded. Explicit local
+initialization/resume is honoured, and an unresolvable resume fails rather than
+starting from random weights. Supported: one AstroPT streaming stage, PP=CP=EP=1.
+`--bandwidth-cap` and `--cache-state` only record context; nothing is throttled
+or flushed. On one GPU, `astropt3-70m-dp1.yaml` runs the 70M recipe's per-GPU
+workload (DP=1; same model, batch shape and loader workers).
+
+Outputs: `baseline.yaml`/`effective.yaml`/`resolved.yaml`, `run.json` (window
+and overrides), `rankN.json` (status, topology, host, GPU/CPU/RAM, software,
+code revisions, loader settings), raw `steps.rankN.jsonl` and
+`bytes.rankN.{main,wW}.jsonl`, and `result.json`, which the terminal
+summarises. Regenerate the report after a crash with
+`python astro/scripts/bench_report.py --telemetry <run> --out <run>/result.json`.
+A failed rank, a missing or extra step, or a missing byte log gives a
+`partial` report, no headline rates, and a nonzero exit.
+
+**Reading it.** Every step ends with a CUDA sync and a world barrier, so the
+measured window is synchronized wall time including loader stalls; compare runs
+under this same policy. Throughput is non-padding tokens over that window,
+counted once per TP group and summed over DP, then divided by world size for
+the per-GPU rate. The first batch (stream open and first fetch) lands in warmup and is
+reported as `first_step_loader_wait_s`. Modality mix and packing travel with the
+rate: a different mix is a different workload, and row counts are
+presentations, not unique objects. Payload bytes count every returned HF
+payload, duplicates and prefetch included, by source, from script start to the
+end of training on each rank. That rate is not link capacity. Windows under 200 steps
+or 60 s are flagged as limited evidence. CPU tests do not establish
+distributed correctness: validate an unexercised topology live first.
+
+**MFU** is an estimate: measured non-padding and loss tokens (TP counted once)
+priced with nanotron's own FLOPs/token, which assumes full-sequence attention
+and so is an upper bound, divided by measured seconds times the sum of every
+GPU's rated dense BF16 peak. Peaks come from an exact-name table
+(`DENSE_BF16_PEAKS`; H200 NVL 835.5 vs SXM 989.5 TFLOP/s). An unlisted
+GPU, a MIG slice or a non-BF16 run reports MFU as `null`, never zero.
+`rankN.json` also records each up physical NIC's negotiated link speed. The
+terminal shows the fastest per host; it is not internet or HF-route bandwidth.

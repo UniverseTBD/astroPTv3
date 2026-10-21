@@ -938,6 +938,62 @@ produce realistic noise. Full detail (tables, spatial-texture stats,
 ruled-out head defects, reproduction): git history at
 `astro/docs/jetformer_noise_diagnosis.md` (deleted 2026-09-28).
 
+## 13. Standard throughput benchmark validation (issue #45)
+
+`scripts/benchmark_throughput.py` bounds the real nanotron training loop
+without changing the YAML horizon or LR/noise schedules; usage and clock
+definitions are in [`docs/training.md` §8](docs/training.md#8-standard-throughput-benchmark).
+
+Functional checks (2026-10-20) ran on idle H200 NVL GPUs of a shared host, 2
+warmup + 5 measured steps, with the tiny YAML's 50-step horizon unchanged. DP1
+used that YAML as is (no loader workers); DP2 and TP2 used copies with that
+topology, one loader worker per rank and console logging every third step.
+All streamed live LegacySurvey data; cache state unknown.
+
+| topology | step records | measured non-pad tokens | returned payload bytes | result |
+|---|---:|---:|---:|---|
+| DP1 / TP1 | 7 | 15,300 | 8,708,962,755 | complete |
+| DP2 / TP1 | 7 per rank | 30,600 | 13,745,150,931 | complete |
+| DP1 / TP2 | 7 per rank | 15,300 | 17,417,925,510 | complete |
+
+TP2 counts tokens once but both replicas' downloads (2 × 8,708,962,755 B).
+Warmup was ~44–47 s, almost all of it the first batch, while the measured
+windows were 0.1–0.7 s: **these are execution/accounting checks, not
+throughput or scaling measurements** (the MFU estimates, 0.01–0.07% on a
+538k-parameter model, mean nothing). No checkpoints were written, and
+launching into an existing output directory failed before any write.
+Payload counts only what returned before training ended on each rank: one
+earlier DP1 check ended with a 178 MB fetch in flight and recorded 57 fetches
+instead of 58, in both the in-run and the regenerated report.
+
+Environment: Python 3.13.15, torch 2.8.0+cu128, flash-attn 2.8.3, driver
+615.71.09, LSDB `5102a8a9`; `rankN.json` records the rest. Not validated live:
+multi-node, mixed DP+TP, remote checkpoint staging.
+
+**Standard 70M runs** (10 warmup + 200 measured steps, GPUs 2-3; run dirs
+`astroPTv3_telemetry/benchmark-70m-*-20261020T*`):
+
+| config | GPUs | useful tokens/s (/GPU) | stall share | images / spectra | MFU est. |
+|---|---:|---:|---:|---|---:|
+| `70m-jetformer-crossmatch-v3`, pre-cut runner | 2 | 221,338 (110,669) | 38.1% | 74.5 / 25.5 | n/a |
+| `70m-jetformer-crossmatch-v3`, final runner | 2 | 253,793 (126,897) | 28.8% | 74.5 / 25.5 | 15.2% |
+| `astropt3-70m-dp1` (crossmatch) | 1 | 145,067 | 20.6% | 75.0 / 25.0 | 17.4% |
+
+The two v3 runs differ only in loader stalls: non-stalled window time was
+71.7 s vs 71.9 s, so the simplified runner measures the same work. The DP1
+run attributed 19.1 of 62.9 GiB returned payload to DESI, the first live
+check of DESI attribution.
+
+**Run configs consolidated (2026-10-20).** The size ladder now sets
+`crossmatch_desi: true` (the §9 recipe); before, it streamed LegacySurvey only
+and never saw spectra (a DP1 run without it was 100% images).
+`astropt3-70m-dp1.yaml` is the 70M per-GPU workload on one GPU, for benchmarks
+and tests. Deleted: the 70M jetformer YAMLs
+(`astropt3-70m-jetformer{,-crossmatch,-crossmatch-v3}.yaml`, whose model
+settings equal the ladder's defaults) and the DeltaAI/uhhpc launchers that
+defaulted to them; recover them from commit `279f0d9`. The 50-step smoke YAML is
+now the GPU-test fixture `tests/fixtures/astropt3-test-tiny.yaml`.
+
 ## Open items / not pursued
 
 - **`chunk=2`**: not tested after the section-7 re-tune; the win at 4 was

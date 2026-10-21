@@ -1,7 +1,6 @@
 """ADR 0014 §3 instrumentation: byte probe, step counters, loader wrapper.
 
-Source attribution is scoped to the surviving LegacySurvey anchor catalog
-(ADR 0015); retried source catalogs are gone with mmu-stream.
+Source attribution covers LegacySurvey and DESI, including duplicate fetches.
 """
 
 import json
@@ -17,7 +16,13 @@ MBS, SEQ_LEN = 2, 512
 
 
 @pytest.fixture(autouse=True)
-def _reset_counters():
+def _reset_counters(monkeypatch):
+    from huggingface_hub.hf_file_system import HfFileSystemFile, HfFileSystemStreamFile
+
+    monkeypatch.delenv("RANK", raising=False)
+    monkeypatch.setattr(telemetry, "_probe_pid", None)
+    monkeypatch.setattr(HfFileSystemFile, "_fetch_range", HfFileSystemFile._fetch_range)
+    monkeypatch.setattr(HfFileSystemStreamFile, "read", HfFileSystemStreamFile.read)
     telemetry.drain_step()
     yield
     telemetry.drain_step()
@@ -33,8 +38,7 @@ def test_telemetry_is_off_without_the_env_var(monkeypatch):
 def test_source_attribution_covers_the_legacy_anchor():
     anchor = "hf://datasets/UniverseTBD/mmu_ssl_legacysurvey_north/x.parquet"
     assert telemetry.source_of_path(anchor) == "legacy"
-    # everything retired with mmu-stream now falls through to unknown
-    assert telemetry.source_of_path("datasets/UniverseTBD/mmu_desi_edr_sv3/y.parquet") == "unknown"
+    assert telemetry.source_of_path("datasets/UniverseTBD/mmu_desi_edr_sv3/y.parquet") == "desi"
     assert telemetry.source_of_path("s3://somewhere/else.parquet") == "unknown"
 
 
@@ -112,7 +116,7 @@ def test_write_step_appends_one_line_per_step(tmp_path, monkeypatch):
     monkeypatch.setenv(telemetry.TELEMETRY_DIR_ENV, str(tmp_path))
     telemetry.write_step(1, {"tokens_nonpad": 7}, rank=1)
     telemetry.write_step(2, {"tokens_nonpad": 9}, rank=1)
-    lines = (tmp_path / "steps.dp1.jsonl").read_text().splitlines()
+    lines = (tmp_path / "steps.rank1.jsonl").read_text().splitlines()
     assert [json.loads(line)["step"] for line in lines] == [1, 2]
     assert json.loads(lines[1])["tokens_nonpad"] == 9
 
@@ -120,7 +124,7 @@ def test_write_step_appends_one_line_per_step(tmp_path, monkeypatch):
 def test_byte_probe_records_payload_bytes(tmp_path, monkeypatch):
     """The probe must count RETURNED payload, not requests (§11)."""
     monkeypatch.setenv(telemetry.TELEMETRY_DIR_ENV, str(tmp_path))
-    monkeypatch.setattr(telemetry, "_probe_installed", False)
+    monkeypatch.setenv("RANK", "7")
 
     from huggingface_hub.hf_file_system import HfFileSystemFile
 
@@ -141,9 +145,34 @@ def test_byte_probe_records_payload_bytes(tmp_path, monkeypatch):
     payload = HfFileSystemFile._fetch_range(fake, 100, 356)
     assert len(payload) == 256
 
-    entry = json.loads((tmp_path / "bytes.dp0.w3.jsonl").read_text().splitlines()[0])
+    entry = json.loads((tmp_path / "bytes.rank7.w3.jsonl").read_text().splitlines()[0])
+    assert entry["rank"] == 7
+    assert entry["dp_rank"] == 0
     assert entry["bytes"] == 256
     assert (entry["start"], entry["end"]) == (100, 356)
     assert entry["source"] == "legacy"
     assert entry["worker"] == 3
     assert entry["wait_s"] >= 0
+    # The same range fetched twice costs bytes twice; never deduplicate it.
+    HfFileSystemFile._fetch_range(fake, 100, 356)
+    records = [json.loads(line) for line in (tmp_path / "bytes.rank7.w3.jsonl").read_text().splitlines()]
+    assert sum(record["bytes"] for record in records) == 512
+
+
+def test_stream_probe_counts_returned_payload_not_requested_length(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from huggingface_hub.hf_file_system import HfFileSystemStreamFile
+
+    monkeypatch.setenv(telemetry.TELEMETRY_DIR_ENV, str(tmp_path))
+    monkeypatch.setattr(HfFileSystemStreamFile, "read", lambda self, length=-1: b"abc")
+    assert telemetry.install_byte_probe(rank=0)
+    assert telemetry.install_byte_probe(rank=0)  # idempotent, no doubled log
+    fake = SimpleNamespace(loc=12, path="datasets/UniverseTBD/mmu_desi_edr_sv3/properties")
+    assert HfFileSystemStreamFile.read(fake, 999) == b"abc"  # pyright: ignore[reportArgumentType] -- fake remote file
+    records = (tmp_path / "bytes.rank0.main.jsonl").read_text().splitlines()
+    assert len(records) == 1
+    entry = json.loads(records[0])
+    assert entry["bytes"] == 3
+    assert entry["source"] == "desi"
+    assert entry["worker"] is None

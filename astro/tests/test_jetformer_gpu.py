@@ -43,7 +43,7 @@ ASTRO_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = ASTRO_DIR.parent
 NANOTRON_DIR = REPO_ROOT / "nanotron"
 TOOLS_DIR = NANOTRON_DIR / "tools" / "astropt3"
-JET_YAML = ASTRO_DIR / "configs" / "nanotron" / "astropt3-test-tiny.yaml"
+JET_YAML = ASTRO_DIR / "tests" / "fixtures" / "astropt3-test-tiny.yaml"
 
 
 @pytest.fixture(scope="session")

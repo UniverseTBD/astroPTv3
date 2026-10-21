@@ -2,11 +2,11 @@
 
 Two halves, because the numbers live in different processes:
 
-- **Byte probe** — patches ``HfFileSystemFile._fetch_range``, the only
-  accepted instrument (§11 refuses HTTP-request counting, which counts
-  *ranges*, and contiguous-log-run counting, which cannot separate 16
-  interleaved workers). It runs inside each loader worker, so each worker
-  writes its own ``bytes.dp{rank}.w{worker}.jsonl``: one line per fetch with
+- **Byte probe** — measures returned ``HfFileSystemFile._fetch_range`` and
+  ``HfFileSystemStreamFile.read`` payloads, not request counts. The latter
+  includes whole-file metadata reads that bypass the range reader. It runs
+  inside each loader worker (or the main process with zero workers), writing
+  its own world-rank/worker byte log: one line per returned payload with
   the fields §3 asks for — rank, worker, source, path, byte range, payload
   bytes, fetch wait.
 - **Step counters** — accumulated in the MAIN process by :class:`TelemetryLoader`,
@@ -31,17 +31,18 @@ from __future__ import annotations
 import json
 import os
 import time
-from functools import lru_cache
+from functools import lru_cache, wraps
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from ..tokenization import BOS_ID, PAD_ID
 
 TELEMETRY_DIR_ENV = "ASTROPT3_TELEMETRY_DIR"
 
-# ADR 0015: the legacy anchor catalog is the only surviving source
 _CATALOG_SOURCES = {
     "legacy": "hf://datasets/UniverseTBD/mmu_ssl_legacysurvey_north",
+    "desi": "hf://datasets/UniverseTBD/mmu_desi_edr_sv3",
 }
 _REPO_TO_SOURCE = {
     catalog.split("hf://datasets/")[-1].split("@")[0]: source
@@ -76,55 +77,69 @@ def source_of_path(path: str) -> str:
 
 # -- byte probe (runs inside each loader worker) ------------------------------
 
-_probe_installed = False
+_probe_pid: int | None = None
 
 
-def install_byte_probe(rank: int = 0, worker: int = 0) -> bool:
-    """Patch ``_fetch_range`` to log every payload this process pulls.
+def install_byte_probe(rank: int = 0, worker: int | None = None) -> bool:
+    """Log returned range and streaming-read payloads, including duplicates.
 
     Idempotent per process (each DataLoader worker is its own process and
     calls this once from :meth:`PackedMicroBatches.__iter__`). Returns whether
     the probe is active.
     """
-    global _probe_installed
-    if _probe_installed:
+    global _probe_pid
+    if _probe_pid == os.getpid():
         return True
     directory = telemetry_dir()
     if directory is None:
         return False
     try:
-        from huggingface_hub.hf_file_system import HfFileSystemFile
+        from huggingface_hub.hf_file_system import (
+            HfFileSystemFile,
+            HfFileSystemStreamFile,
+        )
     except ImportError:  # hub not installed (synthetic-only runs)
         return False
 
-    # pi-lens-ignore: unchecked-throwing-call-python
-    log = open(directory / f"bytes.dp{rank}.w{worker}.jsonl", "a", buffering=1)
-    original = HfFileSystemFile._fetch_range
+    world_rank = int(os.environ.get("RANK", rank))
+    consumer = "main" if worker is None else f"w{worker}"
+    log_path = directory / f"bytes.rank{world_rank}.{consumer}.jsonl"
+    log_path.touch()  # an empty log still proves the probe was installed
+    lock = Lock()
 
+    def record(file, payload, start, began, clock):
+        path = str(getattr(file, "path", ""))
+        entry = {
+            "t": began, "wait_s": time.perf_counter() - clock,
+            "rank": world_rank, "dp_rank": rank, "worker": worker,
+            "source": source_of_path(path), "path": path,
+            "start": start, "end": start + len(payload), "bytes": len(payload),
+        }
+        # Dask fetches several partitions concurrently in this process.
+        # pi-lens-ignore: unchecked-throwing-call-python -- failed logging must fail the benchmark
+        with lock, open(log_path, "a") as log:
+            log.write(json.dumps(entry) + "\n")
+
+    original = getattr(HfFileSystemFile._fetch_range, "__wrapped__", HfFileSystemFile._fetch_range)
+    original_read = getattr(HfFileSystemStreamFile.read, "__wrapped__", HfFileSystemStreamFile.read)
+
+    @wraps(original)
     def _fetch_range(self, start: int, end: int) -> bytes:
-        began = time.time()
+        began, clock = time.time(), time.perf_counter()
         payload = original(self, start, end)
-        path = str(getattr(self, "path", ""))
-        log.write(
-            json.dumps(
-                {
-                    "t": began,
-                    "wait_s": time.time() - began,
-                    "dp": rank,
-                    "worker": worker,
-                    "source": source_of_path(path),
-                    "path": path,
-                    "start": start,
-                    "end": end,
-                    "bytes": len(payload),
-                }
-            )
-            + "\n"
-        )
+        record(self, payload, start, began, clock)
         return payload
 
-    HfFileSystemFile._fetch_range = _fetch_range  # type: ignore[method-assign]
-    _probe_installed = True
+    @wraps(original_read)
+    def read(self, length=-1):
+        began, clock, start = time.time(), time.perf_counter(), self.loc
+        payload = original_read(self, length)
+        record(self, payload, start, began, clock)
+        return payload
+
+    HfFileSystemFile._fetch_range = _fetch_range
+    HfFileSystemStreamFile.read = read
+    _probe_pid = os.getpid()
     return True
 
 
@@ -212,13 +227,13 @@ def drain_step() -> dict[str, Any]:
 
 
 def write_step(step: int, record: dict, rank: int = 0) -> None:
-    """Append one per-step record to ``steps.dp{rank}.jsonl``."""
+    """Append one per-step record; ``rank`` is the WORLD rank, not DP rank."""
     directory = telemetry_dir()
     if directory is None:
         return
     # pi-lens-ignore: unchecked-throwing-call-python
-    with open(directory / f"steps.dp{rank}.jsonl", "a") as log:
-        log.write(json.dumps({"step": step, **record}) + "\n")
+    with open(directory / f"steps.rank{rank}.jsonl", "a") as log:
+        log.write(json.dumps({"step": step, **record, "rank": rank}) + "\n")
 
 
 # -- loader wrapper -----------------------------------------------------------

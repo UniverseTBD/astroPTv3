@@ -91,6 +91,8 @@ experimental LSDB cutover; do not interpret the checks above as a completed
 training-phase verification. Pure model-side evaluation and sample rendering
 remain in `src/astropt3/eval/` and `scripts/generate.py`.
 
+For a bounded, YAML-based training benchmark with standard JSON results, see
+[throughput benchmarking](docs/training.md#8-standard-throughput-benchmark).
 The [loader experiment log](EXPERIMENTS.md) records measured throughput and
 coverage limits. [ADR 0015](docs/adr/0015-lsdb-infinite-stream-training.md)
 documents the initial LSDB cutover; its original image-only source decision

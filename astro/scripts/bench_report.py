@@ -6,12 +6,14 @@ Usage:
 
 Reads what the instruments wrote during a benchmark window:
 
-- ``bytes.dp*.w*.jsonl``  — one line per ``_fetch_range`` payload (§3)
-- ``steps.dp*.jsonl``     — one line per step, with the decomposed MFU (§2a)
+- ``bytes.rank*.jsonl``   — one line per returned payload (§3)
+- ``steps.rank*.jsonl``   — one line per step, with the decomposed MFU (§2a)
 - ``{object_log}.dp*``    — one line per emitted sequence (the no-replay audit)
 
-and reports the four metrics of §2 plus the timing distribution. Two rules
-from the ADR are enforced here rather than left to the reader:
+(older runs wrote ``bytes.dp*``/``steps.dp*``; both are read) and reports the
+four metrics of §2 plus the timing distribution. A directory written by
+``benchmark_throughput.py`` (it has ``run.json``) gets the schema-v1 report
+instead. Two rules from the ADR are enforced here rather than left to the reader:
 
 - MFU is only ever printed decomposed (§11 refuses the headline number);
 - ``E_AR`` is broken into primary and replay tokens, because replay raises it
@@ -24,6 +26,7 @@ import argparse
 import json
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 MIB = 1024 * 1024
 TIB = 1024**4
@@ -31,11 +34,12 @@ TIB = 1024**4
 
 def _read_jsonl(paths):
     for path in paths:
-        with open(path) as handle:
-            for line in handle:
-                line = line.strip()
-                if line:
-                    yield json.loads(line)
+        text = Path(path).read_text()
+        # Only newline-terminated lines are records: a loader worker may still
+        # be appending its byte log while the benchmark reports.
+        for line in text.split("\n")[:-1]:
+            if line.strip():
+                yield json.loads(line)
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -48,10 +52,14 @@ def percentile(values: list[float], fraction: float) -> float:
 
 
 def summarise_bytes(directory: Path) -> dict:
+    return _summarise_byte_records(_read_jsonl(sorted(directory.glob("bytes.*.jsonl"))))
+
+
+def _summarise_byte_records(records) -> dict:
     by_source: Counter = Counter()
     fetches: Counter = Counter()
     wait = 0.0
-    for entry in _read_jsonl(sorted(directory.glob("bytes.dp*.w*.jsonl"))):
+    for entry in records:
         by_source[entry["source"]] += entry["bytes"]
         fetches[entry["source"]] += 1
         wait += entry.get("wait_s", 0.0)
@@ -83,16 +91,23 @@ def _step_seconds(record: dict) -> float:
 
 
 def summarise_steps(directory: Path, slow_threshold: float) -> dict:
-    rank_files = sorted(directory.glob("steps.dp*.jsonl"))
-    records = list(_read_jsonl(rank_files))
+    paths = sorted(directory.glob("steps.*.jsonl"))
+    return _summarise_step_series([list(_read_jsonl([path])) for path in paths], slow_threshold)
+
+
+def _summarise_step_series(series: list[list[dict]], slow_threshold: float) -> dict:
+    """Aggregate one record list per rank file (world rank; DP rank in older logs)."""
+    records = [record for entries in series for record in entries]
     if not records:
         return {}
-    n_ranks = max(len(rank_files), 1)
+    n_ranks = max(record.get("world_size", 0) for record in records) or len(series)
+    # Older logs lack tp_rank: each file is then one DP rank.
+    dp_ranks = sum(any(record.get("tp_rank", 0) == 0 for record in entries) for entries in series)
 
     # Every DP rank writes its own series for the SAME steps — they run
     # concurrently, so concatenating them would report 2x the steps. Group by
-    # step number: sum the per-rank token counts (each rank packs its own
-    # data), take the slowest rank's wall time (the step ends when the last
+    # step number: sum TP0 token counts (TP replicas share the same data),
+    # take the slowest world rank's wall time (the step ends when the last
     # rank does), and take the flops estimate once (it is already global).
     by_step: dict[int, dict] = {}
     for record in records:
@@ -120,11 +135,12 @@ def summarise_steps(directory: Path, slow_threshold: float) -> dict:
                 * n_ranks
             )
         merged["flops"] = max(merged["flops"], flops)
-        merged["nonpad"] += record.get("tokens_nonpad", 0)
-        merged["total"] += record.get("tokens_total", 0)
-        merged["rows"] += record.get("rows", 0)
-        merged["loss_tokens"].update(record.get("loss_tokens", {}))
-        merged["target_values"] += sum(record.get("target_values", {}).values())
+        if record.get("tp_rank", 0) == 0:
+            merged["nonpad"] += record.get("tokens_nonpad", 0)
+            merged["total"] += record.get("tokens_total", 0)
+            merged["rows"] += record.get("rows", 0)
+            merged["loss_tokens"].update(record.get("loss_tokens", {}))
+            merged["target_values"] += sum(record.get("target_values", {}).values())
 
     steps = [by_step[k] for k in sorted(by_step)]
     durations = [s["seconds"] for s in steps]
@@ -159,7 +175,8 @@ def summarise_steps(directory: Path, slow_threshold: float) -> dict:
 
     return {
         "n_steps": len(steps),
-        "dp_ranks": gpus,
+        "dp_ranks": dp_ranks,
+        "world_size": gpus,
         "step_seconds": {
             "mean": total_wall / len(steps),
             "p50": percentile(durations, 0.50),
@@ -241,7 +258,149 @@ def summarise_objects(prefix: Path | None) -> dict:
     }
 
 
+def _load(path: Path, jsonl: bool = False) -> Any:
+    try:
+        return list(_read_jsonl([path])) if jsonl else json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{path.name}: {exc}") from exc
+
+
+def _benchmark_mfu(metas: list[dict], window: list[list[dict]], seconds: float,
+                   packing: float, stall_share: float) -> dict:
+    """Estimated MFU: measured TP0 tokens priced with the model's own FLOP counts,
+    over the rated dense BF16 peak of every participating GPU (docs/training.md §8)."""
+    peaks = [meta["gpu"]["peak_tflops_per_gpu"] for meta in metas]
+    if None in peaks:
+        return {"mfu": None, "unavailable_reason": "GPU variant not in the dense BF16 peak table"}
+    if any("bfloat16" not in meta["flops_estimate"]["dtype"] for meta in metas):
+        return {"mfu": None, "unavailable_reason": "peak table is BF16-only"}
+    flops = 0.0
+    for meta, records in zip(metas, window, strict=True):
+        costs = meta["flops_estimate"]
+        for record in records if meta["tp_rank"] == 0 else []:
+            flops += costs["backbone_flops_per_token"] * record["tokens_nonpad"]
+            # forward + backward = 3x the forward cost of each modality head
+            flops += 3 * sum(count * costs["modality_forward_flops_per_token"][name]
+                             for name, count in record["loss_tokens"].items())
+    mfu = flops / (seconds * sum(peaks) * 1e12)
+    return {
+        "mfu": mfu,
+        "mfu_busy": mfu / ((1 - stall_share) * packing) if packing and stall_share < 1 else None,
+        "model_flops": flops,
+        "model_tflops_per_gpu": flops / seconds / len(metas) / 1e12,
+    }
+
+
+def build_benchmark_report(directory: Path, slow: float = 60.0) -> dict:
+    """Schema-v1 report: ``complete`` only if every world rank ran the exact window."""
+    report = {"schema_version": 1, "status": "partial", "telemetry_dir": str(directory),
+              "diagnostics": [], "warnings": []}
+    problems = report["diagnostics"]
+    try:
+        run = report["run"] = _load(directory / "run.json")
+        world, warmup, measured = run["world_size"], run["warmup_steps"], run["steps"]
+        metas = [_load(directory / f"rank{rank}.json") for rank in range(world)]
+        series = [_load(directory / f"steps.rank{rank}.jsonl", jsonl=True) for rank in range(world)]
+    except (ValueError, KeyError) as exc:
+        problems.append(f"{type(exc).__name__}: {exc}")
+        return report
+    report["ranks"] = {str(rank): meta for rank, meta in enumerate(metas)}
+    for rank, (meta, records) in enumerate(zip(metas, series, strict=True)):
+        if meta.get("status") != "complete":
+            problems.append(f"rank {rank}: status is {meta.get('status')!r}, not 'complete'")
+        start = meta.get("start_step", 0)
+        if [record.get("step") for record in records] != list(range(start + 1, start + warmup + measured + 1)):
+            problems.append(f"steps.rank{rank}.jsonl: expected exactly steps {start + 1}-{start + warmup + measured}")
+        for consumer in [f"w{worker}" for worker in range(meta.get("num_loading_workers", 0))] or ["main"]:
+            if not (directory / f"bytes.rank{rank}.{consumer}.jsonl").is_file():
+                problems.append(f"bytes.rank{rank}.{consumer}.jsonl: missing (byte probe never installed)")
+    if problems:
+        return report
+
+    try:
+        # Every step ends with a CUDA sync and a world barrier, so the summed
+        # slowest-rank step times are the window's synchronized wall time.
+        window = _summarise_step_series([records[warmup:] for records in series], slow)
+        seconds = window["step_seconds"]["total_s"]
+        stalls = window.pop("mfu")  # legacy per-step MFU is not the benchmark's GPU-aware estimate
+        mfu = _benchmark_mfu(metas, [records[warmup:] for records in series], seconds,
+                             stalls["utilisation_packing"], stalls["stall_share"])
+        # Payload: everything returned (t + wait_s) between script entry and the end
+        # of training on each rank, on that rank's own host clock, so a report
+        # rebuilt after in-flight prefetch lands gives the same total.
+        ended_at = [meta["ended_at"] for meta in metas]
+        wire = _summarise_byte_records(
+            record for record in _read_jsonl(sorted(directory.glob("bytes.rank*.jsonl")))
+            if record["t"] + record["wait_s"] <= ended_at[record["rank"]]
+        )
+        whole_run_s = max(meta["whole_run_s"] for meta in metas)
+        wire["bytes_per_s"] = wire["total_bytes"] / whole_run_s
+        metrics = {
+            "useful_tokens_per_s": window["tokens_nonpad"] / seconds,
+            "useful_tokens_per_s_per_gpu": window["tokens_nonpad"] / seconds / world,
+            "loss_tokens_per_s": {name: count / seconds for name, count in window["loss_tokens"].items()},
+            "packing": stalls["utilisation_packing"],
+            "stall_share": stalls["stall_share"],
+            "mfu": mfu,
+            "timing": {
+                "startup_s": max(meta["startup_s"] for meta in metas),
+                "first_step_loader_wait_s": max(records[0]["loader_wait_s"] for records in series),
+                "warmup_s": max(records[warmup - 1]["elapsed_s"] for records in series) if warmup else 0.0,
+                "measured_s": seconds,
+                "whole_run_s": whole_run_s,
+            },
+            "window": window,
+        }
+    except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+        problems.append(f"malformed input: {type(exc).__name__}: {exc}")
+        return report
+    report.update(status="complete", metrics=metrics, wire=wire)
+    if measured < 200 or seconds < 60:
+        report["warnings"].append("short window (<200 steps or <60 s): limited evidence, "
+                                  "not a stable hardware comparison")
+    return report
+
+
+def _render_benchmark(report: dict) -> str:
+    lines = [f"# Throughput benchmark (schema v{report['schema_version']}): {report['status'].upper()}"]
+    if report["status"] != "complete":
+        return "\n".join(lines + [f"  {problem}" for problem in report["diagnostics"]])
+    metrics, wire = report["metrics"], report["wire"]
+    timing, window = metrics["timing"], metrics["window"]
+    steps = window["step_seconds"]
+    gpus = ", ".join(sorted({meta["gpu"]["name"] for meta in report["ranks"].values()}))
+    lines += [
+        f"Useful tokens/s: {metrics['useful_tokens_per_s']:,.1f} "
+        f"({metrics['useful_tokens_per_s_per_gpu']:,.1f}/GPU over {report['run']['world_size']} x {gpus})",
+        f"Packing {metrics['packing']:.1%}; stall share {metrics['stall_share']:.1%}; "
+        f"{window['rows_per_s']:,.1f} rows/s",
+        f"Timing: startup {timing['startup_s']:.1f}s; first-step loader wait "
+        f"{timing['first_step_loader_wait_s']:.1f}s; warmup {timing['warmup_s']:.1f}s; "
+        f"measured {window['n_steps']} steps / {timing['measured_s']:.1f}s",
+        f"Step seconds: mean {steps['mean']:.2f}  p50 {steps['p50']:.2f}  p95 {steps['p95']:.2f}  "
+        f"p99 {steps['p99']:.2f}  slow(>{steps['slow_threshold_s']:.0f}s) {steps['slow_steps']}",
+        f"Payload: {wire['total_mib']:,.1f} MiB, {wire['bytes_per_s'] / MIB:,.2f} MiB/s over the whole run",
+        "Composition: " + ", ".join(f"{name} {share:.1%}" for name, share in window["composition"].items()),
+    ]
+    mfu = metrics["mfu"]
+    if mfu["mfu"] is None:
+        lines.append(f"MFU: unavailable ({mfu['unavailable_reason']})")
+    else:
+        busy = f"{mfu['mfu_busy']:.2%}" if mfu["mfu_busy"] is not None else "unavailable"
+        lines.append(f"MFU estimate: {mfu['mfu']:.2%} = busy {busy} x non-stalled "
+                     f"{1 - metrics['stall_share']:.3f} x packing {metrics['packing']:.3f}; "
+                     f"{mfu['model_tflops_per_gpu']:.2f} TFLOP/s/GPU")
+    hosts = {meta["host"]: [speed for speed in meta["nic_link_mbps"].values() if speed]
+             for meta in report["ranks"].values()}
+    for host, speeds in hosts.items():
+        lines.append(f"Fastest NIC link [{host}]: "
+                     + (f"{max(speeds) / 1000:g} Gbit/s" if speeds else "unknown"))
+    return "\n".join(lines + [f"WARNING: {warning}" for warning in report["warnings"]])
+
+
 def build_report(directory: Path, object_log: Path | None, arm: str, slow: float):
+    if (directory / "run.json").exists() or any(directory.glob("rank*.json")):
+        return build_benchmark_report(directory, slow)
     wire = summarise_bytes(directory)
     steps = summarise_steps(directory, slow)
     objects = summarise_objects(object_log)
@@ -274,6 +433,8 @@ def build_report(directory: Path, object_log: Path | None, arm: str, slow: float
 
 
 def render(report: dict) -> str:
+    if "schema_version" in report:
+        return _render_benchmark(report)
     lines = [f"# ADR 0014 §3 benchmark — arm {report['arm']}", ""]
     wire = report["wire"]
     lines.append(f"Wire: {wire['total_mib']:.1f} MiB over "
@@ -362,7 +523,8 @@ def main():
     print(render(report))
     if args.out:
         Path(args.out).write_text(json.dumps(report, indent=2))
+    return 1 if report.get("status") == "partial" else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

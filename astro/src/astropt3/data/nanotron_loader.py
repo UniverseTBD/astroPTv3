@@ -719,7 +719,7 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
 
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
-        install_byte_probe(self.rank, worker.id if worker else 0)
+        install_byte_probe(self.rank, worker.id if worker else None)
         records = self._open_records(worker)
         rows: list[list] = [[] for _ in range(self.micro_batch_size)]
         used = [0] * self.micro_batch_size

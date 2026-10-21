@@ -2,7 +2,7 @@
 #
 #   cd <repo root> && CUDA_DEVICE_MAX_CONNECTIONS=1 \
 #     torchrun --nproc_per_node=1 nanotron/run_train.py \
-#       --config-file astro/configs/nanotron/astropt3-test-tiny.yaml
+#       --config-file astro/tests/fixtures/astropt3-test-tiny.yaml
 #
 # 4 layers (not 2 as the HF test-tiny) so a NoPE layer (idx 3) is exercised.
 general:
