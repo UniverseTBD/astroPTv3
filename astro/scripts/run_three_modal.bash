@@ -8,11 +8,16 @@ if [[ $# -lt 1 || $# -gt 2 || ! ${1:-} =~ ^[0-9]+$ || ! ${2-1} =~ ^0*[1-9][0-9]*
     exit 2
 fi
 
+ECHO_ARGS=()
+if [[ $# -eq 2 ]]; then
+    ECHO_ARGS=(--echo-factor "$2")
+fi
+
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 WORKSPACE=$(dirname -- "$REPO_ROOT")
 LSDB_SRC="$WORKSPACE/lsdb-pr-1584/src"
 PYTHON="$REPO_ROOT/.venv-astropt3/bin/python"
-OUTPUT="$WORKSPACE/astroPTv3_telemetry/four-modal-30k-echo${2-1}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+OUTPUT="$WORKSPACE/astroPTv3_telemetry/four-modal-30k-echo${2-config}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 
 if [[ ! -x "$PYTHON" || ! -f "$LSDB_SRC/lsdb/streams/catalog_streams.py" ]]; then
     echo "Requires $PYTHON and the LSDB checkout at $LSDB_SRC" >&2
@@ -35,4 +40,4 @@ exec env -u HF_HUB_OFFLINE -u HF_DATASETS_OFFLINE -u NANOTRON_BENCHMARK \
         --max-restarts=0 \
         astro/scripts/train_three_catalogs.py \
         --output "$OUTPUT" \
-        --echo-factor "${2-1}"
+        "${ECHO_ARGS[@]}"

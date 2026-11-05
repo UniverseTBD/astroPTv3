@@ -66,6 +66,7 @@ data_stages:
     dataset:
       is_astropt3_streaming: true
       crossmatch_desi: true         # include DESI spectra where present
+      echo_factor: 1               # total uses per batch; >1 shuffles within each draw
     num_loading_workers: 8          # concurrent LSDB readers per DP rank
     seed: 42
 ```
@@ -131,7 +132,7 @@ co-launch hook are removed; §6 describes the remaining model-side tools.
 ## 5. Checkpoints and resume
 
 Checkpoint dirs `{1,2,4,...,512,1000,...}` hold model weights (bf16),
-optimizer + LR-scheduler state, RNG states, `model_config.json`;
+optimizer + LR-scheduler state, RNG states, `model_config.json`, `config.yaml`;
 `latest.txt` is written last, so any step dir it covers is complete.
 
 Resume:
@@ -238,34 +239,49 @@ modified or restarted.
 
 ```bash
 # Fresh 30k-update runs; choose an available GPU after checking nvidia-smi.
-bash astro/scripts/run_three_modal.bash GPU_INDEX       # echo factor 1 (default)
+bash astro/scripts/run_three_modal.bash GPU_INDEX       # saved config/default factor (1)
 bash astro/scripts/run_three_modal.bash GPU_INDEX 2     # separately labeled echo-2 run
 ```
 
-`--echo-factor N` must be a positive integer and includes the original use.
-The adapter retains **one loaded CPU batch**, after the worker DataLoader and
-before telemetry/device transfer, for N separate optimizer updates. Worker
-prefetch remains active. The first presentation retains the existing seeded
-`ObjectSequencer` shuffle. Each echo redraws a uniform modality-span order with
-`span_order`, seeded by the run seed and batch-local group/row/object/echo
-coordinates (object IDs are no longer present in packed batches). An order may
-repeat by chance; distinct permutations are not guaranteed. Objects remain in
-the same rows and positions; within-modality patch order, physical targets,
-modality positions, and document position IDs do not change. Single-modality
-objects repeat too, so echoing does not selectively favor multimodal objects.
-CPU tensors are read-only and every delivered dictionary is separate; only
-reshuffled token IDs/masks are newly allocated, retaining pinned memory.
+`data_stages[].data.dataset.echo_factor` is a positive integer counting total
+uses, including the original. It defaults to **1**. The adapter's optional
+`--echo-factor N` overrides this saved setting before writing effective/resolved
+YAML; ordinary Nanotron YAML launches use the same loader implementation.
+
+For N > 1, **each worker packs one already-loaded LSDB/HEALPix draw separately**,
+including its padded final batch. It caches those CPU batches once, shuffles
+N references to each batch with a private seeded RNG, and emits every exposure
+before advancing to another draw. Batches never mix records from different
+draws. Empty draws emit nothing. This shuffles batches across optimizer updates,
+not merely rows within a batch; adjacent repetitions can still occur by chance.
+The cache holds one packed draw per worker, in addition to existing LSDB and
+DataLoader prefetch. Packing the whole draw increases first-batch latency and
+memory versus streaming one batch at a time. Echoes themselves perform no
+catalogue reads, but normal prefetch remains active.
+
+The first actual exposure retains the existing `ObjectSequencer` modality
+shuffle. Subsequent exposures redraw whole modality spans with `span_order`,
+seeded by run/rank/worker/draw and batch/row/object/exposure coordinates. An order
+may repeat by chance. Objects remain in the same rows and positions;
+within-modality patch order, physical targets, modality positions, and document
+position IDs do not change. Single-modality objects repeat too. Cached tensors
+are read-only and every delivered dictionary is separate; only reshuffled token
+IDs/masks are newly allocated. Worker metadata is stripped in the main process
+before device transfer, even with telemetry disabled. **Factor 1 keeps the
+existing streaming packer**, including packing across draw boundaries.
 
 The old `ar_replicas` / `replica_placement` options and their generation/placement
-machinery are removed. Remove those keys from older training YAMLs. Echoing is
-an adapter option, not a replacement dataset YAML key. Model architecture,
-loss aggregation, optimizer, stochastic model noise, and update-based LR/noise/
-checkpoint schedules are unchanged. Echo factors above 1 require
-`batch_accumulation_per_replica=1`; distributed echo support is not provided.
-A 30k-update echo-2 run consumes about 15k newly delivered batches.
+machinery are removed. Remove those keys from older training YAMLs. Model
+architecture, loss aggregation, optimizer, stochastic model noise, and
+update-based LR/noise/checkpoint schedules are unchanged. Echo factors above 1
+require `batch_accumulation_per_replica=1` and `world_size=dp_size=1`; unsupported
+topologies fail before opening data. Each exposure is a separate optimizer
+update, not gradient accumulation. Completed draws have exactly N uses per
+batch; stopping partway through a draw can leave uneven exposure counts.
 
-The factor and ordering policy are recorded in local `run.json` / `progress.json`
-and the existing metrics/config-only W&B payload. No code, data, paths,
+The factor is saved in effective/resolved/checkpoint YAML. The factor and
+ordering policy also appear in local `run.json` / `progress.json` and the
+existing metrics/config-only W&B payload. No code, data, paths,
 provenance, or machine metadata is added to W&B. Per-step telemetry preserves
 processed counts and adds `echo_index` (zero-based), `fresh_*` and `replayed_*`
 counts for microbatches, nonpadding tokens, object occurrences (`rows`), modality
@@ -278,17 +294,20 @@ stalls. A repeat after warmup earns no fresh credit even if its initial use fell
 inside warmup.
 
 Resume still restores weights/optimizer/scheduler/RNG, not the data cursor.
-Supply `--echo-factor N` again alongside `--resume-from CHECKPOINT_ROOT` and a
-**new** `--output` directory using the same torchrun environment. Every new
-iterator starts a new group at echo index zero; pending repeats are not saved.
+With `--resume-from CHECKPOINT_ROOT` and a **new** `--output` directory, the
+four-survey adapter reads the factor from the checkpoint's `config.yaml`
+(defaulting to 1 for legacy files without the field). An explicit `--echo-factor`
+overrides it. Ordinary Nanotron launches use their supplied run YAML; use the
+saved checkpoint config to retain its factor. Every new iterator starts a fresh
+stream/draw with per-batch exposure counts at zero; pending repeats are not saved.
 Checkpoint consumption ledgers count processed exposures, including echoes.
 Four-survey resume requires HSC in the checkpoint. Historical HSC/JWST weights
 trained with the reversed zero-point conversion require their original
 preprocessing or retraining; this runner uses the corrected conversion.
 
-Start with a separately labeled factor **1 versus 2** comparison at matched
-initialization and explicit update/fresh-data budgets. CPU tests establish
-batch alignment/accounting, not a speedup. Adoption requires improved wall time
-to held-out quality with per-survey checks, especially SDSS; an untouched
-holdout must be supplied. Factor-4 experiments, new augmentations, example
-shuffle buffers, and exact replay checkpointing remain out of scope.
+This implements draw-scoped shuffled batch reuse; it does not launch an
+experiment campaign or change an active run. CPU tests establish alignment,
+accounting, and configuration persistence, not throughput or held-out quality.
+The general default remains 1. Example-level mixing, new augmentations, exact
+replay checkpointing, and distributed echoing remain out of scope. See the
+[paper evidence and policy note](shuffled-echo-factor-policy.md).

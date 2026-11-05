@@ -19,6 +19,9 @@ import torch
 import yaml
 from legacy_fixture import make_record, nested_frame
 
+from astropt3.data.echo import echo_draw
+from astropt3.tokenization import BOS_ID, PAD_ID
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import train_three_catalogs as run  # pyright: ignore[reportMissingImports] -- scripts added above
 
@@ -64,6 +67,31 @@ def test_training_config_keeps_batch_shape_and_checkpoint_schedule(tmp_path):
     )
 
 
+@pytest.mark.parametrize("configured,override,expected", [(None, None, 1), (2, None, 2), (2, 3, 3), (3, 1, 1)])
+def test_echo_config_has_one_saved_source_of_truth(tmp_path, configured, override, expected):
+    baseline = yaml.safe_load(
+        (run.REPO / "astro/configs/nanotron/astropt3-70m-dp1.yaml").read_text()
+    )
+    if configured is not None:
+        baseline["data_stages"][0]["data"]["dataset"]["echo_factor"] = configured
+    before = copy.deepcopy(baseline)
+    config = run.prepare_config(baseline, tmp_path / "output", echo_factor=override)
+    assert baseline == before
+    restored = yaml.safe_load(yaml.safe_dump(config))
+    assert restored["data_stages"][0]["data"]["dataset"]["echo_factor"] == expected
+    assert run.wandb_config(restored, None)["echo_factor"] == expected
+
+
+@pytest.mark.parametrize("factor", [0, -1, True, 1.5, "2"])
+def test_echo_config_rejects_invalid_yaml_values(tmp_path, factor):
+    baseline = yaml.safe_load(
+        (run.REPO / "astro/configs/nanotron/astropt3-70m-dp1.yaml").read_text()
+    )
+    baseline["data_stages"][0]["data"]["dataset"]["echo_factor"] = factor
+    with pytest.raises(ValueError, match="positive integer"):
+        run.prepare_config(baseline, tmp_path / "output")
+
+
 def test_wandb_config_keeps_training_settings_without_local_provenance(tmp_path):
     baseline = yaml.safe_load(
         (run.REPO / "astro/configs/nanotron/astropt3-70m-dp1.yaml").read_text()
@@ -76,7 +104,9 @@ def test_wandb_config_keeps_training_settings_without_local_provenance(tmp_path)
     assert config == before
     assert set(payload) == {"training", "stream", "max_steps", "echo_factor", "echo_order", "throughput_policy"}
     assert payload["echo_factor"] == 1
-    assert run.wandb_config(config, 1, echo_factor=3)["echo_factor"] == 3
+    configured = run.prepare_config(baseline, tmp_path / "configured", echo_factor=3)
+    assert run.wandb_config(configured, 1)["echo_factor"] == 3
+    assert configured["data_stages"][0]["data"]["dataset"]["echo_factor"] == 3
     assert str(tmp_path) not in json.dumps(payload)
     assert "private-commit" not in json.dumps(payload)
     assert "provenance" not in json.dumps(payload)
@@ -160,16 +190,17 @@ def hsc_image():
 class OfflineCatalogBatches(run.ThreeCatalogBatches):
     """Keep real worker serialization/packing; replace only external records."""
 
-    def _open_records(self, worker):
+    def _open_draws(self, worker):
         assert worker is not None and worker.id == 0
         record = make_record(1, image_only_fraction=0.0)
         record["spectrum_sdss"] = sdss_spectrum()
         record["hsc_image"] = hsc_image()
         while True:
-            yield record
+            yield iter([record])
 
 
-def test_spawned_worker_includes_hsc(monkeypatch, tmp_path):
+@pytest.mark.parametrize("factor", [1, 2])
+def test_spawned_worker_includes_hsc(monkeypatch, tmp_path, factor):
     monkeypatch.delenv("ASTROPT3_TELEMETRY_DIR", raising=False)
     monkeypatch.setattr(run.loader, "PackedMicroBatches", OfflineCatalogBatches)
     baseline = yaml.safe_load(
@@ -177,7 +208,7 @@ def test_spawned_worker_includes_hsc(monkeypatch, tmp_path):
     )
     config = run.prepare_config(baseline, tmp_path / "output")
     batches = run.loader.build_astropt3_dataloader(
-        dataset_args=SimpleNamespace(),
+        dataset_args=SimpleNamespace(echo_factor=factor),
         model_config=SimpleNamespace(**config["model"]["model_config"]),
         micro_batch_size=1,
         sequence_length=512,
@@ -197,8 +228,16 @@ def test_spawned_worker_includes_hsc(monkeypatch, tmp_path):
             for key, value in batch.items()
             if key.endswith("_values")
         )
+        assert all(isinstance(value, torch.Tensor) for value in batch.values())
+        if factor > 1:
+            repeated = next(iterator)
+            assert batches.echo_index == 1
+            torch.testing.assert_close(repeated["hsc_images_values"], batch["hsc_images_values"])
     finally:
-        iterator._shutdown_workers()
+        if hasattr(iterator, "_shutdown_workers"):
+            iterator._shutdown_workers()
+        else:
+            iterator.close()
 
 
 @pytest.mark.parametrize("source", ["sdss", "desi", "hsc"])
@@ -431,8 +470,11 @@ def test_resume_requires_hsc(tmp_path, saved_hsc):
     (checkpoint / "model_config.json").write_text(
         json.dumps({"modalities": modalities})
     )
+    (checkpoint / "config.yaml").write_text(yaml.safe_dump({
+        "data_stages": [{"data": {"dataset": {}}}],
+    }))
     if saved_hsc:
-        run.validate_resume(tmp_path)
+        assert run.validate_resume(tmp_path) == 1
     else:
         with pytest.raises(ValueError, match="Checkpoint has no HSC Wide modality"):
             run.validate_resume(tmp_path)
@@ -539,12 +581,30 @@ def test_launcher_selects_gpu_and_starts_full_run_without_offline_flags(tmp_path
         "astro/scripts/train_three_catalogs.py",
         "--output",
         output,
-        "--echo-factor",
-        echo_arg or "1",
+        *(["--echo-factor", echo_arg] if echo_arg else []),
     ]
     assert Path(output).parent == tmp_path / "astroPTv3_telemetry"
     assert Path(output).name.startswith("four-modal-30k-")
     assert not Path(output).exists()
+
+
+def echo_record(record, index, factor):
+    """Make a hand-counted step record for the wall-time aggregation tests."""
+    result = {**record, "echo_index": index, "echo_factor": factor}
+    for prefix, include in (("fresh", index == 0), ("replayed", index != 0)):
+        for key in ("micro_batches", "tokens_nonpad", "rows"):
+            result[f"{prefix}_{key}"] = record[key] if include else 0
+        for key in ("loss_tokens", "target_values"):
+            result[f"{prefix}_{key}"] = {
+                name: count if include else 0 for name, count in record[key].items()
+            }
+    return result
+
+
+def echo_loader(batches, config, *, echo_factor=1, seed=42):
+    return run.telemetry.TelemetryLoader(
+        echo_draw(batches, config, echo_factor=echo_factor, seed=seed), enabled=False,
+    )
 
 
 def test_throughput_uses_wall_time_weighted_counts_and_excludes_warmup():
@@ -559,7 +619,7 @@ def test_throughput_uses_wall_time_weighted_counts_and_excludes_warmup():
         "target_values": {},
         "micro_batches": 1,
     }
-    record = run.echo_record(record, 0, 1)
+    record = echo_record(record, 0, 1)
     warmup = meter.observe(10, record)
     assert warmup["throughput/warmup"]
     assert "throughput/cumulative_nonpad_tokens_per_s" not in warmup
@@ -605,57 +665,11 @@ def echo_batch(tmp_path):
     return hf, run.loader.flatten_packed_batch(packed, hf, 1024)
 
 
-@pytest.mark.parametrize("factor", [1, 2, 3])
-def test_echo_consumes_once_per_group_and_protects_cached_dictionary(echo_batch, factor):
-    config, batch = echo_batch
-
-    class Source:
-        dataset = object()
-        num_workers = 4
-        pin_memory = False
-        calls = 0
-
-        def __len__(self):
-            return 2
-
-        def __iter__(self):
-            for _ in range(2):
-                self.calls += 1
-                yield batch
-
-    source = Source()
-    wrapped = run.EchoLoader(source, config, echo_factor=factor, seed=42)
-    assert wrapped.dataset is source.dataset
-    assert wrapped.num_workers == 4
-    assert wrapped.pin_memory is False
-    assert len(wrapped) == 2 * factor
-    iterator = iter(wrapped)
-    assert source.calls == 0
-    for index in range(2 * factor):
-        delivered = next(iterator)
-        assert source.calls == index // factor + 1
-        assert wrapped.echo_index == index % factor
-        assert delivered is not batch
-        assert set(delivered) == set(batch)
-        if index % factor == 0:
-            for key in batch:
-                assert delivered[key] is batch[key]
-        for key in batch:
-            if key.endswith(("_values", "_positions")) or key == "position_ids":
-                assert delivered[key] is batch[key]
-        delivered.clear()
-    with pytest.raises(StopIteration):
-        next(iterator)
-    assert batch["input_ids"].numel() > 0
-    next(iter(wrapped))
-    assert wrapped.echo_index == 0
-
-
 @pytest.mark.parametrize("factor", [0, -1])
 def test_echo_rejects_nonpositive_factors(echo_batch, factor):
     config, batch = echo_batch
     with pytest.raises(ValueError, match="echo-factor"):
-        run.EchoLoader([batch], config, echo_factor=factor)
+        list(echo_loader([batch], config, echo_factor=factor))
 
 
 def test_echo_shuffle_preserves_objects_patch_alignment_and_rng(echo_batch):
@@ -664,8 +678,8 @@ def test_echo_shuffle_preserves_objects_patch_alignment_and_rng(echo_batch):
     config, batch = echo_batch
     before = {key: value.clone() for key, value in batch.items()}
     rng = random.getstate(), torch.get_rng_state()
-    echoes = list(run.EchoLoader([batch], config, echo_factor=3, seed=42))
-    repeated = list(run.EchoLoader([batch], config, echo_factor=3, seed=42))
+    echoes = list(echo_loader([batch], config, echo_factor=3, seed=42))
+    repeated = list(echo_loader([batch], config, echo_factor=3, seed=42))
     assert random.getstate() == rng[0]
     assert torch.equal(torch.get_rng_state(), rng[1])
     changed = False
@@ -678,8 +692,8 @@ def test_echo_shuffle_preserves_objects_patch_alignment_and_rng(echo_batch):
             assert echoed[f"{name}_positions"] is batch[f"{name}_positions"]
         assert echoed["position_ids"] is batch["position_ids"]
         for old_row, new_row in zip(batch["input_ids"].tolist(), echoed["input_ids"].tolist(), strict=True):
-            starts = [i for i, token in enumerate(old_row) if token == run.BOS_ID]
-            ends = starts[1:] + [old_row.index(run.PAD_ID)] if starts else []
+            starts = [i for i, token in enumerate(old_row) if token == BOS_ID]
+            ends = starts[1:] + [old_row.index(PAD_ID)] if starts else []
             for start, end in zip(starts, ends, strict=True):
                 old_spans, new_spans = {}, {}
                 for name in config.modality_registry().names():
@@ -689,39 +703,14 @@ def test_echo_shuffle_preserves_objects_patch_alignment_and_rng(echo_batch):
                             a, b = row.index(begin, start, end), row.index(finish, start, end)
                             spans[name] = row[a:b + 1]
                 assert old_spans == new_spans
-                assert new_row[start] == run.BOS_ID
+                assert new_row[start] == BOS_ID
                 if len(old_spans) == 1:
                     assert old_row[start:end] == new_row[start:end]
                 changed |= old_row[start:end] != new_row[start:end]
-            assert new_row[len(new_row) - new_row.count(run.PAD_ID):] == [run.PAD_ID] * new_row.count(run.PAD_ID)
+            assert new_row[len(new_row) - new_row.count(PAD_ID):] == [PAD_ID] * new_row.count(PAD_ID)
     assert changed
     for key in before:
         assert torch.equal(batch[key], before[key])
-
-
-def test_echo_mid_group_stop_exhaustion_and_upstream_failure(echo_batch):
-    config, batch = echo_batch
-    calls = []
-
-    def source():
-        calls.append("fetch")
-        yield batch
-        calls.append("error")
-        raise RuntimeError("upstream failed")
-
-    iterator = iter(run.EchoLoader(source(), config, echo_factor=3))
-    next(iterator)
-    next(iterator)
-    assert calls == ["fetch"]
-    iterator.close()
-    assert calls == ["fetch"]
-    iterator = iter(run.EchoLoader(source(), config, echo_factor=3))
-    for _ in range(3):
-        next(iterator)
-    assert calls == ["fetch", "fetch"]
-    with pytest.raises(RuntimeError, match="upstream failed"):
-        next(iterator)
-    assert list(run.EchoLoader([], config, echo_factor=3)) == []
 
 
 @pytest.mark.parametrize("factor", [2, 3])
@@ -735,7 +724,7 @@ def test_echo_runs_independent_model_optimizer_updates(echo_batch, tiny_config, 
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-4)
     snapshots = []
     original = {key: value.clone() for key, value in batch.items()}
-    for echoed in run.EchoLoader([batch], config, echo_factor=factor):
+    for echoed in echo_loader([batch], config, echo_factor=factor):
         # CPU counterpart of nanotron's non-mutating top-level device transfer.
         moved = {key: value.to("cpu", copy=True, memory_format=torch.contiguous_format,
                                non_blocking=True) for key, value in echoed.items()}
@@ -758,7 +747,7 @@ def test_pinned_echo_cache_survives_nanotron_device_transfer(echo_batch):
     config, batch = echo_batch
     pinned = {key: value.pin_memory() for key, value in batch.items()}
     before = {key: value.clone() for key, value in pinned.items()}
-    echoed = run.EchoLoader([pinned], config, echo_factor=3)
+    echoed = echo_loader([pinned], config, echo_factor=3)
     for cpu_batch in echoed:
         assert all(value.is_pinned() for value in cpu_batch.values())
         transferred = next(sanity_check_dataloader(
@@ -786,14 +775,14 @@ def test_echo_telemetry_counts_and_wait_attribution(echo_batch, monkeypatch, tmp
     def source():
         for _ in range(2):
             clock[0] += 5.0
-            yield batch
+            yield from echo_draw([batch], config, echo_factor=3, seed=42)
 
-    wrapped = run.instrument_echo(source(), config=config, echo_factor=3, seed=42)
+    wrapped = run.telemetry.instrument(source(), echo_factor=3)
     assert isinstance(wrapped, run.telemetry.TelemetryLoader)
     run.telemetry.drain_step()
     records = []
     for _ in wrapped:
-        record = run.echo_record(run.telemetry.drain_step(), wrapped.echo_index, 3)
+        record = run.telemetry.drain_step()
         records.append(record)
         run.telemetry.write_step(len(records), record)
     assert [r["loader_wait_s"] for r in records] == [5, 0, 0, 5, 0, 0]
@@ -805,7 +794,7 @@ def test_echo_telemetry_counts_and_wait_attribution(echo_batch, monkeypatch, tmp
             assert record[key] == record[f"fresh_{key}"] + record[f"replayed_{key}"]
         for key in ("loss_tokens", "target_values"):
             for name, count in record[key].items():
-                assert count == record[f"fresh_{key}"][name] + record[f"replayed_{key}"][name]
+                assert count == record[f"fresh_{key}"].get(name, 0) + record[f"replayed_{key}"].get(name, 0)
     assert sum(r["fresh_rows"] for r in records) == 8
     assert sum(r["replayed_rows"] for r in records) == 16
     saved = [json.loads(line) for line in (tmp_path / "steps.rank0.jsonl").read_text().splitlines()]
@@ -818,12 +807,12 @@ def test_fresh_throughput_excludes_warmup_even_across_echo_boundary(start_step):
     base = {"micro_batches": 1, "tokens_nonpad": 100, "rows": 2,
             "step_seconds": 10.0, "loader_wait_s": 8.0,
             "utilisation_packing": 0.8, "loss_tokens": {"images": 90}, "target_values": {"images": 90 * 192}}
-    meter.observe(start_step + 10, run.echo_record(base, 0, 2))
-    first = meter.observe(start_step + 11, run.echo_record(
+    meter.observe(start_step + 10, echo_record(base, 0, 2))
+    first = meter.observe(start_step + 11, echo_record(
         {**base, "step_seconds": 2.0, "loader_wait_s": 0.0}, 1, 2))
     assert first["throughput/cumulative_fresh_nonpad_tokens_per_s"] == 0
     assert first["data/fresh_images_loss_tokens"] == 0
-    second = meter.observe(start_step + 12, run.echo_record(base, 0, 2))
+    second = meter.observe(start_step + 12, echo_record(base, 0, 2))
     assert second["throughput/cumulative_nonpad_tokens_per_s"] == pytest.approx(200 / 12)
     assert second["throughput/cumulative_fresh_nonpad_tokens_per_s"] == pytest.approx(100 / 12)
     assert second["throughput/cumulative_fresh_rows_per_s"] == pytest.approx(2 / 12)
@@ -841,13 +830,17 @@ def test_python_cli_rejects_bad_echo_before_creating_output(monkeypatch, tmp_pat
     assert not output.exists()
 
 
-def test_main_wires_echo_accounting_and_restarts_mid_group(echo_batch, monkeypatch, tmp_path):
-    _, batch = echo_batch
+def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path):
+    source_record = make_record(1, image_only_fraction=0.0)
+    source_record.update(spectrum_sdss=sdss_spectrum(), hsc_image=hsc_image())
     resume = tmp_path / "checkpoints"
     (resume / "2").mkdir(parents=True)
     (resume / "latest.txt").write_text("2\n")
     (resume / "2/model_config.json").write_text(json.dumps({
         "modalities": [{"name": "hsc_images"}],
+    }))
+    (resume / "2/config.yaml").write_text(yaml.safe_dump({
+        "data_stages": [{"data": {"dataset": {"echo_factor": 3}}}],
     }))
 
     class FakeTrainer:
@@ -858,7 +851,9 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(echo_batch, monkeypat
             self.parallel_context = None
             self.random_states = {}
             self.num_params = {"total": 1}
-            self.config = SimpleNamespace(save_as_yaml=lambda path: path.write_text("{}\n"))
+            self.dataset_args = SimpleNamespace(**config["data_stages"][0]["data"]["dataset"])
+            self.model_config = SimpleNamespace(**config["model"]["model_config"])
+            self.config = SimpleNamespace(save_as_yaml=lambda path: path.write_text(yaml.safe_dump(config)))
 
         def train(self, dataloaders, max_steps):
             self.current_base_dl = dataloaders["stage"]
@@ -870,20 +865,21 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(echo_batch, monkeypat
                 run.telemetry.write_step(self.metadata.last_train_step, record)
             iterator.close()
 
-    def run_attempt(attempt):
+    def run_attempt(attempt, override, expected_factor):
         output = tmp_path / f"run-{attempt}"
         consumed, logged, payloads = [], [], []
 
-        class Source(torch.utils.data.IterableDataset):
-            def __iter__(self):
+        class Source(run.loader.PackedMicroBatches):
+            def _open_draws(self, worker):
                 consumed.append("fresh")
-                yield batch
+                yield iter([source_record])
                 raise AssertionError("fetched before the echo group ended")
 
         def get_dataloader(trainer):
-            return {"stage": run.loader.instrument(torch.utils.data.DataLoader(
-                Source(), batch_size=None, num_workers=0,
-            ))}
+            return {"stage": run.loader.build_astropt3_dataloader(
+                trainer.dataset_args, trainer.model_config, 1, 512, 0, 1,
+                num_workers=0, multiprocessing_context=None,
+            )}
 
         tracker = SimpleNamespace(
             url="https://wandb.ai/test/echo", id="test", summary={},
@@ -908,6 +904,7 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(echo_batch, monkeypat
                 patch.setitem(sys.modules, name, module)
             for name in ("PackedMicroBatches", "build_astropt3_dataloader", "instrument"):
                 patch.setattr(run.loader, name, getattr(run.loader, name))
+            patch.setattr(run, "ThreeCatalogBatches", Source)
             patch.setattr(run.telemetry, "write_step", run.telemetry.write_step)
             patch.setattr(run.torch, "set_num_threads", lambda _: None)
             patch.setattr(run.torch.cuda, "memory_allocated", lambda: 0)
@@ -916,24 +913,29 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(echo_batch, monkeypat
             patch.setenv("WORLD_SIZE", "1")
             patch.delenv("ASTROPT3_TELEMETRY_DIR", raising=False)
             patch.setattr(sys, "argv", ["train_three_catalogs.py", "--output", str(output),
-                                       "--echo-factor", "3", "--max-steps", "2",
+                                       "--max-steps", "2",
+                                       *(["--echo-factor", str(override)] if override else []),
                                        *(["--resume-from", str(resume)] if attempt else [])])
             run.main()
         records = [json.loads(line) for line in (output / "telemetry/steps.rank0.jsonl").read_text().splitlines()]
         assert consumed == ["fresh"]
         assert [record["echo_index"] for record in records] == [0, 1]
         assert [record["fresh_micro_batches"] for record in records] == [1, 0]
-        assert [step for step, _ in logged] == [attempt * 2 + 1, attempt * 2 + 2]
+        assert [step for step, _ in logged] == ([3, 4] if attempt else [1, 2])
         assert [metrics["data/echo_index"] for _, metrics in logged] == [0, 1]
-        assert payloads[0]["echo_factor"] == 3
+        assert payloads[0]["echo_factor"] == expected_factor
         state = json.loads((output / "run.json").read_text())
-        assert state["echo_factor"] == 3
+        assert state["echo_factor"] == expected_factor
+        for filename in ("effective.yaml", "resolved.yaml"):
+            effective = yaml.safe_load((output / filename).read_text())
+            assert effective["data_stages"][0]["data"]["dataset"]["echo_factor"] == expected_factor
         assert state["status"] == "startup-check-passed"
         if attempt:
             assert state["rng_restored"]
 
-    run_attempt(0)
-    run_attempt(1)
+    run_attempt(0, 3, 3)
+    run_attempt(1, None, 3)
+    run_attempt(2, 2, 2)
 
 
 @pytest.mark.parametrize("factor", [None, "3"])
@@ -942,13 +944,13 @@ def test_python_cli_forwards_echo_and_checks_accumulation_before_outputs(monkeyp
     output = tmp_path / "output"
     monkeypatch.setattr(sys, "argv", ["train_three_catalogs.py", "--output", str(output),
                                      *(["--echo-factor", factor] if factor else [])])
-    expected = int(factor or "1")
+    expected = int(factor) if factor else None
     original = run.prepare_config
 
     def prepare(baseline, output, resume, echo_factor):
         assert echo_factor == expected
         baseline["tokens"]["batch_accumulation_per_replica"] = 2
-        if echo_factor == 1:
+        if echo_factor is None:
             original(baseline, output, resume, echo_factor)
             raise ValueError("test stops before initialization")
         return original(baseline, output, resume, echo_factor)

@@ -10,8 +10,8 @@ without a Legacy match, SDSS/DESI/HSC are not crossmatched with each other.
 Adding HSC requires a fresh model, not a three-survey checkpoint resume.
 Historical HSC/JWST checkpoints using the reversed zero-point normalization
 require their original preprocessing or retraining.
---echo-factor N uses each CPU batch for N updates, reshuffling modality spans
-on echoes (default 1). Supply it again on resume; pending echoes are discarded.
+--echo-factor N overrides the saved dataset echo_factor (default 1).
+Resume restores the saved factor unless overridden; pending echoes are discarded.
 """
 
 from __future__ import annotations
@@ -39,8 +39,7 @@ from lsdb.streams.catalog_streams import CrossMatchStream
 
 from astropt3.data import nanotron_loader as loader
 from astropt3.data import telemetry
-from astropt3.data.packing import span_order
-from astropt3.tokenization import BOS_ID, PAD_ID
+from astropt3.data.echo import validate_echo_factor
 
 REPO = Path(__file__).resolve().parents[2]
 CATALOGS = {
@@ -65,7 +64,7 @@ STREAM = {
 }
 
 
-def validate_resume(resume_from: Path) -> None:
+def validate_resume(resume_from: Path) -> int:
     step = (resume_from / "latest.txt").read_text().strip()
     # pi-lens-ignore: unchecked-throwing-call-python -- main reports invalid resume before creating outputs
     saved = json.loads((resume_from / step / "model_config.json").read_text())
@@ -75,19 +74,26 @@ def validate_resume(resume_from: Path) -> None:
             "Checkpoint has no HSC Wide modality; start a fresh four-survey "
             "run without --resume-from"
         )
+    saved_config = yaml.safe_load((resume_from / step / "config.yaml").read_text())
+    factor = saved_config["data_stages"][0]["data"]["dataset"].get("echo_factor", 1)
+    validate_echo_factor(factor)
+    return factor
 
 
 def prepare_config(
     baseline: dict,
     output: Path,
     resume_from: Path | None = None,
-    echo_factor: int = 1,
+    echo_factor: int | None = None,
 ) -> dict:
-    """Keep the established per-GPU recipe, adding modalities and the run horizon."""
-    validate_echo_factor(echo_factor)
-    if echo_factor > 1 and baseline["tokens"]["batch_accumulation_per_replica"] != 1:
-        raise ValueError("echo-factor > 1 requires batch_accumulation_per_replica=1")
+    """Resolve the optional CLI override into the saved dataset configuration."""
     config = copy.deepcopy(baseline)
+    dataset = config["data_stages"][0]["data"]["dataset"]
+    factor = dataset.get("echo_factor", 1) if echo_factor is None else echo_factor
+    validate_echo_factor(factor)
+    if factor > 1 and config["tokens"]["batch_accumulation_per_replica"] != 1:
+        raise ValueError("echo-factor > 1 requires batch_accumulation_per_replica=1")
+    dataset["echo_factor"] = factor
     config["general"].update(project="astropt3", run=output.name)
     config["parallelism"].update(dp=1, tp=1)
     model = config["model"]["model_config"]
@@ -136,7 +142,7 @@ def prepare_config(
     return config
 
 
-def wandb_config(config: dict, max_steps: int | None, echo_factor: int = 1) -> dict:
+def wandb_config(config: dict, max_steps: int | None) -> dict:
     """Publish training settings only; filesystem paths and provenance stay local."""
     training = {
         key: copy.deepcopy(config[key])
@@ -156,8 +162,8 @@ def wandb_config(config: dict, max_steps: int | None, echo_factor: int = 1) -> d
         "training": training,
         "stream": copy.deepcopy(STREAM),
         "max_steps": max_steps,
-        "echo_factor": echo_factor,
-        "echo_order": "seeded_uniform_modality_spans",
+        "echo_factor": config["data_stages"][0]["data"]["dataset"]["echo_factor"],
+        "echo_order": "draw_shuffled_batches_and_modality_spans",
         "throughput_policy": "synchronized end-to-end wall time including loader/checkpoint stalls; first 10 steps warmup",
     }
 
@@ -215,7 +221,7 @@ def decode_row(mapped):
 class ThreeCatalogBatches(loader.PackedMicroBatches):
     """Reuse the sequencer, packer, and flat batch contract; change only live records."""
 
-    def _open_records(self, worker):
+    def _open_draws(self, worker):
         worker_id = worker.id if worker else 0
         failures = generation = draw = 0
         settings = STREAM
@@ -291,7 +297,9 @@ class ThreeCatalogBatches(loader.PackedMicroBatches):
                         decoded = frame.map_rows(
                             decode_row, columns=columns, infer_nesting=False
                         )
-                        yield from decoded["record"]
+                        records = iter(decoded["record"].tolist())
+                        del decoded, frame
+                        yield records
                 raise RuntimeError("Infinite crossmatch stream ended unexpectedly")
             except Exception as error:
                 if not loader._retryable(error):
@@ -307,108 +315,6 @@ class ThreeCatalogBatches(loader.PackedMicroBatches):
                 )
                 time.sleep(wait)
                 generation += 1
-
-
-def validate_echo_factor(factor):
-    if type(factor) is not int or factor < 1:
-        raise ValueError("echo-factor must be a positive integer")
-
-
-class EchoLoader:
-    """Cache one CPU batch; tensors are read-only, each yielded mapping is owned.
-
-    Only modality spans move, never objects or patches within a modality, so
-    row-major modality values/positions and document position_ids stay aligned.
-    """
-
-    _loader: Any = None
-
-    def __init__(self, batches, config, echo_factor=1, seed=0):
-        validate_echo_factor(echo_factor)
-        self._loader = batches
-        self.echo_factor = echo_factor
-        self.seed = seed
-        self.echo_index = 0
-        registry = config.modality_registry()
-        self.token_ids = {
-            name: registry.get_config(name).token_ids for name in registry.names()
-        }
-
-    def __getattr__(self, name):
-        return getattr(self._loader, name)
-
-    def __len__(self):
-        return len(self._loader) * self.echo_factor
-
-    def __iter__(self):
-        for group, batch in enumerate(self._loader):
-            for index in range(self.echo_factor):
-                self.echo_index = index
-                yield self._reshuffle(batch, group, index) if index else dict(batch)
-
-    def _reshuffle(self, batch, group, index):
-        original = batch["input_ids"]
-        if original.device.type != "cpu":
-            raise ValueError("EchoLoader requires CPU batches before device transfer")
-        ids = torch.empty_like(original, pin_memory=original.is_pinned())
-        ids.copy_(original)
-        by_begin = {
-            begin: (name, placeholder, end)
-            for name, (begin, placeholder, end) in self.token_ids.items()
-        }
-        for row_index, row in enumerate(original.tolist()):
-            cursor = 0
-            while cursor < len(row) and row[cursor] != PAD_ID:
-                if row[cursor] != BOS_ID:
-                    raise ValueError("Echo batch must contain whole packed objects")
-                start = cursor + 1
-                cursor = start
-                spans = {}
-                while cursor < len(row) and row[cursor] not in (BOS_ID, PAD_ID):
-                    if row[cursor] not in by_begin:
-                        raise ValueError("Invalid modality delimiter in echo batch")
-                    name, placeholder, end_id = by_begin[row[cursor]]
-                    end = row.index(end_id, cursor + 1)
-                    if name in spans or any(
-                        token != placeholder for token in row[cursor + 1:end]
-                    ):
-                        raise ValueError(
-                            "Echo batch requires one contiguous span per modality per object"
-                        )
-                    spans[name] = row[cursor:end + 1]
-                    cursor = end + 1
-                if len(spans) > 1:
-                    # Packed batches no longer carry object IDs; use batch-local identity.
-                    order = span_order(
-                        sorted(spans), f"echo:{group}:{row_index}:{start}:{index}", self.seed
-                    )
-                    ids[row_index, start:cursor] = torch.tensor(
-                        [token for name in order for token in spans[name]], dtype=ids.dtype
-                    )
-        echoed = {**batch, "input_ids": ids}
-        for name, (_, placeholder, _) in self.token_ids.items():
-            mask = batch[f"{name}_mask"]
-            echoed[f"{name}_mask"] = torch.empty_like(mask, pin_memory=mask.is_pinned())
-            torch.eq(ids, placeholder, out=echoed[f"{name}_mask"])
-        return echoed
-
-
-def instrument_echo(batches, *, config, echo_factor, seed):
-    """Replay after worker prefetch, before the existing timing/device wrappers."""
-    return telemetry.instrument(EchoLoader(batches, config, echo_factor, seed))
-
-
-def echo_record(record, echo_index, echo_factor):
-    """Fresh means newly delivered, not unique objects, remote reads, or bytes."""
-    result = {**record, "echo_index": echo_index, "echo_factor": echo_factor}
-    for prefix, include in (("fresh", echo_index == 0), ("replayed", echo_index != 0)):
-        for key in ("micro_batches", "tokens_nonpad", "rows"):
-            result[f"{prefix}_{key}"] = record[key] if include else 0
-        for key in ("loss_tokens", "target_values"):
-            result[f"{prefix}_{key}"] = {
-                name: count if include else 0 for name, count in record[key].items()
-            }
-    return result
 
 
 class Throughput:
@@ -480,7 +386,7 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--resume-from", type=Path)
-    parser.add_argument("--echo-factor", type=int, default=1)
+    parser.add_argument("--echo-factor", type=int, help="override dataset.echo_factor")
     args = parser.parse_args()
     if int(os.environ.get("WORLD_SIZE", "0")) != 1:
         parser.error("launch with torchrun --nproc_per_node=1")
@@ -488,31 +394,30 @@ def main():
         parser.error("max-steps must be in 1..30000")
     if os.environ.get("NANOTRON_BENCHMARK", "0") != "0":
         parser.error("unset NANOTRON_BENCHMARK; it exits training early")
+    resume_echo_factor = None
     if args.resume_from:
         try:
-            validate_resume(args.resume_from)
-        except (OSError, ValueError, KeyError) as error:
+            resume_echo_factor = validate_resume(args.resume_from)
+        except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError) as error:
             parser.error(f"Invalid resume: {error}")
     output = args.output.resolve()
     baseline = yaml.safe_load(
         (REPO / "astro/configs/nanotron/astropt3-70m-dp1.yaml").read_text()
     )
     try:
-        config = prepare_config(baseline, output, args.resume_from, args.echo_factor)
+        config = prepare_config(
+            baseline, output, args.resume_from,
+            args.echo_factor if args.echo_factor is not None else resume_echo_factor,
+        )
     except ValueError as error:
         parser.error(str(error))
+    echo_factor = config["data_stages"][0]["data"]["dataset"]["echo_factor"]
     output.mkdir(parents=True, exist_ok=False)
     effective = output / "effective.yaml"
     effective.write_text(yaml.safe_dump(config, sort_keys=False))
     os.environ["ASTROPT3_TELEMETRY_DIR"] = str(output / "telemetry")
     torch.set_num_threads(4)
     loader.PackedMicroBatches = ThreeCatalogBatches
-    loader.instrument = functools.partial(
-        instrument_echo,
-        config=loader.hf_config_from_modalities(config["model"]["model_config"]["modalities"]),
-        echo_factor=args.echo_factor,
-        seed=config["general"]["seed"],
-    )
     loader.build_astropt3_dataloader = functools.partial(
         loader.build_astropt3_dataloader, multiprocessing_context="spawn"
     )
@@ -569,8 +474,8 @@ def main():
     state = {
         "status": "starting",
         "target_steps": 30_000,
-        "echo_factor": args.echo_factor,
-        "echo_order": "seeded_uniform_modality_spans",
+        "echo_factor": echo_factor,
+        "echo_order": "draw_shuffled_batches_and_modality_spans",
         "stream": STREAM,
         "provenance": provenance,
     }
@@ -613,7 +518,7 @@ def main():
             mode="online",
             name=output.name,
             job_type="startup-check" if args.max_steps else "training",
-            config=wandb_config(config, args.max_steps, args.echo_factor),
+            config=wandb_config(config, args.max_steps),
             dir=str(output),
             save_code=False,
             settings=wandb.Settings(
@@ -637,7 +542,6 @@ def main():
             original_write = telemetry.write_step
 
             def write_step(step, record, rank=0):
-                record = echo_record(record, trainer.current_base_dl.echo_index, args.echo_factor)
                 original_write(step, record, rank)
                 metrics = throughput.observe(step, record)
                 metrics.update(trainer.step_metrics or {})

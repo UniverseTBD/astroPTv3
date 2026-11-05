@@ -28,6 +28,7 @@ from lsdb.streams.catalog_streams import CrossMatchStream, InfiniteStream
 
 from ..configuration_astropt3 import AstroPT3Config
 from .band_registry import _DIV_FACTOR
+from .echo import echo_draw, validate_echo_factor
 from .outer_crossmatch import OuterKdTreeCrossmatch
 from .packing import ObjectSequencer, PackedCollator
 from .spectral import _DIV_FACTOR as _SPECTRA_DIV_FACTOR
@@ -471,8 +472,11 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
         rank: int = 0,
         seed: int = 0,
         crossmatch_desi: bool = False,
+        echo_factor: int = 1,
     ):
         super().__init__()
+        validate_echo_factor(echo_factor)
+        self.echo_factor = echo_factor
         self.config = config
         self.micro_batch_size = micro_batch_size
         self.seq_len = seq_len
@@ -489,6 +493,11 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
         self.collator = PackedCollator(config, seq_len=seq_len)
 
     def _open_records(self, worker):
+        for records in self._open_draws(worker):
+            yield from records
+
+    def _open_draws(self, worker):
+        """Yield finite record iterators, one per loaded HEALPix draw."""
         worker_id = worker.id if worker else 0
         retry_generation = 0
         consecutive_failures = 0
@@ -652,12 +661,26 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
                     columns=_map_rows_columns(frame, nested),
                     infer_nesting=False,
                 )
-                yield from decoded["record"]
+                records = iter(decoded["record"].tolist())
+                del decoded, frame
+                yield records
 
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
+        worker_id = worker.id if worker else 0
         install_byte_probe(self.rank, worker.id if worker else None)
-        records = self._open_records(worker)
+        if self.echo_factor == 1:
+            yield from self._pack_records(self._open_records(worker))
+            return
+        for records in self._open_draws(worker):
+            batches = list(self._pack_records(records, flush_tail=True))
+            yield from echo_draw(
+                batches, self.config, echo_factor=self.echo_factor,
+                seed=consumer_seed(self.seed, self.rank, worker_id, self._epoch),
+            )
+            del batches
+
+    def _pack_records(self, records, *, flush_tail=False):
         rows: list[list] = [[] for _ in range(self.micro_batch_size)]
         used = [0] * self.micro_batch_size
 
@@ -681,6 +704,8 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
                 row_index = 0
             rows[row_index].append(obj)
             used[row_index] += len(obj)
+        if flush_tail and any(used):
+            yield flatten_packed_batch(self.collator.collate_rows(rows), self.config, self.seq_len)
 
 
 def build_astropt3_dataloader(
@@ -693,8 +718,17 @@ def build_astropt3_dataloader(
     num_workers: int = 0,
     seed: int = 0,
     multiprocessing_context: str | None = None,
+    batch_accumulation_per_replica: int = 1,
+    world_size: int = 1,
 ) -> Any:
-    """Build the plain DataLoader used by nanotron's astropt3 dataset type."""
+    """Build worker-side draw echoing, then main-process telemetry/device inputs."""
+    echo_factor = getattr(dataset_args, "echo_factor", 1)
+    validate_echo_factor(echo_factor)
+    if echo_factor > 1:
+        if batch_accumulation_per_replica != 1:
+            raise ValueError("echo-factor > 1 requires batch_accumulation_per_replica=1")
+        if world_size != 1 or dp_size != 1:
+            raise ValueError("echo-factor > 1 currently requires world_size=dp_size=1")
     config = hf_config_from_modalities(
         model_config.modalities,
         **{
@@ -719,6 +753,7 @@ def build_astropt3_dataloader(
         rank=dp_rank,
         seed=seed,
         crossmatch_desi=getattr(dataset_args, "crossmatch_desi", False),
+        echo_factor=echo_factor,
     )
     loader = torch.utils.data.DataLoader(
         dataset,
@@ -727,4 +762,4 @@ def build_astropt3_dataloader(
         pin_memory=torch.cuda.is_available(),
         multiprocessing_context=multiprocessing_context,
     )
-    return instrument(loader)
+    return instrument(loader, echo_factor=echo_factor)
