@@ -14,8 +14,9 @@ and live-baseline inspection is recorded below.
 **Decision: implement shuffled batch reuse within each already-loaded
 HEALPix draw, without another experiment campaign.** Keep modality-span
 reshuffling on subsequent exposures and retain the existing first-presentation
-shuffle. The general default remains 1; explicit factors such as 2 or 4 are
-saved in Nanotron configuration. The paper supplies evidence for those factors,
+shuffle. The user subsequently selected **factor 4 in the new four-modality
+YAML default**; the legacy schema fallback remains 1. Modality count and echo
+factor are independent settings. The paper supplies evidence for factors 2/4,
 not an untuned AstroPT default or quality guarantee. V3's real 3.25× speedup
 uses **example echoing at factor 5**, not whole-batch echoing at 4.
 
@@ -124,17 +125,21 @@ so fresh counts must be observed rather than inferred from step / factor.
 The earlier CLI-only adapter did not save its factor in Nanotron YAML. That gap
 is now closed: [`AstroPT3StreamingDatasetsArgs`](../../nanotron/src/nanotron/config/astropt3_config.py)
 contains a validated positive-integer `echo_factor`, default 1. The
-[`four-survey adapter`](../scripts/train_three_catalogs.py) and ordinary
+[`YAML-driven runner`](../scripts/train_three_catalogs.py) and ordinary
 [`run_train.py`](../../nanotron/run_train.py) launches both feed that setting to
 [`build_astropt3_dataloader`](../src/astropt3/data/nanotron_loader.py).
 Astronomy-specific ordering stays in `astro/`, not the Nanotron trainer.
+The new [`astropt3-70m-four-modal.yaml`](../configs/nanotron/astropt3-70m-four-modal.yaml)
+is the launcher's default. Its `catalog_stream` specification and model modality
+list generalize the loader and reporting beyond four modes; see the
+[training guide](training.md#9-yaml-driven-n-modality-training-and-shuffled-echoing).
 
 ```yaml
 data_stages:
   - data:
       dataset:
         is_astropt3_streaming: true
-        echo_factor: 2  # explicit setting; dataclass default remains 1
+        echo_factor: 4  # new four-modality recipe; dataclass fallback remains 1
 ```
 
 - **Saved source of truth:** the adapter resolves explicit CLI > checkpoint
@@ -177,5 +182,7 @@ echo speedup/quality. Source: the local
 The user chose implementation, not the earlier proposed 1/2/4 experiment
 campaign. No additional training experiments or live-run changes accompany this
 work. Offline tests check scheduling, payload alignment, accounting, and saved
-configuration; GPU throughput, live memory cost, and AdamW held-out convergence
-remain untested. No AstroPT speedup or learning-efficiency claim is made.
+configuration. The later user-launched four-survey experiment is separate and
+is not restarted by the YAML/N-modality refactor. That refactor has not had a
+new live/GPU validation run; no AstroPT speedup or learning-efficiency claim
+is made, and AdamW held-out convergence remains unestablished.

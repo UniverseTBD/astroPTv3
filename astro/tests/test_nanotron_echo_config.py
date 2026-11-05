@@ -24,7 +24,22 @@ def test_echo_factor_round_trips_nanotron_yaml(tmp_path, factor):
 
 
 def test_legacy_dataset_config_defaults_to_no_echoing():
-    assert AstroPT3StreamingDatasetsArgs().echo_factor == 1
+    args = AstroPT3StreamingDatasetsArgs()
+    assert args.echo_factor == 1
+    assert args.catalog_stream is None
+
+
+def test_four_modal_default_round_trips_catalog_stream(tmp_path):
+    baseline = Path(__file__).resolve().parents[1] / "configs/nanotron/astropt3-70m-four-modal.yaml"
+    raw = yaml.safe_load(baseline.read_text())
+    config = nanotron_config.get_config_from_dict(raw)
+    path = tmp_path / "config.yaml"
+    config.save_as_yaml(path)
+    restored = nanotron_config.get_config_from_file(path)
+    dataset = restored.data_stages[0].data.dataset
+    assert dataset.echo_factor == 4
+    assert dataset.catalog_stream == raw["data_stages"][0]["data"]["dataset"]["catalog_stream"]
+    assert len(restored.model.model_config.modalities) == 4
 
 
 @pytest.mark.parametrize("factor", [0, -1, True, False, 1.5, "2", None])

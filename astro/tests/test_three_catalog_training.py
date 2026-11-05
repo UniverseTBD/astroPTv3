@@ -19,6 +19,7 @@ import torch
 import yaml
 from legacy_fixture import make_record, nested_frame
 
+from astropt3.data import catalog_stream
 from astropt3.data.echo import echo_draw
 from astropt3.tokenization import BOS_ID, PAD_ID
 
@@ -26,10 +27,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import train_three_catalogs as run  # pyright: ignore[reportMissingImports] -- scripts added above
 
 
-def test_training_config_keeps_batch_shape_and_checkpoint_schedule(tmp_path):
-    baseline = yaml.safe_load(
-        (run.REPO / "astro/configs/nanotron/astropt3-70m-dp1.yaml").read_text()
+@pytest.fixture
+def default_recipe():
+    return yaml.safe_load(run.DEFAULT_CONFIG.read_text())
+
+
+@pytest.fixture
+def default_stream(default_recipe):
+    hf = run.loader.hf_config_from_modalities(
+        default_recipe["model"]["model_config"]["modalities"]
     )
+    spec = default_recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
+    return catalog_stream.CatalogStream(spec, hf)
+
+
+def test_training_config_keeps_batch_shape_and_checkpoint_schedule(tmp_path, default_recipe):
+    baseline = default_recipe
     before = copy.deepcopy(baseline)
     config = run.prepare_config(
         baseline, tmp_path / "new-run", tmp_path / "old-checkpoints"
@@ -60,20 +73,46 @@ def test_training_config_keeps_batch_shape_and_checkpoint_schedule(tmp_path):
     hf = run.loader.hf_config_from_modalities(modalities)
     ids = [token for modality in hf.modalities for token in modality["token_ids"]]
     assert len(ids) == len(set(ids))
-    assert run.STREAM["min_surveys"] == 3
-    assert set(run.CATALOGS) == {"legacy", "sdss", "desi", "hsc"}
-    assert run.CATALOGS["hsc"] == (
+    dataset = config["data_stages"][0]["data"]["dataset"]
+    assert dataset["echo_factor"] == 4
+    assert config["data_stages"][0]["data"]["num_loading_workers"] == 4
+    assert dataset["catalog_stream"]["min_surveys"] == 3
+    catalogs = {cat["name"]: cat["repo"] for cat in dataset["catalog_stream"]["catalogs"]}
+    assert set(catalogs) == {"legacy", "sdss", "desi", "hsc"}
+    assert catalogs["hsc"] == (
         "hugging-science/mmu_hsc_pdr3_wide_21@7de6b92fd99097207a00b9c42f2d2862d62662bf"
     )
 
 
-@pytest.mark.parametrize("configured,override,expected", [(None, None, 1), (2, None, 2), (2, 3, 3), (3, 1, 1)])
-def test_echo_config_has_one_saved_source_of_truth(tmp_path, configured, override, expected):
-    baseline = yaml.safe_load(
-        (run.REPO / "astro/configs/nanotron/astropt3-70m-dp1.yaml").read_text()
-    )
-    if configured is not None:
-        baseline["data_stages"][0]["data"]["dataset"]["echo_factor"] = configured
+@pytest.mark.parametrize("count", [1, 2, 4])
+def test_prepare_config_preserves_recipe_modalities_horizon_and_workers(tmp_path, default_recipe, count):
+    modalities = default_recipe["model"]["model_config"]["modalities"][:count]
+    for index, modality in enumerate(modalities):
+        modality["name"] = f"survey_{index}"
+        modality["token_ids"] = list(range(23 + 3 * index, 26 + 3 * index))
+    default_recipe["model"]["model_config"]["modalities"] = modalities
+    default_recipe["tokens"]["train_steps"] = 123
+    default_recipe["data_stages"][0]["data"]["num_loading_workers"] = 2
+    before = copy.deepcopy(default_recipe)
+    config = run.prepare_config(default_recipe, tmp_path / "custom")
+    assert default_recipe == before
+    assert config["model"] == before["model"]
+    assert config["tokens"] == before["tokens"]
+    assert config["optimizer"] == before["optimizer"]
+    assert config["data_stages"][0]["data"]["num_loading_workers"] == 2
+
+
+@pytest.mark.parametrize(
+    "configured,override,expected",
+    [(None, None, 1), (4, None, 4), (4, 2, 2), (2, None, 2), (2, 3, 3), (3, 1, 1)],
+)
+def test_echo_config_has_one_saved_source_of_truth(tmp_path, default_recipe, configured, override, expected):
+    baseline = default_recipe
+    dataset = baseline["data_stages"][0]["data"]["dataset"]
+    if configured is None:
+        dataset.pop("echo_factor")
+    else:
+        dataset["echo_factor"] = configured
     before = copy.deepcopy(baseline)
     config = run.prepare_config(baseline, tmp_path / "output", echo_factor=override)
     assert baseline == before
@@ -83,48 +122,52 @@ def test_echo_config_has_one_saved_source_of_truth(tmp_path, configured, overrid
 
 
 @pytest.mark.parametrize("factor", [0, -1, True, 1.5, "2"])
-def test_echo_config_rejects_invalid_yaml_values(tmp_path, factor):
-    baseline = yaml.safe_load(
-        (run.REPO / "astro/configs/nanotron/astropt3-70m-dp1.yaml").read_text()
-    )
+def test_echo_config_rejects_invalid_yaml_values(tmp_path, default_recipe, factor):
+    baseline = default_recipe
     baseline["data_stages"][0]["data"]["dataset"]["echo_factor"] = factor
     with pytest.raises(ValueError, match="positive integer"):
         run.prepare_config(baseline, tmp_path / "output")
 
 
-def test_wandb_config_keeps_training_settings_without_local_provenance(tmp_path):
-    baseline = yaml.safe_load(
-        (run.REPO / "astro/configs/nanotron/astropt3-70m-dp1.yaml").read_text()
-    )
+def test_wandb_config_keeps_training_settings_without_local_provenance(tmp_path, default_recipe):
+    baseline = default_recipe
     config = run.prepare_config(baseline, tmp_path / "output", tmp_path / "resume")
     config["general"]["benchmark_csv_path"] = str(tmp_path / "benchmark.csv")
     config["provenance"] = {"commit": "private-commit", "source": str(tmp_path)}
+    config["model"]["init_method"] = {"path": str(tmp_path / "init-checkpoint")}
     before = copy.deepcopy(config)
     payload = run.wandb_config(config, 1)
     assert config == before
     assert set(payload) == {"training", "stream", "max_steps", "echo_factor", "echo_order", "throughput_policy"}
-    assert payload["echo_factor"] == 1
+    assert payload["echo_factor"] == 4
     configured = run.prepare_config(baseline, tmp_path / "configured", echo_factor=3)
     assert run.wandb_config(configured, 1)["echo_factor"] == 3
     assert configured["data_stages"][0]["data"]["dataset"]["echo_factor"] == 3
     assert str(tmp_path) not in json.dumps(payload)
     assert "private-commit" not in json.dumps(payload)
     assert "provenance" not in json.dumps(payload)
-    assert payload["training"]["model"] == config["model"]
+    assert payload["training"]["model"] == {
+        key: value for key, value in config["model"].items() if key != "init_method"
+    }
     assert payload["training"]["optimizer"] == config["optimizer"]
     assert payload["training"]["tokens"]["train_steps"] == 30_000
     assert payload["training"]["seed"] == config["general"]["seed"]
     assert payload["training"]["checkpoints"]["checkpoint_interval"] == 1000
     assert payload["stream"]["min_surveys"] == 3
     assert payload["stream"]["how"] == "outer"
-    assert set(payload["stream"]["catalogs"]) == {"legacy", "sdss", "desi", "hsc"}
+    serialized = json.dumps(payload)
+    assert "catalog_stream" not in serialized
+    assert "catalogs" not in payload["stream"]
+    for catalog in config["data_stages"][0]["data"]["dataset"]["catalog_stream"]["catalogs"]:
+        assert catalog["repo"] not in serialized
+        assert catalog["repo"].split("@")[0] not in serialized
     assert payload["max_steps"] == 1
     payload["training"]["model"]["dtype"] = "changed"
     assert config == before
 
 
 @pytest.mark.parametrize("include_sdss,padding", [(False, 0), (True, 0), (True, 2)])
-def test_three_catalog_decoder_preserves_optional_spectra(include_sdss, padding):
+def test_catalog_decoder_preserves_optional_spectra(default_stream, include_sdss, padding):
     source = make_record(1, image_only_fraction=0.0)
     nested = {"image": source["image"], "spectrum_desi": source["spectrum"]}
     if include_sdss:
@@ -139,12 +182,12 @@ def test_three_catalog_decoder_preserves_optional_spectra(include_sdss, padding)
                 for name, values in nested["spectrum_sdss"].items()
             }
     mapped = {"object_id": source["object_id"]}
-    for name, fields in run.NESTED.items():
+    for name, fields in default_stream.nested.items():
         for field in fields:
             mapped[f"{name}.{field}"] = (
                 np.asarray(nested[name][field]) if name in nested else np.array([])
             )
-    decoded = run.decode_row(mapped)["record"]
+    decoded = default_stream.decode_row(mapped)["record"]
     assert decoded["object_id"] == source["object_id"]
     np.testing.assert_array_equal(decoded["image"]["flux"], source["image"]["flux"])
     np.testing.assert_array_equal(
@@ -157,7 +200,6 @@ def test_three_catalog_decoder_preserves_optional_spectra(include_sdss, padding)
         )
         np.testing.assert_array_equal(decoded["spectrum_sdss"]["flux"], [1.0, 2.0, 3.0])
         from astropt3.data.spectral import spectral_normalize
-        import torch
 
         assert torch.isfinite(
             spectral_normalize(
@@ -187,11 +229,12 @@ def hsc_image():
     }
 
 
-class OfflineCatalogBatches(run.ThreeCatalogBatches):
+class OfflineCatalogBatches(run.loader.PackedMicroBatches):
     """Keep real worker serialization/packing; replace only external records."""
 
     def _open_draws(self, worker):
         assert worker is not None and worker.id == 0
+        assert self.catalog_stream is not None
         record = make_record(1, image_only_fraction=0.0)
         record["spectrum_sdss"] = sdss_spectrum()
         record["hsc_image"] = hsc_image()
@@ -199,16 +242,16 @@ class OfflineCatalogBatches(run.ThreeCatalogBatches):
             yield iter([record])
 
 
-@pytest.mark.parametrize("factor", [1, 2])
-def test_spawned_worker_includes_hsc(monkeypatch, tmp_path, factor):
+@pytest.mark.parametrize("factor", [1, 4])
+def test_spawned_worker_includes_hsc(monkeypatch, tmp_path, default_recipe, factor):
     monkeypatch.delenv("ASTROPT3_TELEMETRY_DIR", raising=False)
     monkeypatch.setattr(run.loader, "PackedMicroBatches", OfflineCatalogBatches)
-    baseline = yaml.safe_load(
-        (run.REPO / "astro/configs/nanotron/astropt3-70m-dp1.yaml").read_text()
-    )
+    baseline = default_recipe
     config = run.prepare_config(baseline, tmp_path / "output")
     batches = run.loader.build_astropt3_dataloader(
-        dataset_args=SimpleNamespace(echo_factor=factor),
+        dataset_args=SimpleNamespace(**{
+            **config["data_stages"][0]["data"]["dataset"], "echo_factor": factor,
+        }),
         model_config=SimpleNamespace(**config["model"]["model_config"]),
         micro_batch_size=1,
         sequence_length=512,
@@ -242,7 +285,7 @@ def test_spawned_worker_includes_hsc(monkeypatch, tmp_path, factor):
 
 @pytest.mark.parametrize("source", ["sdss", "desi", "hsc"])
 @pytest.mark.parametrize("missing", [None, pd.NA, np.nan])
-def test_decoder_keeps_right_only_rows(source, missing):
+def test_decoder_keeps_right_only_rows(default_stream, source, missing):
     if source == "hsc":
         payload, column, key = hsc_image(), "image_hsc", "hsc_image"
     else:
@@ -259,25 +302,25 @@ def test_decoder_keeps_right_only_rows(source, missing):
         "object_id_desi": missing,
     }
     mapped[f"object_id_{source}"] = "same-id"
-    for name, fields in run.NESTED.items():
+    for name, fields in default_stream.nested.items():
         for field in fields:
             mapped[f"{name}.{field}"] = (
                 np.asarray(payload[field]) if name == column else np.array([])
             )
-    record = run.decode_row(mapped)["record"]
+    record = default_stream.decode_row(mapped)["record"]
     assert set(record) == {"object_id", key}
     assert record["object_id"] == f"{source}:same-id"
     np.testing.assert_array_equal(record[key]["flux"], payload["flux"])
     mapped[f"object_id_{source}"] = missing
     with pytest.raises(ValueError, match="object_id"):
-        run.decode_row(mapped)
+        default_stream.decode_row(mapped)
 
 
-def test_stream_retains_matched_and_unpaired_records(monkeypatch, tmp_path):
+def test_stream_retains_matched_and_unpaired_records(monkeypatch, default_recipe, default_stream):
     source = make_record(1, image_only_fraction=0.0)
     image = {
         field: np.asarray(source["image"][field]).tolist()
-        for field in run.NESTED["image"]
+        for field in default_stream.nested["image"]
     }
     rows = [
         {"object_id": "image-only", "image": image},
@@ -295,23 +338,24 @@ def test_stream_retains_matched_and_unpaired_records(monkeypatch, tmp_path):
     hsc = {field: np.asarray(values).tolist() for field, values in hsc_image().items()}
     rows[1].update(object_id_hsc="matched-hsc", image_hsc=hsc)
     rows.append({"object_id_hsc": "same-id", "image_hsc": hsc})
-    frame = nested_frame(rows, tuple(run.NESTED))
+    frame = nested_frame(rows, tuple(default_stream.nested))
+    catalogs = {cat["name"]: cat["repo"] for cat in default_stream.catalogs}
 
     class FakeStream:
         npartitions = 1
 
-        def __init__(self, anchor, *rights, **kwargs):
-            assert anchor == f"hf://datasets/{run.CATALOGS['legacy']}"
+        def __init__(self, anchor, *rights, min_surveys, **kwargs):
+            assert anchor == f"hf://datasets/{catalogs['legacy']}"
             names = ["sdss", "desi", "hsc"]
             assert [right["other"] for right in rights] == [
-                f"hf://datasets/{run.CATALOGS[name]}" for name in names
+                f"hf://datasets/{catalogs[name]}" for name in names
             ]
             assert [right["how"] for right in rights] == ["outer"] * len(names)
             assert [right["suffixes"] for right in rights] == [
                 ("", f"_{name}") for name in names
             ]
             assert all(right["radius_arcsec"] == 1.0 for right in rights)
-            assert kwargs["min_surveys"] == 3
+            assert min_surveys == 3
             assert kwargs["count_fraction_threshold"] == 0.0
 
         def __iter__(self):
@@ -327,18 +371,16 @@ def test_stream_retains_matched_and_unpaired_records(monkeypatch, tmp_path):
         ]
         return url
 
-    monkeypatch.setattr(run, "open_catalog", open_catalog)
-    monkeypatch.setattr(run, "CrossMatchStream", FakeStream)
-    monkeypatch.setattr(run, "LocalCluster", lambda **kwargs: nullcontext())
-    monkeypatch.setattr(run, "Client", lambda cluster: nullcontext())
-    baseline = yaml.safe_load(
-        (run.REPO / "astro/configs/nanotron/astropt3-70m-dp1.yaml").read_text()
-    )
-    config = run.prepare_config(baseline, tmp_path / "output")
+    monkeypatch.setattr(catalog_stream, "open_catalog", open_catalog)
+    monkeypatch.setattr(catalog_stream, "CrossMatchStream", FakeStream)
+    monkeypatch.setattr(catalog_stream, "LocalCluster", lambda **kwargs: nullcontext())
+    monkeypatch.setattr(catalog_stream, "Client", lambda cluster: nullcontext())
     hf_config = run.loader.hf_config_from_modalities(
-        config["model"]["model_config"]["modalities"]
+        default_recipe["model"]["model_config"]["modalities"]
     )
-    dataset = run.ThreeCatalogBatches(hf_config, micro_batch_size=1, seq_len=4096)
+    dataset = run.loader.PackedMicroBatches(
+        hf_config, micro_batch_size=1, seq_len=4096, catalog_stream=default_stream.spec,
+    )
     iterator = dataset._open_records(None)
     try:
         records = list(islice(iterator, len(rows)))
@@ -381,7 +423,7 @@ def test_stream_retains_matched_and_unpaired_records(monkeypatch, tmp_path):
 @pytest.mark.parametrize(
     "bad_field", ["shape", "bands", "scale", "missing_scale", "nan", "inf"]
 )
-def test_decoder_rejects_invalid_hsc_payloads(bad_field):
+def test_decoder_rejects_invalid_hsc_payloads(default_stream, bad_field):
     image = hsc_image()
     if bad_field == "shape":
         image["flux"] = image["flux"][:, :-1, :]
@@ -397,26 +439,22 @@ def test_decoder_rejects_invalid_hsc_payloads(bad_field):
     mapped.update(
         {
             f"image_hsc.{field}": np.asarray(image.get(field))
-            for field in run.NESTED["image_hsc"]
+            for field in default_stream.nested["image_hsc"]
         }
     )
     with pytest.raises(ValueError, match="HSC Wide"):
-        run.decode_row(mapped)
+        default_stream.decode_row(mapped)
 
 
 @pytest.mark.parametrize("hsc_only", [True, False])
-def test_hsc_head_forward_backward(tmp_path, tiny_config, hsc_only):
+def test_hsc_head_forward_backward(default_recipe, tiny_config, hsc_only):
     from astropt3 import AstroPT3Config, AstroPT3Model
     from astropt3.data.packing import ObjectSequencer, PackedCollator
 
-    baseline = yaml.safe_load(
-        (run.REPO / "astro/configs/nanotron/astropt3-70m-dp1.yaml").read_text()
-    )
-    config = run.prepare_config(baseline, tmp_path / "output")
     hf_config = AstroPT3Config(
         **{
             **tiny_config.to_dict(),
-            "modalities": config["model"]["model_config"]["modalities"],
+            "modalities": default_recipe["model"]["model_config"]["modalities"],
             "loss_aggregation": "family",
         }
     )
@@ -459,35 +497,54 @@ def test_python_cli_rejects_removed_hsc_options(monkeypatch, tmp_path, flag):
     assert not (tmp_path / "output").exists()
 
 
-@pytest.mark.parametrize("saved_hsc", [True, False])
-def test_resume_requires_hsc(tmp_path, saved_hsc):
-    (tmp_path / "latest.txt").write_text("64\n")
-    checkpoint = tmp_path / "64"
-    checkpoint.mkdir()
-    modalities = [{"name": "images"}, {"name": "spectra"}, {"name": "sdss_spectra"}]
-    if saved_hsc:
-        modalities.append({"name": "hsc_images"})
-    (checkpoint / "model_config.json").write_text(
-        json.dumps({"modalities": modalities})
-    )
+def write_resume(path, model_config, *, echo_factor=None, step=64):
+    checkpoint = path / str(step)
+    checkpoint.mkdir(parents=True)
+    (path / "latest.txt").write_text(f"{step}\n")
+    (checkpoint / "model_config.json").write_text(json.dumps(model_config))
+    dataset = {} if echo_factor is None else {"echo_factor": echo_factor}
     (checkpoint / "config.yaml").write_text(yaml.safe_dump({
-        "data_stages": [{"data": {"dataset": {}}}],
+        "data_stages": [{"data": {"dataset": dataset}}],
     }))
-    if saved_hsc:
-        assert run.validate_resume(tmp_path) == 1
+
+
+@pytest.mark.parametrize("count", [1, 4])
+@pytest.mark.parametrize("factor", [None, 4])
+def test_resume_compares_normalized_modalities(tmp_path, default_recipe, count, factor):
+    model = default_recipe["model"]["model_config"]
+    model["modalities"] = model["modalities"][:count]
+    model["modalities"][0].update(name="legacy_patches", token_ids=[23, 24, 25])
+    saved = copy.deepcopy(model)
+    registry = run.loader.hf_config_from_modalities(model["modalities"]).modality_registry()
+    saved["modalities"] = list(reversed(registry.to_list()))
+    write_resume(tmp_path, saved, echo_factor=factor)
+    assert run.validate_resume(tmp_path, model) == (1 if factor is None else factor)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("missing", None), ("name", "renamed"), ("token_ids", [23, 24, 25]),
+    ("source", "different-survey"), ("input_size", 384), ("pos_input_size", 2),
+])
+def test_resume_rejects_generic_modality_mismatches(tmp_path, default_recipe, field, value):
+    model = default_recipe["model"]["model_config"]
+    saved = copy.deepcopy(model)
+    if field == "missing":
+        saved["modalities"].pop(0)
     else:
-        with pytest.raises(ValueError, match="Checkpoint has no HSC Wide modality"):
-            run.validate_resume(tmp_path)
+        saved["modalities"][2][field] = value
+    write_resume(tmp_path, saved)
+    with pytest.raises(ValueError, match="Checkpoint modalities differ"):
+        run.validate_resume(tmp_path, model)
 
 
-def test_decoder_rejects_rows_without_modalities():
+def test_decoder_rejects_rows_without_modalities(default_stream):
     mapped = {
         f"{name}.{field}": np.array([])
-        for name, fields in run.NESTED.items()
+        for name, fields in default_stream.nested.items()
         for field in fields
     }
-    with pytest.raises(ValueError, match="no image or spectrum"):
-        run.decode_row(mapped)
+    with pytest.raises(ValueError, match="no supported data or object_id"):
+        default_stream.decode_row(mapped)
 
 
 @pytest.mark.parametrize(
@@ -505,6 +562,9 @@ def test_decoder_rejects_rows_without_modalities():
         ["1", "-2"],
         ["1", "1.5"],
         ["1", "2", "3"],
+        ["1", "--config-file"],
+        ["1", "--config-file", ""],
+        ["1", "--config-file", "recipe.yaml", "2"],
     ],
 )
 def test_launcher_rejects_invalid_gpu_arguments(args):
@@ -518,11 +578,21 @@ def test_launcher_rejects_invalid_gpu_arguments(args):
 
 
 @pytest.mark.parametrize("echo_arg", [None, "2", "03"])
-def test_launcher_selects_gpu_and_starts_full_run_without_offline_flags(tmp_path, echo_arg):
+@pytest.mark.parametrize("custom_config", [False, True])
+def test_launcher_selects_gpu_and_starts_full_run_without_offline_flags(tmp_path, echo_arg, custom_config):
     repo = tmp_path / "repo"
     script = repo / "astro/scripts/run_three_modal.bash"
     script.parent.mkdir(parents=True)
     script.write_text((run.REPO / "astro/scripts/run_three_modal.bash").read_text())
+    config_file = repo / "astro/configs/nanotron" / run.DEFAULT_CONFIG.name
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text(run.DEFAULT_CONFIG.read_text())
+    config_args = []
+    if custom_config:
+        config_file = tmp_path / "recipes/custom two-modal.yaml"
+        config_file.parent.mkdir()
+        config_file.write_text(run.DEFAULT_CONFIG.read_text())
+        config_args = ["--config-file", str(config_file.relative_to(tmp_path))]
     result = subprocess.run(["bash", str(script), "3"], capture_output=True, text=True)
     assert result.returncode == 1
     assert "Requires" in result.stderr
@@ -538,7 +608,7 @@ def test_launcher_selects_gpu_and_starts_full_run_without_offline_flags(tmp_path
     module.parent.mkdir(parents=True)
     module.write_text("")
     result = subprocess.run(
-        ["bash", "-x", str(script), "3", *([echo_arg] if echo_arg else [])],
+        ["bash", "-x", str(script), "3", *([echo_arg] if echo_arg else []), *config_args],
         cwd=tmp_path,
         check=True,
         capture_output=True,
@@ -579,12 +649,14 @@ def test_launcher_selects_gpu_and_starts_full_run_without_offline_flags(tmp_path
         "--rdzv-endpoint=127.0.0.1:0",
         "--max-restarts=0",
         "astro/scripts/train_three_catalogs.py",
+        "--config-file",
+        str(config_file.resolve()),
         "--output",
         output,
         *(["--echo-factor", echo_arg] if echo_arg else []),
     ]
     assert Path(output).parent == tmp_path / "astroPTv3_telemetry"
-    assert Path(output).name.startswith("four-modal-30k-")
+    assert Path(output).name.startswith(f"{config_file.stem}-echo{echo_arg or 'config'}-")
     assert not Path(output).exists()
 
 
@@ -607,8 +679,11 @@ def echo_loader(batches, config, *, echo_factor=1, seed=42):
     )
 
 
-def test_throughput_uses_wall_time_weighted_counts_and_excludes_warmup():
-    meter = run.Throughput()
+def test_throughput_uses_wall_time_weighted_counts_and_excludes_warmup(default_recipe):
+    meter = run.Throughput(
+        [modality["name"] for modality in default_recipe["model"]["model_config"]["modalities"]],
+        default_recipe["tokens"]["train_steps"],
+    )
     record = {
         "step_seconds": 10.0,
         "tokens_nonpad": 100,
@@ -641,15 +716,11 @@ def test_throughput_uses_wall_time_weighted_counts_and_excludes_warmup():
 
 
 @pytest.fixture
-def echo_batch(tmp_path):
+def echo_batch(default_recipe):
     """Multiple objects per row, unequal spans, four surveys and absent modalities."""
     from astropt3.data.packing import ObjectSequencer, PackedCollator
 
-    baseline = yaml.safe_load(
-        (run.REPO / "astro/configs/nanotron/astropt3-70m-dp1.yaml").read_text()
-    )
-    config = run.prepare_config(baseline, tmp_path / "output")
-    hf = run.loader.hf_config_from_modalities(config["model"]["model_config"]["modalities"])
+    hf = run.loader.hf_config_from_modalities(default_recipe["model"]["model_config"]["modalities"])
     full = make_record(1, image_only_fraction=0.0)
     full.update(spectrum_sdss=sdss_spectrum(), hsc_image=hsc_image())
     records = [
@@ -803,7 +874,7 @@ def test_echo_telemetry_counts_and_wait_attribution(echo_batch, monkeypatch, tmp
 
 @pytest.mark.parametrize("start_step", [0, 100])
 def test_fresh_throughput_excludes_warmup_even_across_echo_boundary(start_step):
-    meter = run.Throughput(start_step)
+    meter = run.Throughput(["images"], train_steps=123, start_step=start_step)
     base = {"micro_batches": 1, "tokens_nonpad": 100, "rows": 2,
             "step_seconds": 10.0, "loader_wait_s": 8.0,
             "utilisation_packing": 0.8, "loss_tokens": {"images": 90}, "target_values": {"images": 90 * 192}}
@@ -817,6 +888,30 @@ def test_fresh_throughput_excludes_warmup_even_across_echo_boundary(start_step):
     assert second["throughput/cumulative_fresh_nonpad_tokens_per_s"] == pytest.approx(100 / 12)
     assert second["throughput/cumulative_fresh_rows_per_s"] == pytest.approx(2 / 12)
     assert second["throughput/cumulative_rows_per_s"] == pytest.approx(4 / 12)
+    assert second["throughput/eta_hours"] == pytest.approx((123 - start_step - 12) * 6 / 3600)
+
+
+@pytest.mark.parametrize("names", [("legacy_patches",), ("legacy_patches", "desi_flux")])
+def test_throughput_uses_configured_names_and_horizon(names):
+    meter = run.Throughput(names, train_steps=12)
+    record = echo_record({
+        "step_seconds": 2.0, "tokens_nonpad": 100, "rows": 1,
+        "loader_wait_s": 0.0, "utilisation_packing": 1.0, "micro_batches": 1,
+        "loss_tokens": {names[0]: 90}, "target_values": {},
+    }, 0, 4)
+    metrics = meter.observe(11, record)
+    assert {key for key in metrics if key.endswith("_loss_tokens")} == {
+        f"data/{prefix}{name}_loss_tokens"
+        for name in names for prefix in ("", "fresh_", "replayed_")
+    }
+    assert metrics[f"data/{names[0]}_loss_tokens"] == 90
+    assert metrics[f"data/{names[0]}_token_fraction"] == 1.0
+    if len(names) > 1:
+        assert metrics[f"data/{names[1]}_loss_tokens"] == 0
+        assert metrics[f"data/{names[1]}_token_fraction"] == 0.0
+    assert metrics["throughput/eta_hours"] == pytest.approx(2 / 3600)
+    assert meter.observe(12, record)["throughput/eta_hours"] == 0
+    assert meter.observe(13, record)["throughput/eta_hours"] == 0
 
 
 @pytest.mark.parametrize("factor", ["0", "-1", "1.5", "abc"])
@@ -830,22 +925,32 @@ def test_python_cli_rejects_bad_echo_before_creating_output(monkeypatch, tmp_pat
     assert not output.exists()
 
 
-def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path):
+@pytest.mark.parametrize("custom_config", [False, True])
+def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path, default_recipe, custom_config):
     source_record = make_record(1, image_only_fraction=0.0)
     source_record.update(spectrum_sdss=sdss_spectrum(), hsc_image=hsc_image())
+    config_args = []
+    if custom_config:
+        modalities = default_recipe["model"]["model_config"]["modalities"][:2]
+        for index, name in enumerate(("legacy_patches", "desi_flux")):
+            modalities[index].update(name=name, token_ids=list(range(23 + 3 * index, 26 + 3 * index)))
+        default_recipe["model"]["model_config"]["modalities"] = modalities
+        default_recipe["tokens"]["train_steps"] = 123
+        default_recipe["data_stages"][0]["data"]["num_loading_workers"] = 0
+        config_file = tmp_path / "custom.yaml"
+        config_file.write_text(yaml.safe_dump(default_recipe))
+        config_args = ["--config-file", str(config_file)]
+    names = [modality["name"] for modality in default_recipe["model"]["model_config"]["modalities"]]
     resume = tmp_path / "checkpoints"
-    (resume / "2").mkdir(parents=True)
-    (resume / "latest.txt").write_text("2\n")
-    (resume / "2/model_config.json").write_text(json.dumps({
-        "modalities": [{"name": "hsc_images"}],
-    }))
-    (resume / "2/config.yaml").write_text(yaml.safe_dump({
-        "data_stages": [{"data": {"dataset": {"echo_factor": 3}}}],
-    }))
+    write_resume(resume, default_recipe["model"]["model_config"], echo_factor=3, step=2)
 
     class FakeTrainer:
         def __init__(self, effective, benchmark):
             config = yaml.safe_load(Path(effective).read_text())
+            assert config["tokens"] == default_recipe["tokens"]
+            assert config["data_stages"][0]["data"]["num_loading_workers"] == (
+                default_recipe["data_stages"][0]["data"]["num_loading_workers"]
+            )
             self.init_checkpoint_path = config["checkpoints"]["resume_checkpoint_path"]
             self.metadata = SimpleNamespace(last_train_step=2 if self.init_checkpoint_path else 0)
             self.parallel_context = None
@@ -871,6 +976,7 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path
 
         class Source(run.loader.PackedMicroBatches):
             def _open_draws(self, worker):
+                assert self.catalog_stream is not None
                 consumed.append("fresh")
                 yield iter([source_record])
                 raise AssertionError("fetched before the echo group ended")
@@ -902,18 +1008,17 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path
                 module = ModuleType(name)
                 vars(module).update(attributes)
                 patch.setitem(sys.modules, name, module)
-            for name in ("PackedMicroBatches", "build_astropt3_dataloader", "instrument"):
-                patch.setattr(run.loader, name, getattr(run.loader, name))
-            patch.setattr(run, "ThreeCatalogBatches", Source)
+            patch.setattr(run.loader, "PackedMicroBatches", Source)
             patch.setattr(run.telemetry, "write_step", run.telemetry.write_step)
             patch.setattr(run.torch, "set_num_threads", lambda _: None)
             patch.setattr(run.torch.cuda, "memory_allocated", lambda: 0)
             patch.setattr(run.torch.cuda, "max_memory_allocated", lambda: 0)
             patch.setattr(run.torch.distributed, "is_initialized", lambda: False)
             patch.setenv("WORLD_SIZE", "1")
+            patch.delenv("NANOTRON_BENCHMARK", raising=False)
             patch.delenv("ASTROPT3_TELEMETRY_DIR", raising=False)
             patch.setattr(sys, "argv", ["train_three_catalogs.py", "--output", str(output),
-                                       "--max-steps", "2",
+                                       "--max-steps", "2", *config_args,
                                        *(["--echo-factor", str(override)] if override else []),
                                        *(["--resume-from", str(resume)] if attempt else [])])
             run.main()
@@ -924,8 +1029,13 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path
         assert [step for step, _ in logged] == ([3, 4] if attempt else [1, 2])
         assert [metrics["data/echo_index"] for _, metrics in logged] == [0, 1]
         assert payloads[0]["echo_factor"] == expected_factor
+        assert "catalog_stream" not in json.dumps(payloads[0])
+        assert {key for key in logged[0][1] if key.endswith("_token_fraction")} == {
+            f"data/{name}_token_fraction" for name in names
+        }
         state = json.loads((output / "run.json").read_text())
         assert state["echo_factor"] == expected_factor
+        assert state["target_steps"] == default_recipe["tokens"]["train_steps"]
         for filename in ("effective.yaml", "resolved.yaml"):
             effective = yaml.safe_load((output / filename).read_text())
             assert effective["data_stages"][0]["data"]["dataset"]["echo_factor"] == expected_factor
@@ -933,14 +1043,15 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path
         if attempt:
             assert state["rng_restored"]
 
-    run_attempt(0, 3, 3)
+    run_attempt(0, None, 4)
     run_attempt(1, None, 3)
     run_attempt(2, 2, 2)
 
 
 @pytest.mark.parametrize("factor", [None, "3"])
-def test_python_cli_forwards_echo_and_checks_accumulation_before_outputs(monkeypatch, tmp_path, factor):
+def test_python_cli_forwards_echo_and_checks_accumulation_before_outputs(monkeypatch, tmp_path, capsys, factor):
     monkeypatch.setenv("WORLD_SIZE", "1")
+    monkeypatch.delenv("NANOTRON_BENCHMARK", raising=False)
     output = tmp_path / "output"
     monkeypatch.setattr(sys, "argv", ["train_three_catalogs.py", "--output", str(output),
                                      *(["--echo-factor", factor] if factor else [])])
@@ -950,13 +1061,29 @@ def test_python_cli_forwards_echo_and_checks_accumulation_before_outputs(monkeyp
     def prepare(baseline, output, resume, echo_factor):
         assert echo_factor == expected
         baseline["tokens"]["batch_accumulation_per_replica"] = 2
-        if echo_factor is None:
-            original(baseline, output, resume, echo_factor)
-            raise ValueError("test stops before initialization")
         return original(baseline, output, resume, echo_factor)
 
     monkeypatch.setattr(run, "prepare_config", prepare)
     with pytest.raises(SystemExit) as error:
         run.main()
     assert error.value.code == 2
+    assert "requires batch_accumulation_per_replica=1" in capsys.readouterr().err
+    assert not output.exists()
+
+
+def test_python_cli_checks_max_steps_against_selected_yaml(monkeypatch, tmp_path, default_recipe, capsys):
+    default_recipe["tokens"]["train_steps"] = 123
+    config_file = tmp_path / "short-run.yaml"
+    config_file.write_text(yaml.safe_dump(default_recipe))
+    output = tmp_path / "output"
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    monkeypatch.delenv("NANOTRON_BENCHMARK", raising=False)
+    monkeypatch.setattr(sys, "argv", [
+        "train_three_catalogs.py", "--config-file", str(config_file),
+        "--output", str(output), "--max-steps", "124",
+    ])
+    with pytest.raises(SystemExit) as error:
+        run.main()
+    assert error.value.code == 2
+    assert "max-steps must be in 1..123" in capsys.readouterr().err
     assert not output.exists()

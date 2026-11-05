@@ -473,6 +473,7 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
         seed: int = 0,
         crossmatch_desi: bool = False,
         echo_factor: int = 1,
+        catalog_stream: dict | None = None,
     ):
         super().__init__()
         validate_echo_factor(echo_factor)
@@ -482,12 +483,22 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
         self.seq_len = seq_len
         self.rank = rank
         self.seed = seed
-        self.desi_columns = _desi_columns(config) if crossmatch_desi else None
-        if crossmatch_desi and self.desi_columns is None:
-            raise ValueError(
-                "crossmatch_desi=True but no active modality sources from DESI"
-            )
-        self.columns = _catalog_columns(config, include_position=self.desi_columns is not None)
+        self.catalog_stream = None
+        self.desi_columns = None
+        self.columns = []
+        if catalog_stream is not None:
+            from .catalog_stream import CatalogStream
+
+            if crossmatch_desi:
+                raise ValueError("catalog_stream and crossmatch_desi are mutually exclusive")
+            self.catalog_stream = CatalogStream(catalog_stream, config)
+        else:
+            self.desi_columns = _desi_columns(config) if crossmatch_desi else None
+            if crossmatch_desi and self.desi_columns is None:
+                raise ValueError(
+                    "crossmatch_desi=True but no active modality sources from DESI"
+                )
+            self.columns = _catalog_columns(config, include_position=self.desi_columns is not None)
         self._epoch = 0  # InfiniteStream partition-draw nonce for span ordering
         self.sequencer = ObjectSequencer(config)
         self.collator = PackedCollator(config, seq_len=seq_len)
@@ -499,6 +510,13 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
     def _open_draws(self, worker):
         """Yield finite record iterators, one per loaded HEALPix draw."""
         worker_id = worker.id if worker else 0
+        if self.catalog_stream is not None:
+            for epoch, records in self.catalog_stream.draws(
+                seed=self.seed, rank=self.rank, worker_id=worker_id,
+            ):
+                self._epoch = epoch
+                yield records
+            return
         retry_generation = 0
         consecutive_failures = 0
         draw = 0
@@ -754,7 +772,10 @@ def build_astropt3_dataloader(
         seed=seed,
         crossmatch_desi=getattr(dataset_args, "crossmatch_desi", False),
         echo_factor=echo_factor,
+        catalog_stream=getattr(dataset_args, "catalog_stream", None),
     )
+    if num_workers and dataset.catalog_stream is not None and multiprocessing_context is None:
+        multiprocessing_context = "spawn"
     loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=None,

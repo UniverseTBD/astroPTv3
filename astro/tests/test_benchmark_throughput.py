@@ -177,3 +177,35 @@ def test_flop_capture_undoes_world_size_and_records_model_costs(monkeypatch):
         "dtype": "torch.bfloat16", "backbone_flops_per_token": 1e12,
         "modality_forward_flops_per_token": {"images": 123.0},
     }
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_capture_reports_actual_catalog_policy(monkeypatch, configured):
+    spec = {"catalogs": [{"name": "sdss", "repo": "offline/sdss"}], "min_surveys": 1}
+    dataset = SimpleNamespace(
+        catalog_stream=SimpleNamespace(spec=spec) if configured else None,
+        config=SimpleNamespace(modalities=[{"name": "custom_mode"}]),
+        columns=["object_id", "image"], desi_columns=None,
+    )
+    fake_torch = SimpleNamespace(
+        __version__="test", version=SimpleNamespace(cuda=None),
+        cuda=SimpleNamespace(current_device=lambda: 0, get_device_properties=lambda _: SimpleNamespace(
+            name="offline device", total_memory=1234,
+        )),
+    )
+    trainer = SimpleNamespace(
+        config=SimpleNamespace(model=SimpleNamespace(init_method=object())),
+        init_checkpoint_path=None,
+    )
+    monkeypatch.setattr(bench, "capture_flop_estimate", lambda _: {})
+    monkeypatch.setattr(bench, "nic_link_speeds", dict)
+    monkeypatch.setattr(bench, "revision", lambda _: {})
+    context = bench.capture_context(fake_torch, trainer, SimpleNamespace(dataset=dataset, num_workers=0))
+    report = context["loader"]
+    assert report["modalities"] == dataset.config.modalities
+    if configured:
+        assert report["catalog_stream"] == spec
+        assert "legacy_catalog" not in report
+    else:
+        assert report["legacy_columns"] == dataset.columns
+        assert "catalog_stream" not in report

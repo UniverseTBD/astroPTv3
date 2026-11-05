@@ -31,12 +31,12 @@ Verify the env on a GPU box: `pytest -m gpu tests/test_nanotron_gpu.py`.
 There is **no prep step** and no local corpus. `data/nanotron_loader.py` opens
 Multimodal Universe HATS catalogs via LSDB inside each DataLoader worker,
 decodes rows into the shared record shape, then sequences and packs them for
-nanotron. Image-only configs read LegacySurvey North; crossmatch-enabled
-configs also include DESI EDR SV3 spectra. Depending on survey overlap,
-records can carry an image, a spectrum, or both. Recovered image-only rows
-come from LegacySurvey partitions visited by the join, **not** from every
-LegacySurvey partition. The active YAML and loader are the sources for the
-stream implementation; its fetch and prefetch settings are experimental.
+nanotron. The default recipe joins Legacy North, DESI, SDSS, and HSC; other
+YAMLs can select different supported modality/catalog combinations (§9).
+Depending on overlap, records carry different subsets of the configured
+modalities. Recovered unmatched records come from partitions visited by the
+join, **not** every survey partition. The active YAML and loader are the
+sources for the stream implementation; fetch/prefetch settings are experimental.
 
 Facts to know:
 
@@ -57,8 +57,13 @@ errors fail immediately.
 
 ## 3. Configs
 
-Full nanotron run configs live in `astro/configs/nanotron/`. For the imaging
-+ spectra pilot, the dataset block includes:
+Full nanotron run configs live in `astro/configs/nanotron/`. The convenience
+launcher's default is **`astropt3-70m-four-modal.yaml`**, with four modalities
+and echo factor **4**. Its model, catalog list, join policy, worker count, and
+30k-update schedule are explicit YAML, not injected by the script (see §9).
+
+Older imaging + spectra configs remain supported by the ordinary Nanotron
+entrypoint. Their dataset block includes:
 
 ```yaml
 data_stages:
@@ -71,10 +76,12 @@ data_stages:
     seed: 42
 ```
 
-The catalog projections and stream policy live in
-`astropt3.data.nanotron_loader`. Without `crossmatch_desi: true`, the source
-is LegacySurvey-only. The retired knobs (`data_root`, `match_index`,
-synthetic fractions, `object_id_log`) are not supported.
+Without `catalog_stream`, `astropt3.data.nanotron_loader` retains the legacy
+policy: LegacySurvey-only unless `crossmatch_desi: true`. With `catalog_stream`,
+`astropt3.data.catalog_stream` opens the explicitly configured sources instead;
+it does not require LegacySurvey. Do not combine the two selection modes.
+The retired knobs (`data_root`, `match_index`, synthetic fractions,
+`object_id_log`) are not supported.
 
 Governing knobs, top to bottom:
 
@@ -228,25 +235,97 @@ GPU, a MIG slice or a non-BF16 run reports MFU as `null`, never zero.
 `rankN.json` also records each up physical NIC's negotiated link speed. The
 terminal shows the fastest per host; it is not internet or HF-route bandwidth.
 
-## 9. Four-survey runner and shuffled batch echoing
+## 9. YAML-driven N-modality training and shuffled echoing
 
-The historically named `scripts/train_three_catalogs.py` now joins Legacy North,
-SDSS, DESI, and HSC Wide with outer joins in regions covered by at least three
-surveys. Right-only records are retained but are not crossmatched with each
-other without a Legacy anchor. The launcher uses the GPU environment and local
-LSDB worktree described in `scripts/run_three_modal.bash`; no existing job is
-modified or restarted.
+The historically named `scripts/train_three_catalogs.py` and
+`scripts/run_three_modal.bash` accept any configured number of supported
+modalities. Their default YAML is
+[`astropt3-70m-four-modal.yaml`](../configs/nanotron/astropt3-70m-four-modal.yaml):
+Legacy North images, DESI spectra, SDSS spectra, and HSC Wide images, with
+**echo factor 4**, four loading workers, family-balanced loss, and 30k updates.
+The older `astropt3-70m-dp1.yaml` benchmark recipe is unchanged.
 
 ```bash
-# Fresh 30k-update runs; choose an available GPU after checking nvidia-smi.
-bash astro/scripts/run_three_modal.bash GPU_INDEX       # saved config/default factor (1)
-bash astro/scripts/run_three_modal.bash GPU_INDEX 2     # separately labeled echo-2 run
+# From the repo root; choose an available GPU after checking nvidia-smi.
+bash astro/scripts/run_three_modal.bash GPU_INDEX       # default YAML, echo 4
+bash astro/scripts/run_three_modal.bash GPU_INDEX 1     # explicit no-echo override
+bash astro/scripts/run_three_modal.bash GPU_INDEX --config-file my-recipe.yaml
+bash astro/scripts/run_three_modal.bash GPU_INDEX 2 --config-file my-recipe.yaml
 ```
 
-`data_stages[].data.dataset.echo_factor` is a positive integer counting total
-uses, including the original. It defaults to **1**. The adapter's optional
-`--echo-factor N` overrides this saved setting before writing effective/resolved
-YAML; ordinary Nanotron YAML launches use the same loader implementation.
+Each command creates a new run directory named after the YAML; it never resumes
+or alters an existing run. The Python CLI accepts the same `--config-file`, plus
+`--output`, `--resume-from`, and `--max-steps`. The convenience runner remains
+single-GPU/single-stage; it rejects incompatible topology instead of silently
+rewriting it. Model dimensions, modalities, loss aggregation, worker count,
+horizon, optimizer, and checkpoint cadence come from the selected YAML.
+
+### Configuring N modalities
+
+There are two lists, deliberately independent:
+
+- `model.model_config.modalities` declares each modality's name, calibrated
+  family/source, record keys, dimensions/positions, and explicit token IDs.
+  Heads, packing, echo reshuffling, and per-modality metrics follow this list.
+- `data_stages[0].data.dataset.catalog_stream.catalogs` declares an ordered list
+  of sources: `name`, Hugging Face `repo` (optionally `@revision`), `decoder`,
+  `record_key` for a nested payload, and optional `scalar_columns` mapping
+  **output record key → flat catalog column**. Multiple modalities can use one
+  catalog. Every modality key must have a compatible output.
+
+Supported decoders are `legacy_image`, `hsc_image`, `desi_spectrum`,
+`sdss_spectrum`, and `scalars`. These preserve the existing payload validation,
+band normalization and spectral-grid contracts; an arbitrary new survey is not
+assumed to share those calibrations. Images use registered band transforms,
+spectra must match the decoder's DESI/SDSS source, and scalar modality names
+must have a registered transform. New physical contracts still require code.
+
+For example, to add a **fifth modality**, append this model entry and add
+`scalar_columns: {ebv: ebv}` to the existing Legacy catalog entry:
+
+```yaml
+- name: ebv
+  family: scalar
+  source: legacy
+  record_keys: [ebv]
+  token_ids: [11, 12, 13]
+  input_size: 1
+  patch_size: 1
+  pos_type: index
+  pos_input_size: 1
+  max_positions: 1
+  loss_weight: 0.1
+```
+
+For DESI `Z`, map both `Z` and `ZWARN` from the same catalog. Missing/non-finite
+quality flags do not enable a redshift target. Missing modalities are omitted;
+rows with no active configured modality are dropped. Existing token IDs stay
+frozen; allocate non-colliding blocks for new names and increase `vocab_size`
+explicitly when needed. There is no fixed four-modality cap.
+
+The first catalog anchors the join. With one source the loader uses
+`InfiniteStream`; otherwise it uses `CrossMatchStream`. Right-only rows remain
+separate objects, not crossmatches among right catalogs. Set `min_surveys` in
+`1..number of catalogs` (the four-survey YAML uses 3). When reducing to one or
+two sources, adjust that threshold too. The stream also saves `how`,
+`radius_arcsec`, `count_fraction_threshold`, `partitions_per_chunk`, and
+`worker_memory_limit`; the default recipe explicitly retains 64 GiB per Dask
+worker. Size this and `num_loading_workers` for the actual machine.
+
+The launcher uses the existing GPU environment and local LSDB worktree named
+in the bash script. Multi-source streams require the multi-catalog/
+`min_surveys` interface. `uv.lock` now pins compatible LSDB and HATS revisions;
+older installed LSDB fails with a capability error. Ordinary
+`nanotron/run_train.py --config-file ...` launches use the same shared loader
+with these dependencies—no adapter monkeypatch is required.
+Configured worker loaders use `spawn` by default.
+
+### Echoing, accounting, and resume
+
+`data_stages[].data.dataset.echo_factor` counts total uses, including the
+original. The **new default recipe explicitly sets 4**; the schema fallback
+remains 1 for older YAMLs. `--echo-factor N` overrides the saved setting before
+writing effective/resolved YAML.
 
 For N > 1, **each worker packs one already-loaded LSDB/HEALPix draw separately**,
 including its padded final batch. It caches those CPU batches once, shuffles
@@ -281,8 +360,8 @@ batch; stopping partway through a draw can leave uneven exposure counts.
 
 The factor is saved in effective/resolved/checkpoint YAML. The factor and
 ordering policy also appear in local `run.json` / `progress.json` and the
-existing metrics/config-only W&B payload. No code, data, paths,
-provenance, or machine metadata is added to W&B. Per-step telemetry preserves
+existing metrics/config-only W&B payload. Catalog locations, checkpoint-init
+paths, code, data, provenance, and machine metadata are not added to W&B. Per-step telemetry preserves
 processed counts and adds `echo_index` (zero-based), `fresh_*` and `replayed_*`
 counts for microbatches, nonpadding tokens, object occurrences (`rows`), modality
 loss tokens, and target values. **Fresh means the first use of a newly delivered
@@ -294,20 +373,25 @@ stalls. A repeat after warmup earns no fresh credit even if its initial use fell
 inside warmup.
 
 Resume still restores weights/optimizer/scheduler/RNG, not the data cursor.
-With `--resume-from CHECKPOINT_ROOT` and a **new** `--output` directory, the
-four-survey adapter reads the factor from the checkpoint's `config.yaml`
+With `--resume-from CHECKPOINT_ROOT`, the matching `--config-file`, and a **new**
+`--output` directory, the runner reads the factor from checkpoint `config.yaml`
 (defaulting to 1 for legacy files without the field). An explicit `--echo-factor`
-overrides it. Ordinary Nanotron launches use their supplied run YAML; use the
+overrides it. The selected YAML supplies the other settings; omitted
+`--config-file` means the new four-modality recipe, not automatic recipe discovery. Ordinary Nanotron launches use their supplied run YAML; use the
 saved checkpoint config to retain its factor. Every new iterator starts a fresh
 stream/draw with per-batch exposure counts at zero; pending repeats are not saved.
 Checkpoint consumption ledgers count processed exposures, including echoes.
-Four-survey resume requires HSC in the checkpoint. Historical HSC/JWST weights
-trained with the reversed zero-point conversion require their original
-preprocessing or retraining; this runner uses the corrected conversion.
+Resume validates the complete normalized modality definitions (including
+names, sources, keys, dimensions, positions and token IDs), plus declared model
+settings present in the saved model config. It no longer merely checks for HSC.
+The previous four-survey checkpoints remain compatible with the new default
+recipe. Historical HSC/JWST weights trained with the reversed zero-point
+conversion still require their original preprocessing or retraining.
 
 This implements draw-scoped shuffled batch reuse; it does not launch an
 experiment campaign or change an active run. CPU tests establish alignment,
 accounting, and configuration persistence, not throughput or held-out quality.
-The general default remains 1. Example-level mixing, new augmentations, exact
-replay checkpointing, and distributed echoing remain out of scope. See the
+The four-modality recipe default is 4 by explicit user choice, not a measured
+optimality claim. Example-level mixing, new augmentations, exact replay
+checkpointing, and distributed echoing remain out of scope. See the
 [paper evidence and policy note](shuffled-echo-factor-policy.md).

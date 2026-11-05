@@ -30,19 +30,23 @@ are hosted in the
 
 ## Astronomy pilot
 
-The current pilot draws from two [Multimodal Universe](https://huggingface.co/collections/UniverseTBD/multimodal-universe-hats)
-HATS catalogs:
+The default training YAML,
+[`astropt3-70m-four-modal.yaml`](configs/nanotron/astropt3-70m-four-modal.yaml),
+draws from four [Multimodal Universe](https://huggingface.co/collections/UniverseTBD/multimodal-universe-hats)
+HATS catalogs and uses **echo factor 4**:
 
 - **LegacySurvey North:** three-band (g/r/z) optical image cutouts, with
   associated image-side measurements.
-- **DESI EDR SV3:** optical spectra sampled on a wavelength grid, with
-  associated spectroscopic measurements.
+- **DESI EDR SV3:** optical spectra and associated measurements.
+- **SDSS:** optical spectra on the calibrated log-wavelength grid.
+- **HSC Wide:** five-band optical image cutouts.
 
-The live LSDB path can supply image+spectrum matches and spectrum-only
-sources, plus image-only sources recovered from LegacySurvey partitions
-visited by the crossmatch. **This is not a complete pass over all LegacySurvey
-images.** Available modalities vary by source and by model config; the model
-learns from whichever spans a record actually carries. The ingestion design
+The default uses outer joins in regions covered by at least three surveys,
+with LegacySurvey as the anchor. Unmatched right-side records remain separate
+objects. **This is not a complete pass over all LegacySurvey images.**
+Modality and catalog lists are YAML-driven, not limited to four: models learn
+from whichever configured spans a record carries. Existing calibrated decoders
+and scalar transforms are reused; new survey calibrations still require code. The ingestion design
 is still experimental, so consult the [training guide](docs/training.md) and
 active [run configs](configs/nanotron/) rather than treating any one stream
 implementation as permanent.
@@ -83,9 +87,18 @@ Live data checks need Hub access:
 uv run pytest -m network tests/test_lsdb_stream.py
 ```
 
-Training needs nanotron, flash-attn, GPUs, and access to the live catalogs;
-see [training.md](docs/training.md) for the environment, launch, and resume
-instructions. The former synthetic-dependent `train_smoke` gate and
+Training needs nanotron, flash-attn, GPUs, and access to the live catalogs.
+From the repository root, the existing command now defaults to four modalities
+and echo factor 4:
+
+```bash
+bash astro/scripts/run_three_modal.bash GPU_INDEX
+# Different supported modality/catalog recipe; historical command name retained:
+bash astro/scripts/run_three_modal.bash GPU_INDEX --config-file my-recipe.yaml
+```
+
+See [training.md](docs/training.md) for environment requirements, N-modality
+configuration, memory limits, echo overrides, and resume instructions. The former synthetic-dependent `train_smoke` gate and
 source-backed evaluation sweep are not currently available under the
 experimental LSDB cutover; do not interpret the checks above as a completed
 training-phase verification. Pure model-side evaluation and sample rendering

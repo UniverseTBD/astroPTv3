@@ -1,33 +1,46 @@
 #!/usr/bin/env bash
-# Usage: bash astro/scripts/run_three_modal.bash GPU_INDEX [ECHO_FACTOR]
-# Starts a fresh four-survey 30k-step run; existing jobs stay untouched.
+# Historical name; launches the selected N-modality YAML without touching other jobs.
+# Usage: bash astro/scripts/run_three_modal.bash GPU_INDEX [ECHO_FACTOR] [--config-file YAML]
 set -euo pipefail
 
-if [[ $# -lt 1 || $# -gt 2 || ! ${1:-} =~ ^[0-9]+$ || ! ${2-1} =~ ^0*[1-9][0-9]*$ ]]; then
-    echo "Usage: bash ${BASH_SOURCE[0]} GPU_INDEX [ECHO_FACTOR: positive integer]" >&2
+usage() {
+    echo "Usage: ${BASH_SOURCE[0]} GPU_INDEX [ECHO_FACTOR: positive integer] [--config-file YAML]" >&2
     exit 2
-fi
-
+}
+[[ $# -ge 1 && ${1:-} =~ ^[0-9]+$ ]] || usage
+GPU=$1
+shift
 ECHO_ARGS=()
-if [[ $# -eq 2 ]]; then
-    ECHO_ARGS=(--echo-factor "$2")
+ECHO_FACTOR=config
+if [[ $# -gt 0 && $1 != --config-file ]]; then
+    [[ $1 =~ ^0*[1-9][0-9]*$ ]] || usage
+    ECHO_FACTOR=$1
+    ECHO_ARGS=(--echo-factor "$1")
+    shift
+fi
+CONFIG_FILE=
+if [[ $# -gt 0 ]]; then
+    [[ $# -eq 2 && $1 == --config-file && -n $2 ]] || usage
+    CONFIG_FILE=$2
 fi
 
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 WORKSPACE=$(dirname -- "$REPO_ROOT")
 LSDB_SRC="$WORKSPACE/lsdb-pr-1584/src"
 PYTHON="$REPO_ROOT/.venv-astropt3/bin/python"
-OUTPUT="$WORKSPACE/astroPTv3_telemetry/four-modal-30k-echo${2-config}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-
-if [[ ! -x "$PYTHON" || ! -f "$LSDB_SRC/lsdb/streams/catalog_streams.py" ]]; then
-    echo "Requires $PYTHON and the LSDB checkout at $LSDB_SRC" >&2
+CONFIG_FILE=${CONFIG_FILE:-"$REPO_ROOT/astro/configs/nanotron/astropt3-70m-four-modal.yaml"}
+if [[ ! -x "$PYTHON" || ! -f "$LSDB_SRC/lsdb/streams/catalog_streams.py" || ! -f "$CONFIG_FILE" ]]; then
+    echo "Requires $PYTHON, the LSDB checkout at $LSDB_SRC, and config $CONFIG_FILE" >&2
     exit 1
 fi
+CONFIG_FILE="$(cd -- "$(dirname -- "$CONFIG_FILE")" && pwd)/$(basename -- "$CONFIG_FILE")"
+CONFIG_NAME=$(basename -- "$CONFIG_FILE" .yaml)
+OUTPUT="$WORKSPACE/astroPTv3_telemetry/${CONFIG_NAME}-echo${ECHO_FACTOR}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 
 cd -- "$REPO_ROOT"
-printf 'GPU: %s\nOutput: %s\n' "$1" "$OUTPUT"
+printf 'GPU: %s\nOutput: %s\n' "$GPU" "$OUTPUT"
 exec env -u HF_HUB_OFFLINE -u HF_DATASETS_OFFLINE -u NANOTRON_BENCHMARK \
-    CUDA_VISIBLE_DEVICES="$1" \
+    CUDA_VISIBLE_DEVICES="$GPU" \
     CUDA_DEVICE_MAX_CONNECTIONS=1 \
     OMP_NUM_THREADS=4 \
     TOKENIZERS_PARALLELISM=false \
@@ -39,5 +52,6 @@ exec env -u HF_HUB_OFFLINE -u HF_DATASETS_OFFLINE -u NANOTRON_BENCHMARK \
         --rdzv-endpoint=127.0.0.1:0 \
         --max-restarts=0 \
         astro/scripts/train_three_catalogs.py \
+        --config-file "$CONFIG_FILE" \
         --output "$OUTPUT" \
         "${ECHO_ARGS[@]}"

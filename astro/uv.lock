@@ -948,8 +948,8 @@ wheels = [
 
 [[package]]
 name = "hats"
-version = "0.11.1.dev24+g744d74ba4"
-source = { git = "https://github.com/astronomy-commons/hats?branch=main#744d74ba459e7af4cd47a12b8909c1fe8db32795" }
+version = "0.11.2.dev5+ge3cb79403"
+source = { git = "https://github.com/astronomy-commons/hats?branch=main#e3cb794032746bebb1b906daa370d54f205893f4" }
 dependencies = [
     { name = "aiohttp" },
     { name = "astropy" },
@@ -1260,8 +1260,8 @@ wheels = [
 
 [[package]]
 name = "lsdb"
-version = "0.11.1.dev74+g5102a8a9e"
-source = { git = "https://github.com/astronomy-commons/lsdb?branch=selective-x-match#5102a8a9e8c848b26f2b2c1360412d169fdc88cf" }
+version = "0.11.2.dev39+gbea008bb3"
+source = { git = "https://github.com/astronomy-commons/lsdb?branch=selective-x-match#bea008bb3a2cb3f6a27c4a829cbe219a5419ad7e" }
 dependencies = [
     { name = "dask", extra = ["complete"] },
     { name = "deprecated" },

@@ -177,6 +177,9 @@ def capture_context(torch, trainer, loader) -> dict:
         "code": {"astropt3": revision(REPO), "nanotron": revision(REPO / "nanotron")},
         "num_loading_workers": loader.num_workers,
         "loader": {
+            "catalog_stream": dataset.catalog_stream.spec,
+            "modalities": dataset.config.modalities,
+        } if dataset.catalog_stream is not None else {
             "legacy_catalog": data.LEGACY_CATALOG, "legacy_columns": dataset.columns,
             "desi_catalog": data.DESI_CATALOG if dataset.desi_columns else None,
             "desi_columns": dataset.desi_columns, "modalities": dataset.config.modalities,
