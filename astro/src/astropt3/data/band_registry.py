@@ -11,6 +11,9 @@ pixels.
 
 Everything is keyed to LegacySurvey: nanomaggies with AB zeropoint 22.5 and
 0.262 arcsec/pixel (``m_AB = 22.5 - 2.5*log10(flux_nmgy)``).
+The corrected zero-point conversion changes historical HSC/JWST normalization;
+checkpoints trained with the reversed factor need their original preprocessing
+or retraining. LegacySurvey's identity conversion is unchanged.
 
 Records with bands that are all in :data:`RAW_BANDS` pass through untouched;
 records mixing RAW and registry bands raise (not a real case for us — records
@@ -29,6 +32,7 @@ HSC PDR3 (``hsc-g/r/i/z/y``)
     ``m_bright = 18.0`` all bands: PDR3 defines the mask "for stars brighter
     than 18mag in each HSC broad-band filter".
     https://hsc-release.mtk.nao.ac.jp/doc/index.php/bright-star-masks__pdr3/
+    https://hsc-release.mtk.nao.ac.jp/doc/index.php/faq__pdr3/ (27 mag/DN).
 
 JWST NIRCam, GOODS-South (``jwst-f090w`` ... ``jwst-f444w``)
     zeropoint 28.9. Pixel scale 0.02 (short-wave f090..f200) / 0.04 (long-wave
@@ -95,12 +99,12 @@ RAW_BANDS: frozenset[str] = frozenset({"rgb-r", "rgb-g", "rgb-b"})
 def rescale_factors(band: str) -> tuple[float, float]:
     """Return ``(zpscale, pxscale)`` mapping raw flux to LegacySurvey nanomaggies.
 
-    ``zpscale = 10**((zp - 22.5)/2.5)`` (zeropoint alignment),
+    ``zpscale = 10**((22.5 - zp)/2.5)`` (zeropoint alignment),
     ``pxscale = (0.262 / pixel_scale)**2`` (per-pixel flux is proportional to
     pixel area; this rescales to a 0.262" reference pixel).
     """
     zp, pixel_scale, _ = BAND_REGISTRY[band]
-    zpscale = 10 ** ((zp - LEGACYSURVEY_REFERENCE_ZP) / 2.5)
+    zpscale = 10 ** ((LEGACYSURVEY_REFERENCE_ZP - zp) / 2.5)
     pxscale = (LEGACYSURVEY_REFERENCE_SCALE / pixel_scale) ** 2
     return zpscale, pxscale
 
