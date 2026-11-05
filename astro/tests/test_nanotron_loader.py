@@ -362,58 +362,52 @@ def test_non_retryable_error_fails_immediately(tiny_config, monkeypatch):
         next(iter(stream))
 
 
-# -- replicas / placement (kept behavior, ADR 0015 keeps ar_replicas) --------
+def test_packing_keeps_each_record_once_and_preserves_base_shuffle(tiny_config, monkeypatch):
+    record = make_record(1, image_only_fraction=0.0)
+    records = [{**record, "object_id": str(i)} for i in range(5)]
+    sequencer = nanotron_loader.ObjectSequencer(tiny_config)
+    objects = [sequencer.build(item, epoch=7) for item in records]
+    stream = PackedMicroBatches(tiny_config, 2, len(objects[0]))
+    stream._epoch = 7
+    monkeypatch.setattr(stream, "_open_records", lambda worker: iter(records))
+    batches = list(stream)
+    assert len(batches) == 2
+    for index, batch in enumerate(batches):
+        expected = stream.collator.collate_rows(
+            [[objects[2 * index]], [objects[2 * index + 1]]]
+        )
+        expected = nanotron_loader.flatten_packed_batch(expected, tiny_config, stream.seq_len)
+        for key in batch:
+            assert torch.equal(batch[key], expected[key])
+    assert len({obj.order for obj in objects}) > 1
 
 
-def _bipartite_stream(tiny_config, **kwargs):
-    kwargs.setdefault("ar_replicas", 3)
-    return PackedMicroBatches(tiny_config, 8, SEQ_LEN, **kwargs)
+def test_unequal_objects_keep_emptiest_first_placement_across_flushes(tiny_config, monkeypatch):
+    full = make_record(1, image_only_fraction=0.0)
+    kinds = ["image", "spectrum", "image", "both", "spectrum", "both",
+             "image", "spectrum", "both", "image", "spectrum"]
+    records = [
+        {"object_id": str(i), **{key: full[key] for key in ("image", "spectrum")
+                                if kind == "both" or key == kind}}
+        for i, kind in enumerate(kinds)
+    ]
+    stream = PackedMicroBatches(tiny_config, 2, 360)
+    stream._epoch = 7
+    objects = [stream.sequencer.build(record, epoch=7) for record in records]
+    assert [len(obj) for obj in objects[:4]] == [147, 34, 147, 180]
+    monkeypatch.setattr(stream, "_open_records", lambda worker: iter(records))
+    # Frozen factor-1 placements from the removed first-fitting/emptiest-row path.
+    expected_rows = [[[0, 3], [1, 2, 4]], [[5, 8], [6, 7, 9]]]
+    batches = list(stream)
+    assert len(batches) == len(expected_rows)
+    for batch, rows in zip(batches, expected_rows, strict=True):
+        packed = stream.collator.collate_rows([[objects[i] for i in row] for row in rows])
+        expected = nanotron_loader.flatten_packed_batch(packed, tiny_config, 360)
+        for key in batch:
+            assert torch.equal(batch[key], expected[key])
 
 
-def test_one_span_records_get_no_replica(tiny_config):
-    stream = _bipartite_stream(tiny_config)
-    record = make_record(2, image_only_fraction=1.0)
-    objects = stream._replica_objects(record)
-    assert len(objects) == len({id(obj) for obj in objects})
-    assert all(set(obj.order) == set(objects[0].order) for obj in objects)
-
-
-def test_replicas_carry_distinct_span_orders(tiny_config):
-    stream = _bipartite_stream(tiny_config)
-    for i in range(12):
-        objects = stream._replica_objects(make_record(i, image_only_fraction=1.0))
-        orders = [obj.order for obj in objects]
-        assert len(orders) == len(set(orders)), f"record {i} repeated an order"
-        assert "#" not in objects[0].object_id
-        assert all("#" in obj.object_id for obj in objects[1:])
-
-
-def test_no_two_replicas_of_one_object_share_a_packed_row(tiny_config):
-    stream = PackedMicroBatches(tiny_config, MBS, SEQ_LEN, ar_replicas=2)
-    placements = []
-    for i in range(8):
-        objects = stream._replica_objects(make_record(i, image_only_fraction=1.0))
-        if len(objects) > 1:
-            placements.append(stream._place(objects, [0] * MBS))
-    assert placements, "no record produced replicas"
-    for chosen in placements:
-        assert len(chosen) == len(set(chosen)), "two replicas landed in one row"
-
-
-def test_placement_deterministic_and_emptiest_first(tiny_config):
-    stream = PackedMicroBatches(tiny_config, MBS, SEQ_LEN, ar_replicas=1)
-    objects = stream._replica_objects(make_record(1, image_only_fraction=1.0))
-    used = [300, 10] + [50] * (MBS - 2)
-    first = stream._place(objects, used)
-    assert first == [1]
-    assert stream._place(objects, used) == first
-
-
-def test_more_replicas_than_rows_is_rejected(tiny_config):
-    with pytest.raises(ValueError, match="exceeds micro_batch_size"):
-        PackedMicroBatches(tiny_config, 2, SEQ_LEN, ar_replicas=3)
-
-
-def test_ar_replicas_rejects_a_nonsense_count(tiny_config):
-    with pytest.raises(ValueError, match="ar_replicas must be >= 1"):
-        PackedMicroBatches(tiny_config, MBS, SEQ_LEN, ar_replicas=0)
+@pytest.mark.parametrize("obsolete", ["ar_replicas", "replica_placement"])
+def test_removed_replica_options_are_rejected(tiny_config, obsolete):
+    with pytest.raises(TypeError, match=obsolete):
+        PackedMicroBatches(tiny_config, MBS, SEQ_LEN, **{obsolete: 2})  # pyright: ignore[reportArgumentType] -- deliberately invalid kwargs

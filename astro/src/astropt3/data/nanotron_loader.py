@@ -29,7 +29,7 @@ from lsdb.streams.catalog_streams import CrossMatchStream, InfiniteStream
 from ..configuration_astropt3 import AstroPT3Config
 from .band_registry import _DIV_FACTOR
 from .outer_crossmatch import OuterKdTreeCrossmatch
-from .packing import ObjectSequencer, PackedCollator, span_order
+from .packing import ObjectSequencer, PackedCollator
 from .spectral import _DIV_FACTOR as _SPECTRA_DIV_FACTOR
 from .telemetry import install_byte_probe, instrument
 
@@ -38,7 +38,6 @@ DESI_CATALOG = "hf://datasets/UniverseTBD/mmu_desi_edr_sv3"
 IMAGE_SHAPE = (3, 152, 152)
 _MAX_NET_RETRIES = 60
 _MAX_NET_RETRY_WAIT = 120
-_MAX_REPLICA_ATTEMPTS = 32
 # Lab book (EXPERIMENTS.md Part I) pilot crossmatch radius (mmu_desi_edr_sv3 x mmu_ssl_legacysurvey_north).
 _CROSSMATCH_RADIUS_ARCSEC = 1.0
 _CROSSMATCH_LEGACY_SUFFIX = "_legacy"
@@ -471,30 +470,14 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
         *,
         rank: int = 0,
         seed: int = 0,
-        ar_replicas: int = 1,
-        replica_placement: str = "decorrelated",
         crossmatch_desi: bool = False,
     ):
         super().__init__()
-        if ar_replicas < 1:
-            raise ValueError(f"ar_replicas must be >= 1, got {ar_replicas}")
-        if replica_placement not in ("decorrelated", "adjacent"):
-            raise ValueError(
-                "replica_placement must be 'decorrelated' or 'adjacent', "
-                f"got {replica_placement!r}"
-            )
-        if replica_placement == "decorrelated" and ar_replicas > micro_batch_size:
-            raise ValueError(
-                f"ar_replicas={ar_replicas} exceeds micro_batch_size="
-                f"{micro_batch_size}; each replica needs its own packed row"
-            )
         self.config = config
         self.micro_batch_size = micro_batch_size
         self.seq_len = seq_len
         self.rank = rank
         self.seed = seed
-        self.ar_replicas = ar_replicas
-        self.replica_placement = replica_placement
         self.desi_columns = _desi_columns(config) if crossmatch_desi else None
         if crossmatch_desi and self.desi_columns is None:
             raise ValueError(
@@ -671,52 +654,6 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
                 )
                 yield from decoded["record"]
 
-    def _replica_objects(self, record: dict) -> list:
-        """Build the base sequence and distinct autoregressive reorderings."""
-        base_id = str(record.get("object_id", ""))
-        first = self.sequencer.build(record, epoch=self._epoch)
-        names = sorted(first.order)
-        if self.ar_replicas == 1 or len(names) < 2:
-            return [first]
-
-        wanted = min(self.ar_replicas, math.factorial(len(names)))
-        objects, seen = [first], {first.order}
-        attempt = 1
-        while len(objects) < wanted and attempt <= _MAX_REPLICA_ATTEMPTS:
-            replica_id = f"{base_id}#{attempt}"
-            order = tuple(span_order(names, replica_id, self._epoch))
-            attempt += 1
-            if order in seen:
-                continue
-            seen.add(order)
-            objects.append(
-                self.sequencer.build(
-                    {**record, "object_id": replica_id},
-                    epoch=self._epoch,
-                    modality_order=list(order),
-                )
-            )
-        return objects
-
-    def _place(self, objects: list, used: list[int]) -> list[int] | None:
-        """Assign a record's base sequence and replicas to packed rows."""
-        order = sorted(range(len(used)), key=lambda row: (used[row], row))
-        if self.replica_placement == "adjacent":
-            span = sum(len(obj) for obj in objects)
-            for row_index in order:
-                if used[row_index] + span <= self.seq_len:
-                    return [row_index] * len(objects)
-            return None
-        chosen: list[int] = []
-        for obj in objects:
-            for row_index in order:
-                if row_index not in chosen and used[row_index] + len(obj) <= self.seq_len:
-                    chosen.append(row_index)
-                    break
-            else:
-                return None
-        return chosen
-
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
         install_byte_probe(self.rank, worker.id if worker else None)
@@ -725,14 +662,13 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
         used = [0] * self.micro_batch_size
 
         for record in records:
-            objects = self._replica_objects(record)
-            for obj in objects:
-                if len(obj) > self.seq_len:
-                    raise ValueError(
-                        f"object of length {len(obj)} exceeds seq_len {self.seq_len}"
-                    )
-            placement = self._place(objects, used)
-            if placement is None:
+            obj = self.sequencer.build(record, epoch=self._epoch)
+            if len(obj) > self.seq_len:
+                raise ValueError(
+                    f"object of length {len(obj)} exceeds seq_len {self.seq_len}"
+                )
+            row_index = min(range(len(used)), key=lambda row: (used[row], row))
+            if used[row_index] + len(obj) > self.seq_len:
                 batch = self.collator.collate_rows(rows)
                 expected_shape = (self.micro_batch_size, self.seq_len)
                 if batch["input_ids"].shape != expected_shape:
@@ -742,15 +678,9 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
                 yield flatten_packed_batch(batch, self.config, self.seq_len)
                 rows = [[] for _ in range(self.micro_batch_size)]
                 used = [0] * self.micro_batch_size
-                placement = self._place(objects, used)
-                if placement is None:
-                    raise AssertionError(
-                        f"record {record.get('object_id')!r} cannot be placed "
-                        f"into {self.micro_batch_size} rows x {self.seq_len} tokens"
-                    )
-            for obj, row_index in zip(objects, placement, strict=True):
-                rows[row_index].append(obj)
-                used[row_index] += len(obj)
+                row_index = 0
+            rows[row_index].append(obj)
+            used[row_index] += len(obj)
 
 
 def build_astropt3_dataloader(
@@ -788,9 +718,6 @@ def build_astropt3_dataloader(
         sequence_length,
         rank=dp_rank,
         seed=seed,
-        ar_replicas=getattr(dataset_args, "ar_replicas", 1) or 1,
-        replica_placement=getattr(dataset_args, "replica_placement", None)
-        or "decorrelated",
         crossmatch_desi=getattr(dataset_args, "crossmatch_desi", False),
     )
     loader = torch.utils.data.DataLoader(

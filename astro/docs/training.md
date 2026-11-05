@@ -66,8 +66,6 @@ data_stages:
     dataset:
       is_astropt3_streaming: true
       crossmatch_desi: true         # include DESI spectra where present
-      # ar_replicas: 1              # optional: distinct AR factorisations
-      # replica_placement: decorrelated
     num_loading_workers: 8          # concurrent LSDB readers per DP rank
     seed: 42
 ```
@@ -228,3 +226,69 @@ GPU's rated dense BF16 peak. Peaks come from an exact-name table
 GPU, a MIG slice or a non-BF16 run reports MFU as `null`, never zero.
 `rankN.json` also records each up physical NIC's negotiated link speed. The
 terminal shows the fastest per host; it is not internet or HF-route bandwidth.
+
+## 9. Four-survey runner and shuffled batch echoing
+
+The historically named `scripts/train_three_catalogs.py` now joins Legacy North,
+SDSS, DESI, and HSC Wide with outer joins in regions covered by at least three
+surveys. Right-only records are retained but are not crossmatched with each
+other without a Legacy anchor. The launcher uses the GPU environment and local
+LSDB worktree described in `scripts/run_three_modal.bash`; no existing job is
+modified or restarted.
+
+```bash
+# Fresh 30k-update runs; choose an available GPU after checking nvidia-smi.
+bash astro/scripts/run_three_modal.bash GPU_INDEX       # echo factor 1 (default)
+bash astro/scripts/run_three_modal.bash GPU_INDEX 2     # separately labeled echo-2 run
+```
+
+`--echo-factor N` must be a positive integer and includes the original use.
+The adapter retains **one loaded CPU batch**, after the worker DataLoader and
+before telemetry/device transfer, for N separate optimizer updates. Worker
+prefetch remains active. The first presentation retains the existing seeded
+`ObjectSequencer` shuffle. Each echo redraws a uniform modality-span order with
+`span_order`, seeded by the run seed and batch-local group/row/object/echo
+coordinates (object IDs are no longer present in packed batches). An order may
+repeat by chance; distinct permutations are not guaranteed. Objects remain in
+the same rows and positions; within-modality patch order, physical targets,
+modality positions, and document position IDs do not change. Single-modality
+objects repeat too, so echoing does not selectively favor multimodal objects.
+CPU tensors are read-only and every delivered dictionary is separate; only
+reshuffled token IDs/masks are newly allocated, retaining pinned memory.
+
+The old `ar_replicas` / `replica_placement` options and their generation/placement
+machinery are removed. Remove those keys from older training YAMLs. Echoing is
+an adapter option, not a replacement dataset YAML key. Model architecture,
+loss aggregation, optimizer, stochastic model noise, and update-based LR/noise/
+checkpoint schedules are unchanged. Echo factors above 1 require
+`batch_accumulation_per_replica=1`; distributed echo support is not provided.
+A 30k-update echo-2 run consumes about 15k newly delivered batches.
+
+The factor and ordering policy are recorded in local `run.json` / `progress.json`
+and the existing metrics/config-only W&B payload. No code, data, paths,
+provenance, or machine metadata is added to W&B. Per-step telemetry preserves
+processed counts and adds `echo_index` (zero-based), `fresh_*` and `replayed_*`
+counts for microbatches, nonpadding tokens, object occurrences (`rows`), modality
+loss tokens, and target values. **Fresh means the first use of a newly delivered
+packed batch**, not unique astronomical objects, new remote reads, or fetched
+bytes. Existing byte probes remain unchanged. Cumulative fresh-token/object
+rates and processed rates use the same elapsed-time denominator, excluding the
+first ten updates after each start/resume and including loading/checkpoint
+stalls. A repeat after warmup earns no fresh credit even if its initial use fell
+inside warmup.
+
+Resume still restores weights/optimizer/scheduler/RNG, not the data cursor.
+Supply `--echo-factor N` again alongside `--resume-from CHECKPOINT_ROOT` and a
+**new** `--output` directory using the same torchrun environment. Every new
+iterator starts a new group at echo index zero; pending repeats are not saved.
+Checkpoint consumption ledgers count processed exposures, including echoes.
+Four-survey resume requires HSC in the checkpoint. Historical HSC/JWST weights
+trained with the reversed zero-point conversion require their original
+preprocessing or retraining; this runner uses the corrected conversion.
+
+Start with a separately labeled factor **1 versus 2** comparison at matched
+initialization and explicit update/fresh-data budgets. CPU tests establish
+batch alignment/accounting, not a speedup. Adoption requires improved wall time
+to held-out quality with per-survey checks, especially SDSS; an untouched
+holdout must be supplied. Factor-4 experiments, new augmentations, example
+shuffle buffers, and exact replay checkpointing remain out of scope.
