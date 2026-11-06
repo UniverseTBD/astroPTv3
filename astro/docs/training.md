@@ -237,9 +237,7 @@ terminal shows the fastest per host; it is not internet or HF-route bandwidth.
 
 ## 9. YAML-driven N-modality training and shuffled echoing
 
-The historical `run_three_modal.bash` / `train_three_catalogs.py` names now
-support any configured number of calibrated modalities. From the repo root,
-choose an available GPU:
+From the repo root, choose an available GPU:
 
 ```bash
 bash astro/scripts/run_three_modal.bash GPU_INDEX       # default recipe, echo 4
@@ -247,76 +245,58 @@ bash astro/scripts/run_three_modal.bash GPU_INDEX 1     # disable echoing
 bash astro/scripts/run_three_modal.bash GPU_INDEX 2 --config-file my-recipe.yaml
 ```
 
-The runner requires one GPU and one data stage. YAML owns the model, modalities,
-workers, optimizer, horizon, and checkpoint schedule. Each launch creates a new
-output directory. The Python CLI also accepts `--output`,
-`--resume-from CHECKPOINT_ROOT`, and `--max-steps` for a bounded startup check.
-The bash script names the required GPU environment and local LSDB worktree;
-`uv.lock` pins compatible LSDB/HATS versions with multi-catalog support.
+The runner requires one GPU and one data stage; YAML owns the training settings.
+Each launch creates a new output directory. The Python CLI accepts `--output`,
+`--resume-from CHECKPOINT_ROOT`, and `--max-steps` for startup checks.
+The bash script names its GPU environment and LSDB worktree; use the compatible
+LSDB/HATS versions pinned in `uv.lock`.
 
 ### Catalogs and modalities
 
-Start from the [default YAML](../configs/nanotron/astropt3-70m-four-modal.yaml).
-Two independent lists connect through record keys:
-
-- `model.model_config.modalities`: names, calibrated family/source, record keys,
-  dimensions/positions, and token IDs. Keep existing IDs frozen; allocate
-  non-colliding blocks and increase `vocab_size` for new names as needed.
-- `data_stages[0].data.dataset.catalog_stream.catalogs`: ordered sources with
-  `name`, HF `repo` (optionally `@revision`), `decoder`, `record_key`, and optional
-  `scalar_columns` mapping **output record key → catalog column**. One catalog
-  may supply multiple modalities; each modality needs a compatible output.
+Copy the [default YAML](../configs/nanotron/astropt3-70m-four-modal.yaml).
+`model.model_config.modalities` and
+`data_stages[0].data.dataset.catalog_stream.catalogs` are independent lists;
+modality `record_keys` match catalog outputs. A catalog supplies `record_key`
+and/or `scalar_columns` (**record key → flat catalog column**). Keep existing
+token IDs frozen; new names need non-colliding IDs and sufficient `vocab_size`.
 
 Decoders are `legacy_image`, `hsc_image`, `desi_spectrum`, `sdss_spectrum`, and
-`scalars`. New survey calibrations require code, not just renamed sources.
-Scalars need registered transforms; DESI `Z` requires `Z` and valid `ZWARN` from
-the same catalog. Missing modalities are omitted; rows with none are dropped.
-
-The first catalog anchors the join; right-only rows remain separate objects,
-not joins among right catalogs. Set `min_surveys` in `1..number of catalogs`
-(default 3), including when reducing the catalog list. Size
-`num_loading_workers` and `worker_memory_limit` for the machine: the default is
-four loading workers and 64 GiB per Dask worker. Workers default to `spawn`.
-The ordinary Nanotron entrypoint uses the same loader (§3).
+`scalars`; new calibrations require code. Scalars need registered transforms;
+DESI `Z` needs valid `ZWARN` from the same catalog. Missing modalities are
+omitted; rows with none are dropped. The first catalog anchors the join;
+right-only rows stay separate, not joined to one another. Adjust `min_surveys`
+to `1..number of catalogs`, and size workers/memory for the machine.
 
 ### Echoing, accounting, and resume
 
-`data_stages[].data.dataset.echo_factor` is a positive integer counting **total
-uses**, including the original. The recipe explicitly chooses **4**; omitted
-legacy fields mean **1**. Runner precedence is CLI override > checkpoint factor
-on resume > recipe/default. The resolved factor is saved in run/checkpoint YAML.
+`data_stages[].data.dataset.echo_factor` counts **total uses**, including the
+original: a positive integer, **4** in the recipe, **1** when omitted. Precedence:
+CLI > checkpoint factor on resume > recipe/default. It is saved in checkpoint YAML.
 
 - **Factor 1:** normal streaming packing, including across draw boundaries.
 - **Factor N > 1:** each worker packs and caches one finite LSDB/HEALPix draw,
   including its padded tail, then shuffles exactly N references to each batch.
   Every exposure is a separate optimizer update, including single-modality
   batches. Requires `batch_accumulation_per_replica=1` and `world_size=dp_size=1`.
-- First exposure keeps normal modality ordering; later exposures reshuffle whole
-  spans with private seeded RNG. Orders can repeat. Physical targets, positions,
-  within-span patch order, model noise, and update-based schedules are unchanged.
+- Later exposures reshuffle whole modality spans with private RNG; orders can
+  repeat. Targets, positions, patch order, model noise, and schedules stay unchanged.
 - The cache adds **one packed draw per worker**, on top of normal prefetch, and
   increases startup latency. Echoes do not fetch data; prefetch can still fetch
   ahead. Stopping mid-draw can leave uneven exposure counts.
 - Remove obsolete `ar_replicas` / `replica_placement` keys from older YAMLs.
 
-Telemetry records processed counts, zero-based `echo_index`, and actual
-`fresh_*` / `replayed_*` counts. **Fresh means first presentation of a delivered
-batch, not unique objects, reads, or bytes.** Fresh and processed rates use the
-same wall-time denominator, excluding ten warmup updates after start/resume and
-including loading/checkpoint stalls. W&B remains metrics/config-only; catalog
-locations, checkpoint-init paths, provenance, code, data, and machine metadata
-stay local.
+Telemetry reports processed and `fresh_*` / `replayed_*` counts and zero-based
+`echo_index`. **Fresh means first use of a delivered batch, not unique objects,
+reads, or bytes.** Rates share a wall-time denominator, excluding ten warmup
+updates after start/resume but including loading/checkpoint stalls. W&B receives
+only metrics/config: paths, provenance, code, data, and machine metadata stay local.
 
-Resume needs the matching `--config-file`; omitting it selects the default,
-not automatic checkpoint discovery. Model settings and normalized modalities
-are validated. Weights/optimizer/scheduler/RNG restore, but the stream restarts:
-**no data cursor or pending echoes are saved**. Ordinary Nanotron launches use
-the supplied YAML; use the saved config to retain its factor. Historical
-HSC/JWST weights trained with reversed zero-point scaling need their original
-preprocessing or retraining.
+Resume with the matching `--config-file`, not the default. Model settings and
+modalities are validated; weights/optimizer/scheduler/RNG restore, but **no data
+cursor or pending echoes are saved**. Ordinary Nanotron launches use their
+supplied YAML. Historical HSC/JWST weights trained with reversed zero-point
+scaling need their original preprocessing or retraining.
 
-[Data echoing](https://arxiv.org/abs/1907.05550) motivates reuse, but tuned results
-on other workloads do not establish an AstroPT optimum. Factor 4 is a chosen
-policy, not a demonstrated speedup or held-out quality gain. CPU tests establish
-alignment/accounting, not training quality; compare wall-time-to-held-out-quality
-and fresh-data budgets before drawing efficiency conclusions.
+[Data echoing](https://arxiv.org/abs/1907.05550) motivates reuse, not a guaranteed
+AstroPT speedup or quality gain. Factor 4 is policy, not a measured optimum.
+Compare wall-time-to-held-out-quality and fresh-data budgets, not just updates/s.
