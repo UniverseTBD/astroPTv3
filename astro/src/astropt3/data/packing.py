@@ -69,10 +69,8 @@ SPAN_ORDER_VERSION = "adr0008_uniform_v1"
 def span_order(names, object_id: str, epoch: int = 0) -> list[str]:
     """The ADR 0008 span order for one object: uniform, seeded, resume-exact.
 
-    Split out of :meth:`ObjectSequencer.build` so callers can ask what order
-    an ``(object_id, epoch)`` pair WOULD produce without paying for
-    tokenisation — ADR 0014 §7a needs exactly that to pick distinct replica
-    orders without patchifying a candidate it then discards.
+    Shared by :meth:`ObjectSequencer.build` and batch echoing, which redraws
+    orders without re-tokenizing physical targets or changing model RNG state.
     """
     order = list(names)
     if len(order) > 1:
@@ -90,9 +88,6 @@ class ObjectSeq:
     values: dict  # name -> [n_m, input_size]
     positions: dict  # name -> long [n_m] or float [n_m, pos_input_size]
     object_id: str = ""
-    # the span order this sequence was serialized in; ADR 0014 §7a compares
-    # it across replicas to refuse identical duplicates
-    order: tuple[str, ...] = ()
 
     def __len__(self) -> int:
         return len(self.input_ids)
@@ -305,7 +300,6 @@ class ObjectSequencer:
             values=values,
             positions=positions,
             object_id=str(record.get("object_id", "")),
-            order=tuple(order),
         )
 
 
@@ -337,10 +331,8 @@ class PackedCollator:
     def collate_rows(self, rows: list[list[ObjectSeq]]) -> dict:
         """Collate rows the caller has already formed.
 
-        ADR 0014 §7b assigns replicas to rows itself (to keep a base object's
-        replicas out of the same packed row), so its rows are deliberately
-        NOT what greedy packing would produce — it hands them straight here
-        instead of round-tripping through the greedy path above.
+        The streaming loader fills the emptiest row first, unlike the
+        sequential greedy packing in __call__, so it supplies rows directly.
         """
         for row in rows:
             used = sum(len(obj) for obj in row)

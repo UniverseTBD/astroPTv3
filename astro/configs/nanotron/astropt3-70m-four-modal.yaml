@@ -1,0 +1,185 @@
+# Default single-GPU training recipe: four modalities, four shuffled exposures.
+# Match the independent model list and catalog outputs via record_keys.
+# Memory/batch settings describe this recipe, not a guarantee for every machine.
+general:
+  project: astropt3
+  run: astropt3-70m-four-modal
+  seed: 42
+  step: null
+  consumed_train_samples: null
+  benchmark_csv_path: null
+  ignore_sanity_checks: true
+logging:
+  iteration_step_info_interval: 1
+  log_level: info
+  log_level_replica: info
+model:
+  ddp_bucket_cap_mb: 25
+  dtype: bfloat16
+  init_method:
+    std: 0.02
+  make_vocab_size_divisible_by: 1
+  model_config:
+    is_astropt3_config: true
+    loss_aggregation: family
+    modalities:
+      - name: images
+        family: image
+        source: legacy
+        record_keys: [image]
+        token_ids: [2, 3, 4]
+        input_size: 192
+        patch_size: 8
+        pos_type: index
+        pos_input_size: 1
+        max_positions: 361
+        loss_weight: 1.0
+      - name: spectra
+        family: spectrum
+        source: desi
+        record_keys: [spectrum]
+        token_ids: [5, 6, 7]
+        input_size: 256
+        patch_size: 256
+        pos_type: continuous
+        pos_input_size: 1
+        max_positions: 1024
+        loss_weight: 1.0
+      - name: sdss_spectra
+        family: spectrum
+        source: sdss
+        record_keys: [spectrum_sdss]
+        token_ids: [17, 18, 19]
+        input_size: 256
+        patch_size: 256
+        pos_type: continuous
+        pos_input_size: 1
+        max_positions: 1024
+        loss_weight: 1.0
+      - name: hsc_images
+        family: image
+        source: hsc
+        record_keys: [hsc_image]
+        token_ids: [20, 21, 22]
+        input_size: 320
+        patch_size: 8
+        pos_type: index
+        pos_input_size: 1
+        max_positions: 144
+        loss_weight: 1.0
+    spiral: true
+    hidden_size: 512
+    num_hidden_layers: 23
+    num_attention_heads: 8
+    num_key_value_heads: 2
+    intermediate_size: 1536
+    max_position_embeddings: 4096
+    rope_theta: 100000.0
+    no_rope_layer: 4
+    rms_norm_eps: 1.0e-06
+    rope_interleaved: false
+    hidden_act: silu
+    attention_bias: false
+    initializer_range: 0.02
+    vocab_size: 64
+    pad_token_id: 0
+    bos_token_id: 1
+    eos_token_id: 1
+    tie_word_embeddings: false
+    use_cache: false
+    _attn_implementation: flash_attention_2
+    _use_qkv_packed: true
+    _use_doc_masking: true
+    _fused_rms_norm: true
+    _fused_rotary_emb: true
+    log_attn_probs: false
+parallelism:
+  dp: 1
+  pp: 1
+  tp: 1
+  context_parallel_size: 1
+  expert_parallel_size: 1
+  pp_engine: 1f1b
+  tp_mode: ALL_REDUCE
+  tp_linear_async_communication: false
+  recompute_layer: false
+data_stages:
+  - name: multimodal
+    start_training_step: 1
+    data:
+      dataset:
+        is_astropt3_streaming: true
+        echo_factor: 4
+        catalog_stream:
+          # First catalog anchors the join; right-only rows remain separate.
+          catalogs:
+            - name: legacy
+              repo: >-
+                UniverseTBD/mmu_ssl_legacysurvey_north@f634744d3c44dd4fde0dee3172d4887c5e3c31c0
+              decoder: legacy_image
+              record_key: image
+            - name: sdss
+              repo: >-
+                UniverseTBD/mmu_sdss_sdss@da175ca9bb931f4301ab950431922ba9f99089ba
+              decoder: sdss_spectrum
+              record_key: spectrum_sdss
+            - name: desi
+              repo: >-
+                UniverseTBD/mmu_desi_edr_sv3@9fd88ba48233cb9857701ce802a7eade2d4c4a88
+              decoder: desi_spectrum
+              record_key: spectrum
+            - name: hsc
+              repo: >-
+                hugging-science/mmu_hsc_pdr3_wide_21@7de6b92fd99097207a00b9c42f2d2862d62662bf
+              decoder: hsc_image
+              record_key: hsc_image
+          how: outer
+          min_surveys: 3
+          radius_arcsec: 1.0
+          count_fraction_threshold: 0.0
+          partitions_per_chunk: 4
+          worker_memory_limit: 64GiB
+      seed: 42
+      num_loading_workers: 4
+optimizer:
+  accumulate_grad_in_fp32: true
+  clip_grad: 1.0
+  learning_rate_scheduler:
+    learning_rate: 0.001
+    lr_warmup_steps: 2000
+    lr_warmup_style: linear
+    lr_decay_style: cosine
+    lr_decay_steps: null
+    lr_decay_starting_step: null
+    min_decay_lr: 0.0001
+  optimizer_factory:
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    name: adamW
+    torch_adam_is_fused: true
+  weight_decay: 0.1
+  weight_decay_exclude_named_params:
+    - .*layernorm.*
+    - .*layer_norm.*
+  zero_stage: 1
+tokens:
+  sequence_length: 4096
+  train_steps: 30000
+  micro_batch_size: 16
+  batch_accumulation_per_replica: 1
+  val_check_interval: 100
+  limit_val_batches: 0
+  limit_test_batches: 0
+checkpoints:
+  checkpoints_path: ../astroPTv3_checkpoints/astropt3-70m-four-modal
+  resume_checkpoint_path: null
+  checkpoint_schedule: pythia
+  checkpoint_interval: 1000
+  save_initial_state: false
+  save_final_state: true
+tokenizer:
+  tokenizer_name_or_path: null
+profiler: null
+lighteval: null
+s3_upload: null

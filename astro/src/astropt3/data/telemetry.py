@@ -22,8 +22,8 @@ loader no longer writes (ADR 0015 dropped ``object_id_log`` with the rest of
 the dataset-checkpoint machinery); byte and step-counter telemetry are
 unaffected.
 
-Everything here is a no-op unless ``$ASTROPT3_TELEMETRY_DIR`` is set, so
-production runs pay nothing and the benchmark opts in.
+Counters and byte probes are off unless ``$ASTROPT3_TELEMETRY_DIR`` is set.
+Echo-enabled loaders still strip worker metadata before the device mover.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from threading import Lock
 from typing import Any
 
 from ..tokenization import BOS_ID, PAD_ID
+from .echo import ECHO_METADATA
 
 TELEMETRY_DIR_ENV = "ASTROPT3_TELEMETRY_DIR"
 
@@ -149,7 +150,7 @@ _counters: dict[str, Any] = {}
 
 
 def _blank() -> dict[str, Any]:
-    return {
+    record = {
         "micro_batches": 0,
         "loader_wait_s": 0.0,
         "tokens_total": 0,
@@ -157,10 +158,18 @@ def _blank() -> dict[str, Any]:
         "rows": 0,
         "loss_tokens": {},
         "target_values": {},
+        "echo_index": 0,
+        "echo_factor": 1,
     }
+    for prefix in ("fresh", "replayed"):
+        record.update({
+            f"{prefix}_micro_batches": 0, f"{prefix}_tokens_nonpad": 0,
+            f"{prefix}_rows": 0, f"{prefix}_loss_tokens": {}, f"{prefix}_target_values": {},
+        })
+    return record
 
 
-def observe_micro_batch(flat: dict, wait_s: float) -> None:
+def observe_micro_batch(flat: dict, wait_s: float, *, echo_index=0, echo_factor=1) -> None:
     """Accumulate one flat micro-batch into the current step's counters.
 
     ``{m}_mask`` counts loss-bearing tokens per modality (which is also the
@@ -175,31 +184,36 @@ def observe_micro_batch(flat: dict, wait_s: float) -> None:
     input_ids = flat.get("input_ids")
     if input_ids is None:
         return
-    _counters["micro_batches"] += 1
+    _counters.update(echo_index=echo_index, echo_factor=echo_factor)
+    prefixes = ("", "fresh_" if echo_index == 0 else "replayed_")
     _counters["loader_wait_s"] += wait_s
     # pi-lens-ignore: unchecked-throwing-call-python
     _counters["tokens_total"] += int(input_ids.numel())
-    # pi-lens-ignore: unchecked-throwing-call-python
-    _counters["tokens_nonpad"] += int((input_ids != PAD_ID).sum().item())
-    # pi-lens-ignore: unchecked-throwing-call-python
-    _counters["rows"] += int((input_ids == BOS_ID).sum().item())
+    counts = {
+        "micro_batches": 1,
+        "tokens_nonpad": int((input_ids != PAD_ID).sum().item()),
+        "rows": int((input_ids == BOS_ID).sum().item()),
+    }
+    for prefix in prefixes:
+        for key, count in counts.items():
+            _counters[f"{prefix}{key}"] += count
     for key, value in flat.items():
         if key.endswith("_mask"):
             name = key[: -len("_mask")]
             # pi-lens-ignore: unchecked-throwing-call-python
             count = int(value.sum().item())
             if count:
-                _counters["loss_tokens"][name] = (
-                    _counters["loss_tokens"].get(name, 0) + count
-                )
+                for prefix in prefixes:
+                    totals = _counters[f"{prefix}loss_tokens"]
+                    totals[name] = totals.get(name, 0) + count
         elif key.endswith("_values"):
             name = key[: -len("_values")]
             # pi-lens-ignore: unchecked-throwing-call-python
             count = int(value.numel())
             if count:
-                _counters["target_values"][name] = (
-                    _counters["target_values"].get(name, 0) + count
-                )
+                for prefix in prefixes:
+                    totals = _counters[f"{prefix}target_values"]
+                    totals[name] = totals.get(name, 0) + count
 
 
 def drain_step() -> dict[str, Any]:
@@ -250,8 +264,11 @@ class TelemetryLoader:
 
     _loader: Any = None  # class attribute: keeps __getattr__ from recursing
 
-    def __init__(self, loader):
+    def __init__(self, loader, *, enabled=True):
         self._loader = loader
+        self._enabled = enabled
+        self.echo_index = 0
+        self.echo_factor = 1
 
     def __getattr__(self, name):
         return getattr(self._loader, name)
@@ -267,10 +284,20 @@ class TelemetryLoader:
                 batch = next(iterator)
             except StopIteration:
                 return
-            observe_micro_batch(batch, time.perf_counter() - began)
+            wait_s = time.perf_counter() - began
+            if ECHO_METADATA in batch:
+                batch = dict(batch)
+                self.echo_index, self.echo_factor = batch.pop(ECHO_METADATA)
+            else:
+                self.echo_index, self.echo_factor = 0, 1
+            if self._enabled:
+                observe_micro_batch(
+                    batch, wait_s, echo_index=self.echo_index, echo_factor=self.echo_factor,
+                )
             yield batch
 
 
-def instrument(loader):
-    """Wrap a loader when telemetry is on, else hand it back untouched."""
-    return TelemetryLoader(loader) if telemetry_dir() is not None else loader
+def instrument(loader, *, echo_factor=1):
+    """Strip echo metadata even with counters off; leave plain loaders untouched."""
+    enabled = telemetry_dir() is not None
+    return TelemetryLoader(loader, enabled=enabled) if enabled or echo_factor > 1 else loader

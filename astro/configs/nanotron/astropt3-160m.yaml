@@ -88,10 +88,21 @@ data_stages:
     start_training_step: 1
     data:
       dataset:
-        is_astropt3_streaming: true # fixed LSDB InfiniteStream (ADR 0015)
-        crossmatch_desi: true # DESI-left CrossMatchStream, adds spectra (EXPERIMENTS §9)
+        is_astropt3_streaming: true
+        catalog_stream:
+          how: outer
+          min_surveys: 1
+          catalogs:
+            - name: desi
+              repo: UniverseTBD/mmu_desi_edr_sv3
+              decoder: desi_spectrum
+              record_key: spectrum
+            - name: legacy
+              repo: UniverseTBD/mmu_ssl_legacysurvey_north
+              decoder: legacy_image
+              record_key: image
       seed: 42
-      # DataLoader workers are the only source concurrency; LSDB is synchronous.
+      # Each worker owns a catalog stream; size for available CPU/RAM.
       num_loading_workers: 8
 optimizer:
   accumulate_grad_in_fp32: true

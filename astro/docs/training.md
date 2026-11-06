@@ -4,8 +4,8 @@
 checkpoint/resume. Background on the model is in
 [`architecture.md`](architecture.md). The initial experimental LSDB cutover
 is recorded in [ADR 0015](adr/0015-lsdb-infinite-stream-training.md);
-subsequent run configs can also use DESI×LegacySurvey crossmatching. The old
-contract's `train_smoke` gate remains absent on this branch.*
+all current recipes use YAML-configured catalog streams. The old contract's
+`train_smoke` gate remains absent on this branch.*
 
 ## 1. Environments
 
@@ -31,12 +31,12 @@ Verify the env on a GPU box: `pytest -m gpu tests/test_nanotron_gpu.py`.
 There is **no prep step** and no local corpus. `data/nanotron_loader.py` opens
 Multimodal Universe HATS catalogs via LSDB inside each DataLoader worker,
 decodes rows into the shared record shape, then sequences and packs them for
-nanotron. Image-only configs read LegacySurvey North; crossmatch-enabled
-configs also include DESI EDR SV3 spectra. Depending on survey overlap,
-records can carry an image, a spectrum, or both. Recovered image-only rows
-come from LegacySurvey partitions visited by the join, **not** from every
-LegacySurvey partition. The active YAML and loader are the sources for the
-stream implementation; its fetch and prefetch settings are experimental.
+nanotron. The default recipe joins Legacy North, DESI, SDSS, and HSC; other
+YAMLs can select different supported modality/catalog combinations (§9).
+Depending on overlap, records carry different subsets of the configured
+modalities. Recovered unmatched records come from partitions visited by the
+join, **not** every survey partition. The active YAML and loader are the
+sources for the stream implementation; fetch/prefetch settings are experimental.
 
 Facts to know:
 
@@ -57,25 +57,24 @@ errors fail immediately.
 
 ## 3. Configs
 
-Full nanotron run configs live in `astro/configs/nanotron/`. For the imaging
-+ spectra pilot, the dataset block includes:
+Full nanotron run configs live in `astro/configs/nanotron/`. The convenience
+launcher's default is **`astropt3-70m-four-modal.yaml`**, with four modalities
+and echo factor **4**. Its model, catalog list, join policy, worker count, and
+30k-update schedule are explicit YAML, not injected by the script (see §9).
 
-```yaml
-data_stages:
-- data:
-    dataset:
-      is_astropt3_streaming: true
-      crossmatch_desi: true         # include DESI spectra where present
-      # ar_replicas: 1              # optional: distinct AR factorisations
-      # replica_placement: decorrelated
-    num_loading_workers: 8          # concurrent LSDB readers per DP rank
-    seed: 42
-```
+Every supplied recipe uses `data_stages[].data.dataset.catalog_stream` and
+`model.model_config.modalities`. The size-ladder recipes retain their DESI +
+LegacySurvey selection, with DESI as anchor and echo factor 1. Both launchers
+use the same configured loader; N-modal training does not require LegacySurvey.
+See §9 for catalog/modality mappings.
 
-The catalog projections and stream policy live in
-`astropt3.data.nanotron_loader`. Without `crossmatch_desi: true`, the source
-is LegacySurvey-only. The retired knobs (`data_root`, `match_index`,
-synthetic fractions, `object_id_log`) are not supported.
+`catalog_stream` is required. Remove `crossmatch_desi` (even `false`) from old
+recipes and supply explicit catalogs. Matching and footprint selection follow
+[LSDB PR #1584](https://github.com/astronomy-commons/lsdb/pull/1584), pinned by
+`uv.lock`; the local crossmatcher and legacy loader are removed. Coverage and
+boundary matches can differ from old runs. Calibration and quality gates remain.
+The retired knobs (`data_root`, `match_index`, synthetic fractions,
+`object_id_log`) are not supported.
 
 Governing knobs, top to bottom:
 
@@ -107,7 +106,21 @@ recipe and size-ladder rationale live in
 
 ## 4. Launching
 
-Single node (from the repo root):
+Single GPU (from the repo root; choose an available device):
+
+```bash
+bash astro/scripts/run_train.bash GPU_INDEX       # default recipe, echo 4
+bash astro/scripts/run_train.bash GPU_INDEX 1     # disable echoing
+bash astro/scripts/run_train.bash GPU_INDEX 2 --config-file my-recipe.yaml
+```
+
+This launches `astro/scripts/train.py`. Set `ASTROPT3_ENV` to the GPU venv;
+the local launcher defaults to `.venv-astropt3` in the repository. It uses the
+installed LSDB/HATS versions, which must match `astro/uv.lock` and support the
+multi-catalog/min_surveys API. It no longer injects a sibling LSDB checkout;
+older GPU environments need their dependencies updated before launching.
+
+Multi-GPU on one node uses the same YAML-configured loader:
 
 ```bash
 CUDA_DEVICE_MAX_CONNECTIONS=1 \
@@ -133,7 +146,7 @@ co-launch hook are removed; §6 describes the remaining model-side tools.
 ## 5. Checkpoints and resume
 
 Checkpoint dirs `{1,2,4,...,512,1000,...}` hold model weights (bf16),
-optimizer + LR-scheduler state, RNG states, `model_config.json`;
+optimizer + LR-scheduler state, RNG states, `model_config.json`, `config.yaml`;
 `latest.txt` is written last, so any step dir it covers is complete.
 
 Resume:
@@ -148,6 +161,10 @@ LSDB stream is cursorless: resume opens a fresh stream and records may be
 revisited immediately. There is no exact-sequence continuation, no replay
 audit, and no worker-count constraint on resume.
 
+For an older run, use a matching model recipe with explicit `catalog_stream` in
+the new launch YAML. Do not rewrite saved checkpoints; the runner reads their
+old YAML only for the echo factor, not to select catalogs for the resumed run.
+
 Watch the logs: `lm_loss`, per-modality `images_loss` and (when DESI is
 included) `spectra_loss`, `tokens_per_sec_per_gpu`, `model_tflops_per_gpu`,
 and memory lines. Exact-likelihood losses can be negative.
@@ -159,7 +176,16 @@ Source-backed validation/probe checkpoint sweeps are deferred.
 batches), `embed_objects` + `ridge_r2` (probe on supplied objects),
 `scalar_head_metrics`, and sampling/rendering. `scripts/generate.py` remains
 a separate live-sample CLI; it is **not** a fixed validation suite or an
-automated checkpoint sweep.
+automated checkpoint sweep. Generation uses the same configured stream:
+
+```bash
+python astro/scripts/generate.py --checkpoint <hf_dir> \
+    --config-file astro/configs/nanotron/<recipe>.yaml
+```
+
+The checkpoint's modalities must have compatible outputs in that recipe. One
+configured draw supplies templates, ordered by active modality count; `--rows`
+selects positions in that ordering. Catalogs are never inferred from the model.
 
 ## 7. Verification gates
 
@@ -228,3 +254,61 @@ GPU's rated dense BF16 peak. Peaks come from an exact-name table
 GPU, a MIG slice or a non-BF16 run reports MFU as `null`, never zero.
 `rankN.json` also records each up physical NIC's negotiated link speed. The
 terminal shows the fastest per host; it is not internet or HF-route bandwidth.
+
+## 9. YAML-driven N-modality training and shuffled echoing
+
+Use the launch commands in §4. The local runner requires one GPU and one data
+stage; YAML owns the training settings.
+Each launch creates a new output directory. The Python CLI, `astro/scripts/train.py`,
+accepts `--output`, `--resume-from CHECKPOINT_ROOT`, and `--max-steps` for startup
+checks without changing the configured learning-rate schedule.
+
+### Catalogs and modalities
+
+Copy the [default YAML](../configs/nanotron/astropt3-70m-four-modal.yaml).
+`model.model_config.modalities` and
+`data_stages[0].data.dataset.catalog_stream.catalogs` are independent lists;
+modality `record_keys` match catalog outputs. A catalog supplies `record_key`
+and/or `scalar_columns` (**record key → flat catalog column**). Keep existing
+token IDs frozen; new names need non-colliding IDs and sufficient `vocab_size`.
+
+Decoders are `legacy_image`, `hsc_image`, `desi_spectrum`, `sdss_spectrum`, and
+`scalars`; new calibrations require code. Scalars need registered transforms;
+DESI `Z` needs valid `ZWARN` from the same catalog. Missing modalities are
+omitted; rows with none are dropped. The first catalog anchors the join;
+right-only rows stay separate, not joined to one another. Adjust `min_surveys`
+to `1..number of catalogs`, and size workers/memory for the machine.
+
+### Echoing, accounting, and resume
+
+`data_stages[].data.dataset.echo_factor` counts **total uses**, including the
+original: a positive integer, **4** in the recipe, **1** when omitted. Precedence:
+CLI > checkpoint factor on resume > recipe/default. It is saved in checkpoint YAML.
+
+- **Factor 1:** normal streaming packing, including across draw boundaries.
+- **Factor N > 1:** each worker packs and caches one finite LSDB/HEALPix draw,
+  including its padded tail, then shuffles exactly N references to each batch.
+  Every exposure is a separate optimizer update, including single-modality
+  batches. Requires `batch_accumulation_per_replica=1` and `world_size=dp_size=1`.
+- Later exposures reshuffle whole modality spans with private RNG; orders can
+  repeat. Targets, positions, patch order, model noise, and schedules stay unchanged.
+- The cache adds **one packed draw per worker**, on top of normal prefetch, and
+  increases startup latency. Echoes do not fetch data; prefetch can still fetch
+  ahead. Stopping mid-draw can leave uneven exposure counts.
+- Remove obsolete `ar_replicas` / `replica_placement` keys from older YAMLs.
+
+Telemetry reports processed and `fresh_*` / `replayed_*` counts and zero-based
+`echo_index`. **Fresh means first use of a delivered batch, not unique objects,
+reads, or bytes.** Rates share a wall-time denominator, excluding ten warmup
+updates after start/resume but including loading/checkpoint stalls. W&B receives
+only metrics/config: paths, provenance, code, data, and machine metadata stay local.
+
+Resume with the matching `--config-file`, not the default. Model settings and
+modalities are validated; weights/optimizer/scheduler/RNG restore, but **no data
+cursor or pending echoes are saved**. Ordinary Nanotron launches use their
+supplied YAML. Historical HSC/JWST weights trained with reversed zero-point
+scaling need their original preprocessing or retraining.
+
+[Data echoing](https://arxiv.org/abs/1907.05550) motivates reuse, not a guaranteed
+AstroPT speedup or quality gain. Factor 4 is policy, not a measured optimum.
+Compare wall-time-to-held-out-quality and fresh-data budgets, not just updates/s.

@@ -46,13 +46,13 @@ stages is implicit and easy to break, so understand it before editing:
    live in `tests/legacy_fixture.py` (ADR 0015 deleted `data/synthetic.py`
    with the rest of the local-corpus path). Real records are **streamed
    live from the HF hub inside each DataLoader worker** by
-   `data/nanotron_loader.py` via LSDB (ADR 0015): a plain
-   `lsdb.streams.InfiniteStream` over LegacySurvey, or — with
-   `crossmatch_desi: true` — a `CrossMatchStream` (lsdb PR #1584, tracked
-   as a git dependency on `selective-x-match`) with DESI on the left and
-   LegacySurvey joined right through `OuterKdTreeCrossmatch`
-   (`data/outer_crossmatch.py`), which also recovers the unmatched Legacy
-   images a plain join would drop. `count_fraction_threshold` is pinned to
+   `data/catalog_stream.py` via LSDB PR #1584 (`selective-x-match`, pinned in
+   `uv.lock`): `InfiniteStream` for one catalog, `CrossMatchStream` for several.
+   Explicit YAML `catalog_stream` lists define the sources and join policy;
+   the legacy selector and custom crossmatcher are removed. Generation uses
+   this same stream. Upstream owns footprint and boundary-match semantics;
+   AstroPT retains decoding, calibration, quality gates and bounded retries.
+   `count_fraction_threshold` defaults to
    0.0: 0.5 saved 31% Legacy bytes but cost ~20% tokens/s and image
    coverage (EXPERIMENTS.md §9). Each worker owns a dask `LocalCluster`
    (threads only, `partitions_per_chunk=4`) so the next draw's fetch
@@ -64,8 +64,8 @@ stages is implicit and easy to break, so understand it before editing:
    revisit records (ADR 0015; `docs/training.md` §5). Recognized
    transport/storage errors discard the iterator and reopen under bounded
    backoff; decode/validation and unknown errors fail immediately.
-   Provenance (lsdb/hats versions, catalog, columns) is logged at startup
-   and `uv.lock` pins the resolved LSDB commit.
+   Startup logs report reader identity and footprint counts; the local
+   benchmark report records catalog configuration and package versions.
 2. **`ObjectSequencer`** (`data/packing.py`) turns a record into an
    `ObjectSeq`: central 96×96 crop (`packing.IMAGE_CROP`; JWST cubes are
    already 96×96) + physical band-registry normalization
