@@ -1,8 +1,8 @@
-"""Adapter from the LSDB LegacySurvey stream to nanotron micro-batches.
+"""Adapter from YAML-configured LSDB catalog streams to nanotron micro-batches.
 
-Each DataLoader worker opens the fixed catalog and owns one synchronous
-``lsdb.streams.InfiniteStream`` (plain LegacySurvey) or
-``lsdb.streams.CrossMatchStream`` (DESI x LegacySurvey, ``crossmatch_desi``).
+Each DataLoader worker owns a ``CatalogStream`` for the configured modalities.
+The fixed LegacySurvey/DESI selection remains only for old configs without
+``catalog_stream``.
 Items yielded by this module are already whole micro-batches, flattened
 because nanotron only moves top-level tensors to the device.
 """

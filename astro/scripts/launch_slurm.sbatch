@@ -1,5 +1,5 @@
 #!/bin/bash
-# Multi-node nanotron launch for AstroPT3 pilots (Phase 5).
+# Multi-node N-modal training from an AstroPT3 YAML recipe.
 #
 # Usage, from the REPO ROOT (paths in the configs are cwd-relative):
 #
@@ -44,7 +44,7 @@ MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 MASTER_PORT=$((20000 + SLURM_JOB_ID % 20000))
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1   # required by nanotron's comm overlap
-export HF_DATASETS_OFFLINE=1           # compute nodes never touch the network
+unset HF_HUB_OFFLINE HF_DATASETS_OFFLINE  # catalog streams require Hub access
 export WANDB_MODE=${WANDB_MODE:-online}
 export ASTROPT3_TELEMETRY_DIR=${ASTROPT3_TELEMETRY_DIR:-../astroPTv3_telemetry/${SLURM_JOB_ID:-$$}}
 

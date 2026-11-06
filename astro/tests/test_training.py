@@ -1,4 +1,4 @@
-"""Offline checks for the sustained four-survey run adapter."""
+"""Offline checks for YAML-driven N-modal training and launchers."""
 
 import copy
 import json
@@ -24,7 +24,7 @@ from astropt3.data.echo import echo_draw
 from astropt3.tokenization import BOS_ID, PAD_ID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-import train_three_catalogs as run  # pyright: ignore[reportMissingImports] -- scripts added above
+import train as run  # pyright: ignore[reportMissingImports] -- scripts added above
 
 
 @pytest.fixture
@@ -39,6 +39,24 @@ def default_stream(default_recipe):
     )
     spec = default_recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
     return catalog_stream.CatalogStream(spec, hf)
+
+
+@pytest.mark.parametrize("recipe", sorted(run.DEFAULT_CONFIG.parent.glob("*.yaml")), ids=lambda path: path.stem)
+def test_all_recipes_use_configured_catalog_loader(recipe):
+    config = yaml.safe_load(recipe.read_text())
+    parallelism, tokens = config["parallelism"], config["tokens"]
+    for stage in config["data_stages"]:
+        data = stage["data"]
+        assert data["dataset"]["catalog_stream"]["catalogs"]
+        assert not data["dataset"].get("crossmatch_desi", False)
+        batches = run.loader.build_astropt3_dataloader(
+            SimpleNamespace(**data["dataset"]), SimpleNamespace(**config["model"]["model_config"]),
+            tokens["micro_batch_size"], tokens["sequence_length"], 0, parallelism["dp"],
+            world_size=parallelism["dp"] * parallelism["tp"],
+            batch_accumulation_per_replica=tokens["batch_accumulation_per_replica"],
+        )
+        assert isinstance(batches.dataset.catalog_stream, catalog_stream.CatalogStream)
+        assert batches.dataset.echo_factor == data["dataset"].get("echo_factor", 1)
 
 
 def test_training_config_keeps_batch_shape_and_checkpoint_schedule(tmp_path, default_recipe):
@@ -489,7 +507,7 @@ def test_python_cli_rejects_removed_hsc_options(monkeypatch, tmp_path, flag):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["train_three_catalogs.py", "--output", str(tmp_path / "output"), flag],
+        ["train.py", "--output", str(tmp_path / "output"), flag],
     )
     with pytest.raises(SystemExit) as error:
         run.main()
@@ -559,7 +577,7 @@ def test_resume_rejects_generic_modality_mismatches(tmp_path, default_recipe, fi
 )
 def test_launcher_rejects_invalid_gpu_arguments(args):
     result = subprocess.run(
-        ["bash", str(run.REPO / "astro/scripts/run_three_modal.bash"), *args],
+        ["bash", str(run.REPO / "astro/scripts/run_train.bash"), *args],
         capture_output=True,
         text=True,
     )
@@ -569,11 +587,12 @@ def test_launcher_rejects_invalid_gpu_arguments(args):
 
 @pytest.mark.parametrize("echo_arg", [None, "2", "03"])
 @pytest.mark.parametrize("custom_config", [False, True])
-def test_launcher_selects_gpu_and_starts_full_run_without_offline_flags(tmp_path, echo_arg, custom_config):
+def test_launcher_selects_gpu_and_starts_full_run_without_offline_flags(tmp_path, monkeypatch, echo_arg, custom_config):
+    monkeypatch.delenv("ASTROPT3_ENV", raising=False)
     repo = tmp_path / "repo"
-    script = repo / "astro/scripts/run_three_modal.bash"
+    script = repo / "astro/scripts/run_train.bash"
     script.parent.mkdir(parents=True)
-    script.write_text((run.REPO / "astro/scripts/run_three_modal.bash").read_text())
+    script.write_text((run.REPO / "astro/scripts/run_train.bash").read_text())
     config_file = repo / "astro/configs/nanotron" / run.DEFAULT_CONFIG.name
     config_file.parent.mkdir(parents=True)
     config_file.write_text(run.DEFAULT_CONFIG.read_text())
@@ -587,16 +606,13 @@ def test_launcher_selects_gpu_and_starts_full_run_without_offline_flags(tmp_path
     assert result.returncode == 1
     assert "Requires" in result.stderr
 
-    python = repo / ".venv-astropt3/bin/python"
+    environment = tmp_path / "gpu env" if custom_config else repo / ".venv-astropt3"
+    python = environment / "bin/python"
     python.parent.mkdir(parents=True)
     # Use a harmless installed binary; temporary filesystems may be mounted noexec.
     echo = shutil.which("echo")
     assert echo is not None
     python.symlink_to(echo)
-    lsdb_src = tmp_path / "lsdb-pr-1584/src"
-    module = lsdb_src / "lsdb/streams/catalog_streams.py"
-    module.parent.mkdir(parents=True)
-    module.write_text("")
     result = subprocess.run(
         ["bash", "-x", str(script), "3", *([echo_arg] if echo_arg else []), *config_args],
         cwd=tmp_path,
@@ -609,6 +625,7 @@ def test_launcher_selects_gpu_and_starts_full_run_without_offline_flags(tmp_path
             "HF_DATASETS_OFFLINE": "1",
             "NANOTRON_BENCHMARK": "1",
             "PYTHONPATH": "existing",
+            **({"ASTROPT3_ENV": str(environment.relative_to(tmp_path))} if custom_config else {}),
         },
     )
     lines = result.stdout.splitlines()
@@ -630,7 +647,7 @@ def test_launcher_selects_gpu_and_starts_full_run_without_offline_flags(tmp_path
         "NANOTRON_BENCHMARK",
     ]
     assert "CUDA_VISIBLE_DEVICES=3" in trace
-    assert f"PYTHONPATH={lsdb_src}:existing" in trace
+    assert not any(arg.startswith("PYTHONPATH=") for arg in trace)
     assert trace[trace.index(str(python)) + 1 :] == [
         "-m",
         "torch.distributed.run",
@@ -638,7 +655,7 @@ def test_launcher_selects_gpu_and_starts_full_run_without_offline_flags(tmp_path
         "--rdzv-backend=c10d",
         "--rdzv-endpoint=127.0.0.1:0",
         "--max-restarts=0",
-        "astro/scripts/train_three_catalogs.py",
+        "astro/scripts/train.py",
         "--config-file",
         str(config_file.resolve()),
         "--output",
@@ -648,6 +665,30 @@ def test_launcher_selects_gpu_and_starts_full_run_without_offline_flags(tmp_path
     assert Path(output).parent == tmp_path / "astroPTv3_telemetry"
     assert Path(output).name.startswith(f"{config_file.stem}-echo{echo_arg or 'config'}-")
     assert not Path(output).exists()
+
+
+def test_slurm_launcher_uses_live_catalogs_without_starting_a_job(tmp_path):
+    activate = tmp_path / "gpuenv/bin/activate"
+    activate.parent.mkdir(parents=True)
+    activate.write_text(
+        "scontrol() { printf 'test-node\\n'; }\n"
+        "srun() {\n"
+        "  printf 'offline=%s/%s\\n' \"${HF_HUB_OFFLINE-unset}\" \"${HF_DATASETS_OFFLINE-unset}\"\n"
+        "  printf '%s\\n' \"$@\"\n"
+        "}\n"
+    )
+    result = subprocess.run(
+        ["bash", str(run.REPO / "astro/scripts/launch_slurm.sbatch"), str(run.DEFAULT_CONFIG)],
+        check=True, capture_output=True, text=True,
+        env={
+            **os.environ, "ASTROPT3_ENV": str(activate.parent.parent),
+            "SLURM_JOB_ID": "123", "SLURM_JOB_NODELIST": "test-node",
+            "SLURM_NNODES": "1", "SLURM_GPUS_PER_NODE": "1", "DRY_RUN_STEPS": "",
+            "HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1",
+        },
+    )
+    assert "offline=unset/unset" in result.stdout.splitlines()
+    assert result.stdout.splitlines()[-3:] == ["nanotron/run_train.py", "--config-file", str(run.DEFAULT_CONFIG)]
 
 
 def echo_record(record, index, factor):
@@ -901,7 +942,7 @@ def test_throughput_uses_configured_names_and_horizon(names):
 def test_python_cli_rejects_bad_echo_before_creating_output(monkeypatch, tmp_path, factor):
     monkeypatch.setenv("WORLD_SIZE", "1")
     output = tmp_path / "output"
-    monkeypatch.setattr(sys, "argv", ["train_three_catalogs.py", "--output", str(output), "--echo-factor", factor])
+    monkeypatch.setattr(sys, "argv", ["train.py", "--output", str(output), "--echo-factor", factor])
     with pytest.raises(SystemExit) as error:
         run.main()
     assert error.value.code == 2
@@ -1000,7 +1041,7 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path
             patch.setenv("WORLD_SIZE", "1")
             patch.delenv("NANOTRON_BENCHMARK", raising=False)
             patch.delenv("ASTROPT3_TELEMETRY_DIR", raising=False)
-            patch.setattr(sys, "argv", ["train_three_catalogs.py", "--output", str(output),
+            patch.setattr(sys, "argv", ["train.py", "--output", str(output),
                                        "--max-steps", "2", *config_args,
                                        *(["--echo-factor", str(override)] if override else []),
                                        *(["--resume-from", str(resume)] if attempt else [])])
@@ -1036,7 +1077,7 @@ def test_python_cli_forwards_echo_and_checks_accumulation_before_outputs(monkeyp
     monkeypatch.setenv("WORLD_SIZE", "1")
     monkeypatch.delenv("NANOTRON_BENCHMARK", raising=False)
     output = tmp_path / "output"
-    monkeypatch.setattr(sys, "argv", ["train_three_catalogs.py", "--output", str(output),
+    monkeypatch.setattr(sys, "argv", ["train.py", "--output", str(output),
                                      *(["--echo-factor", factor] if factor else [])])
     expected = int(factor) if factor else None
     original = run.prepare_config
@@ -1062,7 +1103,7 @@ def test_python_cli_checks_max_steps_against_selected_yaml(monkeypatch, tmp_path
     monkeypatch.setenv("WORLD_SIZE", "1")
     monkeypatch.delenv("NANOTRON_BENCHMARK", raising=False)
     monkeypatch.setattr(sys, "argv", [
-        "train_three_catalogs.py", "--config-file", str(config_file),
+        "train.py", "--config-file", str(config_file),
         "--output", str(output), "--max-steps", "124",
     ])
     with pytest.raises(SystemExit) as error:

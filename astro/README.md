@@ -33,8 +33,9 @@ are hosted in the
 The [default 70M recipe](configs/nanotron/astropt3-70m-four-modal.yaml) streams
 [Multimodal Universe](https://huggingface.co/collections/UniverseTBD/multimodal-universe-hats)
 LegacySurvey North images, DESI and SDSS spectra, and HSC Wide images, with
-**echo factor 4**. Catalogs and modalities are YAML-configurable; new physical
-survey calibrations still require code.
+**echo factor 4**. All training recipes use YAML-configured catalog streams and
+modality lists; N-modal training is the normal path. New physical survey
+calibrations still require code.
 
 It outer-joins regions covered by at least three surveys, anchored on Legacy.
 Unmatched right-side records remain separate objects. **This is not a complete
@@ -82,7 +83,7 @@ Training needs nanotron, flash-attn, a GPU, and live catalog access. From the
 repository root:
 
 ```bash
-bash astro/scripts/run_three_modal.bash GPU_INDEX
+bash astro/scripts/run_train.bash GPU_INDEX
 ```
 
 See [training.md](docs/training.md) for custom recipes, echo overrides, resource

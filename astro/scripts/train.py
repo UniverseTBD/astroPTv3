@@ -1,4 +1,4 @@
-"""Train configured MMU modalities on one GPU (historical script name).
+"""Train YAML-configured MMU modalities on one GPU.
 
 --config-file selects a complete Nanotron YAML; the default is the four-modality,
 echo-4 recipe. --output must be a new directory. --max-steps bounds a startup

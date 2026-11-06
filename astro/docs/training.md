@@ -4,8 +4,8 @@
 checkpoint/resume. Background on the model is in
 [`architecture.md`](architecture.md). The initial experimental LSDB cutover
 is recorded in [ADR 0015](adr/0015-lsdb-infinite-stream-training.md);
-subsequent run configs can also use DESI×LegacySurvey crossmatching. The old
-contract's `train_smoke` gate remains absent on this branch.*
+all current recipes use YAML-configured catalog streams. The old contract's
+`train_smoke` gate remains absent on this branch.*
 
 ## 1. Environments
 
@@ -62,24 +62,15 @@ launcher's default is **`astropt3-70m-four-modal.yaml`**, with four modalities
 and echo factor **4**. Its model, catalog list, join policy, worker count, and
 30k-update schedule are explicit YAML, not injected by the script (see §9).
 
-Older imaging + spectra configs remain supported by the ordinary Nanotron
-entrypoint. Their dataset block includes:
+Every supplied recipe uses `data_stages[].data.dataset.catalog_stream` and
+`model.model_config.modalities`. The size-ladder recipes retain their DESI +
+LegacySurvey selection, with DESI as anchor and echo factor 1. Both launchers
+use the same configured loader; N-modal training does not require LegacySurvey.
+See §9 for catalog/modality mappings.
 
-```yaml
-data_stages:
-- data:
-    dataset:
-      is_astropt3_streaming: true
-      crossmatch_desi: true         # include DESI spectra where present
-      echo_factor: 1               # total uses per batch; >1 shuffles within each draw
-    num_loading_workers: 8          # concurrent LSDB readers per DP rank
-    seed: 42
-```
-
-Without `catalog_stream`, `astropt3.data.nanotron_loader` retains the legacy
-policy: LegacySurvey-only unless `crossmatch_desi: true`. With `catalog_stream`,
-`astropt3.data.catalog_stream` opens the explicitly configured sources instead;
-it does not require LegacySurvey. Do not combine the two selection modes.
+For old saved configs only, the Nanotron entrypoint retains the fallback without
+`catalog_stream`: LegacySurvey-only, or DESI×LegacySurvey with `crossmatch_desi`.
+Do not combine the two modes. New recipes should use `catalog_stream`.
 The retired knobs (`data_root`, `match_index`, synthetic fractions,
 `object_id_log`) are not supported.
 
@@ -113,7 +104,21 @@ recipe and size-ladder rationale live in
 
 ## 4. Launching
 
-Single node (from the repo root):
+Single GPU (from the repo root; choose an available device):
+
+```bash
+bash astro/scripts/run_train.bash GPU_INDEX       # default recipe, echo 4
+bash astro/scripts/run_train.bash GPU_INDEX 1     # disable echoing
+bash astro/scripts/run_train.bash GPU_INDEX 2 --config-file my-recipe.yaml
+```
+
+This launches `astro/scripts/train.py`. Set `ASTROPT3_ENV` to the GPU venv;
+the local launcher defaults to `.venv-astropt3` in the repository. It uses the
+installed LSDB/HATS versions, which must match `astro/uv.lock` and support the
+multi-catalog/min_surveys API. It no longer injects a sibling LSDB checkout;
+older GPU environments need their dependencies updated before launching.
+
+Multi-GPU on one node uses the same YAML-configured loader:
 
 ```bash
 CUDA_DEVICE_MAX_CONNECTIONS=1 \
@@ -237,19 +242,11 @@ terminal shows the fastest per host; it is not internet or HF-route bandwidth.
 
 ## 9. YAML-driven N-modality training and shuffled echoing
 
-From the repo root, choose an available GPU:
-
-```bash
-bash astro/scripts/run_three_modal.bash GPU_INDEX       # default recipe, echo 4
-bash astro/scripts/run_three_modal.bash GPU_INDEX 1     # disable echoing
-bash astro/scripts/run_three_modal.bash GPU_INDEX 2 --config-file my-recipe.yaml
-```
-
-The runner requires one GPU and one data stage; YAML owns the training settings.
-Each launch creates a new output directory. The Python CLI accepts `--output`,
-`--resume-from CHECKPOINT_ROOT`, and `--max-steps` for startup checks.
-The bash script names its GPU environment and LSDB worktree; use the compatible
-LSDB/HATS versions pinned in `uv.lock`.
+Use the launch commands in §4. The local runner requires one GPU and one data
+stage; YAML owns the training settings.
+Each launch creates a new output directory. The Python CLI, `astro/scripts/train.py`,
+accepts `--output`, `--resume-from CHECKPOINT_ROOT`, and `--max-steps` for startup
+checks without changing the configured learning-rate schedule.
 
 ### Catalogs and modalities
 

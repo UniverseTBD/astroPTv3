@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Historical name; launches the selected N-modality YAML without touching other jobs.
-# Usage: bash astro/scripts/run_three_modal.bash GPU_INDEX [ECHO_FACTOR] [--config-file YAML]
+# Launch the selected N-modality YAML on one GPU without touching other jobs.
+# Usage: bash astro/scripts/run_train.bash GPU_INDEX [ECHO_FACTOR] [--config-file YAML]
 set -euo pipefail
 
 usage() {
@@ -26,13 +26,13 @@ fi
 
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 WORKSPACE=$(dirname -- "$REPO_ROOT")
-LSDB_SRC="$WORKSPACE/lsdb-pr-1584/src"
-PYTHON="$REPO_ROOT/.venv-astropt3/bin/python"
+PYTHON="${ASTROPT3_ENV:-$REPO_ROOT/.venv-astropt3}/bin/python"
 CONFIG_FILE=${CONFIG_FILE:-"$REPO_ROOT/astro/configs/nanotron/astropt3-70m-four-modal.yaml"}
-if [[ ! -x "$PYTHON" || ! -f "$LSDB_SRC/lsdb/streams/catalog_streams.py" || ! -f "$CONFIG_FILE" ]]; then
-    echo "Requires $PYTHON, the LSDB checkout at $LSDB_SRC, and config $CONFIG_FILE" >&2
+if [[ ! -x "$PYTHON" || ! -f "$CONFIG_FILE" ]]; then
+    echo "Requires $PYTHON and config $CONFIG_FILE" >&2
     exit 1
 fi
+PYTHON="$(cd -- "$(dirname -- "$PYTHON")" && pwd)/python"
 CONFIG_FILE="$(cd -- "$(dirname -- "$CONFIG_FILE")" && pwd)/$(basename -- "$CONFIG_FILE")"
 CONFIG_NAME=$(basename -- "$CONFIG_FILE" .yaml)
 OUTPUT="$WORKSPACE/astroPTv3_telemetry/${CONFIG_NAME}-echo${ECHO_FACTOR}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -45,13 +45,12 @@ exec env -u HF_HUB_OFFLINE -u HF_DATASETS_OFFLINE -u NANOTRON_BENCHMARK \
     OMP_NUM_THREADS=4 \
     TOKENIZERS_PARALLELISM=false \
     HF_HUB_DISABLE_PROGRESS_BARS=1 \
-    PYTHONPATH="$LSDB_SRC${PYTHONPATH:+:$PYTHONPATH}" \
     "$PYTHON" -m torch.distributed.run \
         --nproc_per_node=1 \
         --rdzv-backend=c10d \
         --rdzv-endpoint=127.0.0.1:0 \
         --max-restarts=0 \
-        astro/scripts/train_three_catalogs.py \
+        astro/scripts/train.py \
         --config-file "$CONFIG_FILE" \
         --output "$OUTPUT" \
         "${ECHO_ARGS[@]}"
