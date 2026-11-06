@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from legacy_fixture import TINY_CATALOG_STREAM
 
 nanotron_config = pytest.importorskip("nanotron.config")
 AstroPT3StreamingDatasetsArgs = pytest.importorskip(
@@ -21,12 +22,30 @@ def test_echo_factor_round_trips_nanotron_yaml(tmp_path, factor):
     config.save_as_yaml(path)
     restored = nanotron_config.get_config_from_file(path)
     assert restored.data_stages[0].data.dataset.echo_factor == factor
+    assert restored.data_stages[0].data.dataset.catalog_stream == raw["data_stages"][0]["data"]["dataset"]["catalog_stream"]
 
 
-def test_legacy_dataset_config_defaults_to_no_echoing():
-    args = AstroPT3StreamingDatasetsArgs()
+def test_explicit_dataset_config_defaults_to_no_echoing():
+    args = AstroPT3StreamingDatasetsArgs(catalog_stream=TINY_CATALOG_STREAM)
     assert args.echo_factor == 1
-    assert args.catalog_stream is None
+    assert args.catalog_stream == TINY_CATALOG_STREAM
+
+
+@pytest.mark.parametrize("kwargs", [
+    {}, {"catalog_stream": None}, {"catalog_stream": {}},
+    {"catalog_stream": {"catalogs": []}}, {"catalog_stream": []},
+])
+def test_nanotron_requires_explicit_catalogs(kwargs):
+    with pytest.raises(ValueError, match="catalog_stream.catalogs"):
+        AstroPT3StreamingDatasetsArgs(**kwargs)
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_nanotron_rejects_retired_crossmatch_option(selected):
+    with pytest.raises(TypeError, match="crossmatch_desi"):
+        AstroPT3StreamingDatasetsArgs(
+            catalog_stream=TINY_CATALOG_STREAM, crossmatch_desi=selected
+        )
 
 
 def test_four_modal_default_round_trips_catalog_stream(tmp_path):

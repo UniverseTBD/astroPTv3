@@ -48,7 +48,7 @@ def test_all_recipes_use_configured_catalog_loader(recipe):
     for stage in config["data_stages"]:
         data = stage["data"]
         assert data["dataset"]["catalog_stream"]["catalogs"]
-        assert not data["dataset"].get("crossmatch_desi", False)
+        assert "crossmatch_desi" not in data["dataset"]
         batches = run.loader.build_astropt3_dataloader(
             SimpleNamespace(**data["dataset"]), SimpleNamespace(**config["model"]["model_config"]),
             tokens["micro_batch_size"], tokens["sequence_length"], 0, parallelism["dp"],
@@ -57,6 +57,13 @@ def test_all_recipes_use_configured_catalog_loader(recipe):
         )
         assert isinstance(batches.dataset.catalog_stream, catalog_stream.CatalogStream)
         assert batches.dataset.echo_factor == data["dataset"].get("echo_factor", 1)
+
+
+@pytest.mark.parametrize("crossmatch", [False, True])
+def test_training_rejects_retired_selection(tmp_path, default_recipe, crossmatch):
+    default_recipe["data_stages"][0]["data"]["dataset"]["crossmatch_desi"] = crossmatch
+    with pytest.raises(ValueError, match="crossmatch_desi is removed"):
+        run.prepare_config(default_recipe, tmp_path / "run")
 
 
 def test_training_config_keeps_batch_shape_and_checkpoint_schedule(tmp_path, default_recipe):
@@ -537,6 +544,26 @@ def test_resume_compares_normalized_modalities(tmp_path, default_recipe, count, 
     saved["modalities"] = list(reversed(registry.to_list()))
     write_resume(tmp_path, saved, echo_factor=factor)
     assert run.validate_resume(tmp_path, model) == (1 if factor is None else factor)
+
+
+@pytest.mark.parametrize("crossmatch", [False, True])
+def test_resume_uses_new_catalogs_without_rewriting_old_saved_yaml(
+    tmp_path, default_recipe, default_stream, crossmatch
+):
+    model = default_recipe["model"]["model_config"]
+    write_resume(tmp_path, model, echo_factor=4)
+    saved = tmp_path / "64/config.yaml"
+    old = yaml.safe_load(saved.read_text())
+    old["data_stages"][0]["data"]["dataset"]["crossmatch_desi"] = crossmatch
+    saved.write_text(yaml.safe_dump(old))
+    before = saved.read_bytes()
+    factor = run.validate_resume(tmp_path, model)
+    config = run.prepare_config(default_recipe, tmp_path / "run", tmp_path, echo_factor=factor)
+    dataset = config["data_stages"][0]["data"]["dataset"]
+    assert dataset["echo_factor"] == 4
+    assert dataset["catalog_stream"] == default_stream.spec
+    assert "crossmatch_desi" not in dataset
+    assert saved.read_bytes() == before
 
 
 @pytest.mark.parametrize("field,value", [

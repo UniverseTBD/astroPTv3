@@ -68,9 +68,11 @@ LegacySurvey selection, with DESI as anchor and echo factor 1. Both launchers
 use the same configured loader; N-modal training does not require LegacySurvey.
 See §9 for catalog/modality mappings.
 
-For old saved configs only, the Nanotron entrypoint retains the fallback without
-`catalog_stream`: LegacySurvey-only, or DESI×LegacySurvey with `crossmatch_desi`.
-Do not combine the two modes. New recipes should use `catalog_stream`.
+`catalog_stream` is required. Remove `crossmatch_desi` (even `false`) from old
+recipes and supply explicit catalogs. Matching and footprint selection follow
+[LSDB PR #1584](https://github.com/astronomy-commons/lsdb/pull/1584), pinned by
+`uv.lock`; the local crossmatcher and legacy loader are removed. Coverage and
+boundary matches can differ from old runs. Calibration and quality gates remain.
 The retired knobs (`data_root`, `match_index`, synthetic fractions,
 `object_id_log`) are not supported.
 
@@ -159,6 +161,10 @@ LSDB stream is cursorless: resume opens a fresh stream and records may be
 revisited immediately. There is no exact-sequence continuation, no replay
 audit, and no worker-count constraint on resume.
 
+For an older run, use a matching model recipe with explicit `catalog_stream` in
+the new launch YAML. Do not rewrite saved checkpoints; the runner reads their
+old YAML only for the echo factor, not to select catalogs for the resumed run.
+
 Watch the logs: `lm_loss`, per-modality `images_loss` and (when DESI is
 included) `spectra_loss`, `tokens_per_sec_per_gpu`, `model_tflops_per_gpu`,
 and memory lines. Exact-likelihood losses can be negative.
@@ -170,7 +176,16 @@ Source-backed validation/probe checkpoint sweeps are deferred.
 batches), `embed_objects` + `ridge_r2` (probe on supplied objects),
 `scalar_head_metrics`, and sampling/rendering. `scripts/generate.py` remains
 a separate live-sample CLI; it is **not** a fixed validation suite or an
-automated checkpoint sweep.
+automated checkpoint sweep. Generation uses the same configured stream:
+
+```bash
+python astro/scripts/generate.py --checkpoint <hf_dir> \
+    --config-file astro/configs/nanotron/<recipe>.yaml
+```
+
+The checkpoint's modalities must have compatible outputs in that recipe. One
+configured draw supplies templates, ordered by active modality count; `--rows`
+selects positions in that ordering. Catalogs are never inferred from the model.
 
 ## 7. Verification gates
 

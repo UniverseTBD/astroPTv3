@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from legacy_fixture import make_record
+from legacy_fixture import TINY_CATALOG_STREAM, make_record
 
-from astropt3.data import nanotron_loader, telemetry
+from astropt3.data import catalog_stream, nanotron_loader, telemetry
 from astropt3.data.echo import ECHO_METADATA, echo_draw
 from astropt3.data.nanotron_loader import (
     PackedMicroBatches,
@@ -40,8 +40,8 @@ def _no_io(*args, **kwargs):
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
     monkeypatch.delenv(telemetry.TELEMETRY_DIR_ENV, raising=False)
-    monkeypatch.setattr(nanotron_loader, "open_catalog", _no_io)
-    monkeypatch.setattr(nanotron_loader, "LocalCluster", _no_io)
+    monkeypatch.setattr(catalog_stream, "open_catalog", _no_io)
+    monkeypatch.setattr(catalog_stream, "LocalCluster", _no_io)
     monkeypatch.setattr(nanotron_loader, "install_byte_probe", lambda *args: None)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     telemetry.drain_step()
@@ -141,7 +141,10 @@ def test_two_draws_never_mix_or_fetch_early_and_keep_tail(
     if modality:
         records = [_only(record, modality) for record in records]
     draws = [records[:5], records[5:]]
-    dataset = FiniteDraws(tiny_config, 2, seq_len, draws=draws, echo_factor=3, seed=19, rank=2)
+    dataset = FiniteDraws(
+        tiny_config, 2, seq_len, catalog_stream=TINY_CATALOG_STREAM,
+        draws=draws, echo_factor=3, seed=19, rank=2,
+    )
     worker = SimpleNamespace(id=3)
     monkeypatch.setattr(torch.utils.data, "get_worker_info", lambda: worker)
     iterator = iter(dataset)
@@ -175,7 +178,9 @@ def test_empty_draw_helper(tiny_config, factor):
 
 def test_empty_and_tiny_draws_emit_only_nonempty_padded_tails(tiny_config, records):
     draws = [[], [_only(records[0], "image")], [], [_only(records[1], "spectrum")], []]
-    dataset = FiniteDraws(tiny_config, 2, 200, draws=draws, echo_factor=2)
+    dataset = FiniteDraws(
+        tiny_config, 2, 200, catalog_stream=TINY_CATALOG_STREAM, draws=draws, echo_factor=2
+    )
     batches = list(dataset)
     assert len(batches) == 4
     assert dataset.fetched == list(range(5))
@@ -186,13 +191,18 @@ def test_empty_and_tiny_draws_emit_only_nonempty_padded_tails(tiny_config, recor
         assert (batch["position_ids"][1] == 0).all()
     assert sum(bool(batch["images_mask"].any()) for batch in batches) == 2
     assert sum(bool(batch["spectra_mask"].any()) for batch in batches) == 2
-    assert list(FiniteDraws(tiny_config, 2, 200, draws=[[], []], echo_factor=3)) == []
+    assert list(FiniteDraws(
+        tiny_config, 2, 200, catalog_stream=TINY_CATALOG_STREAM, draws=[[], []], echo_factor=3
+    )) == []
 
 
 @pytest.mark.parametrize("kwargs", [{}, {"echo_factor": 1}])
 def test_factor_one_preserves_streaming_across_draw_boundaries(tiny_config, records, kwargs):
     records = [_only(record, "image") for record in records[:3]]
-    dataset = FiniteDraws(tiny_config, 1, 300, draws=[[records[0]], records[1:]], **kwargs)
+    dataset = FiniteDraws(
+        tiny_config, 1, 300, catalog_stream=TINY_CATALOG_STREAM,
+        draws=[[records[0]], records[1:]], **kwargs,
+    )
     batches = list(dataset)
     assert len(batches) == 1  # Existing infinite-stream path does not flush a finite tail.
     assert ECHO_METADATA not in batches[0]
@@ -207,7 +217,10 @@ def test_worker_metadata_is_stripped_with_telemetry_off_or_on(
     if enabled:
         monkeypatch.setenv(telemetry.TELEMETRY_DIR_ENV, str(tmp_path))
     draw = [_only(records[0], "image"), _only(records[1], "spectrum"), records[2]]
-    dataset = FiniteDraws(tiny_config, 1, 180, draws=[draw], echo_factor=3, seed=7)
+    dataset = FiniteDraws(
+        tiny_config, 1, 180, catalog_stream=TINY_CATALOG_STREAM,
+        draws=[draw], echo_factor=3, seed=7,
+    )
     loader = torch.utils.data.DataLoader(
         dataset, batch_size=None, num_workers=num_workers,
         multiprocessing_context="spawn" if num_workers else None,
@@ -272,7 +285,9 @@ def test_invalid_factors_fail_before_data_open(tiny_config, factor):
     with pytest.raises(ValueError, match="positive integer"):
         list(echo_draw([], tiny_config, echo_factor=factor, seed=0))
     with pytest.raises(ValueError, match="positive integer"):
-        PackedMicroBatches(tiny_config, 1, 200, echo_factor=factor)
+        PackedMicroBatches(
+            tiny_config, 1, 200, catalog_stream=TINY_CATALOG_STREAM, echo_factor=factor
+        )
     with pytest.raises(ValueError, match="positive integer"):
         build_astropt3_dataloader(SimpleNamespace(echo_factor=factor), object(), 1, 200, 0, 1)
 
@@ -291,7 +306,9 @@ def test_unsupported_topology_rejected_before_constructing_dataset(monkeypatch, 
 
 @pytest.mark.parametrize("factor", [None, 1, 3])
 def test_builder_wires_echo_factor_and_preserves_factor_one_topologies(tiny_config, factor):
-    args = SimpleNamespace() if factor is None else SimpleNamespace(echo_factor=factor)
+    args = SimpleNamespace(catalog_stream=TINY_CATALOG_STREAM)
+    if factor is not None:
+        args.echo_factor = factor
     loader = build_astropt3_dataloader(
         args, tiny_config, 1, 200, 0, 1 if factor == 3 else 2,
         world_size=1 if factor == 3 else 4,

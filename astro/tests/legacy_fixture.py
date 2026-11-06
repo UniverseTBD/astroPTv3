@@ -28,6 +28,28 @@ SPECTRUM_LENGTH = 7781
 LAMBDA_MIN = 3600.0
 LAMBDA_MAX = 9824.0
 
+# Explicit Legacy anchor + optional DESI payload for all five tiny modalities.
+TINY_CATALOG_STREAM = {
+    "catalogs": [
+        {
+            "name": "legacy",
+            "repo": "UniverseTBD/mmu_ssl_legacysurvey_north",
+            "decoder": "legacy_image",
+            "record_key": "image",
+            "scalar_columns": {key: key for key in ("ebv", "flux_g", "flux_r", "flux_z")},
+        },
+        {
+            "name": "desi",
+            "repo": "UniverseTBD/mmu_desi_edr_sv3",
+            "decoder": "desi_spectrum",
+            "record_key": "spectrum",
+            "scalar_columns": {"Z": "Z", "ZWARN": "ZWARN"},
+        },
+    ],
+    "how": "outer",
+    "min_surveys": 1,
+}
+
 
 def make_record(
     index: int,
@@ -184,96 +206,11 @@ def legacy_row(index: int) -> dict:
     }
 
 
-def crossmatch_row(index: int, matched: bool = True) -> dict:
-    """One DESI-left crossmatch row (``desi ⋈ legacy``, ADR 0015 spectra
-    test), column-shaped like the ``InfiniteStream`` pandas row
-    ``nanotron_loader.decode_crossmatch_row`` must decode: desi columns
-    unsuffixed, legacy columns suffixed ``_legacy`` (``suffixes=("",
-    "_legacy")``, DESI driving the ``how="left"`` join).
-    """
-    record = make_record(
-        index, image_only_fraction=0.0, spectrum_only_fraction=0.0 if matched else 1.0
-    )
-    row = {
-        "object_id": record["object_id"],
-        "ra": record["ra"],
-        "dec": record["dec"],
-        "spectrum": {
-            "flux": record["spectrum"]["flux"].tolist(),
-            "lambda": record["spectrum"]["lambda"].tolist(),
-            "ivar": record["spectrum"]["ivar"].tolist(),
-            "lsf_sigma": record["spectrum"]["lsf_sigma"].tolist(),
-            "mask": record["spectrum"]["mask"].tolist(),
-        },
-        "Z": record["Z"],
-        "ZWARN": record["ZWARN"],
-        "_dist_arcsec": None,
-        "object_id_legacy": None,
-        "ra_legacy": None,
-        "dec_legacy": None,
-        "image_legacy": None,
-    }
-    if not matched:
-        return row
-    row.update(
-        {
-            "_dist_arcsec": 0.3,
-            "object_id_legacy": f"legacy_{record['object_id']}",
-            "ra_legacy": record["ra"],
-            "dec_legacy": record["dec"],
-            "image_legacy": {
-                "band": list(record["image"]["band"]),
-                "flux": record["image"]["flux"].tolist(),
-                "psf_fwhm": record["image"]["psf_fwhm"],
-            },
-            "ebv_legacy": record["ebv"],
-            "flux_g_legacy": record["flux_g"],
-            "flux_r_legacy": record["flux_r"],
-            "flux_z_legacy": record["flux_z"],
-        }
-    )
-    return row
-
-
-def legacy_only_crossmatch_row(index: int) -> dict:
-    """One Legacy-only crossmatch row: no DESI match at all
-    (``outer_crossmatch.OuterKdTreeCrossmatch`` recovers these from bytes
-    the plain left-join crossmatch already fetches and discards). Every
-    DESI-side column is null, including ``object_id`` itself -- decode
-    falls back to ``object_id_legacy``.
-    """
-    record = make_record(index, image_only_fraction=1.0)
-    return {
-        "object_id": None,
-        "ra": None,
-        "dec": None,
-        "spectrum": None,
-        "Z": None,
-        "ZWARN": None,
-        "_dist_arcsec": None,
-        "object_id_legacy": f"legacy_{record['object_id']}",
-        "ra_legacy": record["ra"],
-        "dec_legacy": record["dec"],
-        "image_legacy": {
-            "band": list(record["image"]["band"]),
-            "flux": record["image"]["flux"].tolist(),
-            "psf_fwhm": record["image"]["psf_fwhm"],
-        },
-        "ebv_legacy": record["ebv"],
-        "flux_g_legacy": record["flux_g"],
-        "flux_r_legacy": record["flux_r"],
-        "flux_z_legacy": record["flux_z"],
-    }
-
-
 def nested_frame(rows: list[dict], nested_fields: tuple[str, ...]) -> "npd.NestedFrame":
-    """Pack ``legacy_row``/``crossmatch_row`` dicts into a real
-    ``nested_pandas.NestedFrame``, shaped like a HATS/``InfiniteStream``
-    partition (nested struct columns, not plain nested dicts in an object
-    column) -- so offline tests exercise ``NestedFrame.map_rows`` exactly as
-    the real streaming path does. A row missing a nested field entirely
-    (e.g. ``crossmatch_row(matched=False)`` has no ``image_legacy`` key)
-    packs as a missing element, matching the real join's unmatched rows.
+    """Pack raw catalog rows into a real ``nested_pandas.NestedFrame``.
+
+    Nested struct columns exercise ``map_rows`` exactly as a HATS partition
+    does. Missing nested fields become null elements, as in an unmatched join.
     """
     scalar_cols = sorted({key for row in rows for key in row} - set(nested_fields))
     base = pd.DataFrame([{key: row.get(key) for key in scalar_cols} for row in rows])

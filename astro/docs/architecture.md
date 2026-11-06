@@ -186,11 +186,11 @@ flat because nanotron's device mover only transfers top-level tensors).
   rank* (different objects → different patch counts), which is why
   `general.ignore_sanity_checks: true` is required — nanotron's DP
   input-difference check all-gathers tensors assuming equal shapes.
-- **Live survey source**: `data/nanotron_loader.py` uses LSDB inside torch
-  DataLoader workers, decodes catalog rows to the shared record contract, and
-  packs them before nanotron sees a batch. Crossmatch-enabled configs include
-  DESI spectra; other configs can consume LegacySurvey images alone. Seeds
-  separate consumers, but there is no cross-rank ownership or exact record
+- **Live survey source**: `data/catalog_stream.py` delegates matching and
+  iteration to LSDB PR #1584, then decodes configured survey payloads.
+  `data/nanotron_loader.py` packs those records inside torch DataLoader workers.
+  Generation uses the same stream; all callers require explicit catalog lists.
+  Seeds separate consumers, but there is no cross-rank ownership or exact record
   coverage guarantee. Stream details belong to the active run config and
   [training guide](training.md), not the model contract.
 

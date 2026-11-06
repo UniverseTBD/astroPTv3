@@ -1,114 +1,53 @@
-"""Sample from a converted AstroPT3 checkpoint and render the results.
+"""Sample a converted checkpoint using the same configured catalogs as training.
 
-Template records come from one live catalog draw: the plain uncrossmatched
-LSDB LegacySurvey North catalog
-(``hf://datasets/UniverseTBD/mmu_ssl_legacysurvey_north``) when the
-checkpoint has no active desi-sourced (spectra) modality, or the DESI x
-Legacy crossmatch (via ``OuterKdTreeCrossmatch``, matching the training
-stream -- see ``outer_crossmatch.py``) when it does. ``unconditional`` only
-samples spans the template record actually has, so a plain-Legacy template
-can only ever produce image spans -- getting a spectra span too requires a
-crossmatch-drawn template. Rows are ordered matched (both modalities) first,
-then spectrum-only, then image-only, so ``--rows 0`` picks the most
-complete template available. ``reconstruct`` works for any checkpoint;
-``unconditional`` works for jetformer checkpoints.
-``astropt3.eval.samples.sample_checkpoint`` (model-side only, ADR 0015 §6)
-does the sampling/rendering; this script only supplies live records and
-optional wandb logging.
+Template records come from one draw of the explicit recipe's catalog_stream.
+Rows with more active modalities come first; --rows selects positions in that
+ordering. Sampling only produces spans actually present in the template.
 
 Usage:
     uv run python scripts/generate.py --checkpoint <hf_dir> \
-        [--mode reconstruct] [--n 4] [--rows 0,1,2] [--stream-seed 0] \
-        [--seed 0] [--out generated] [--wandb] [--wandb-run-id <id>]
+        --config-file <training.yaml> [--mode reconstruct] [--n 4] \
+        [--rows 0,1,2] [--stream-seed 0] [--seed 0] [--out generated] \
+        [--wandb] [--wandb-run-id <id>]
 
-Outputs land in ``--out`` as PNGs (a grid for images, flux-vs-wavelength for
-spectra). ``--wandb`` logs the same figures to the astropt3 wandb project as
-a fresh generation run; ``--wandb-run-id <id>`` appends them to an existing
-run instead (e.g. the training run that produced the checkpoint).
+Outputs are PNGs. Optional W&B logging either creates a generation run or
+appends to --wandb-run-id; catalog configuration stays local.
 """
 
 import argparse
 import importlib
+from contextlib import closing
 from pathlib import Path
 from typing import Any, cast
 
+import yaml
 
-def _draw_live_records(config, rows: list[int], stream_seed: int) -> list[dict]:
-    """Decode ``rows`` positions out of one live catalog draw.
+from astropt3.data.catalog_stream import CatalogStream
 
-    Crossmatch-aware: draws from the DESI x Legacy crossmatch (recovering
-    unmatched images too, via ``OuterKdTreeCrossmatch``) when the checkpoint
-    has an active desi-sourced modality, else the plain uncrossmatched
-    Legacy catalog. See the module docstring for row ordering.
-    """
-    from lsdb.loaders.hats.read_hats import open_catalog
-    from lsdb.streams.catalog_streams import InfiniteStream
 
-    from astropt3.data.nanotron_loader import (
-        LEGACY_CATALOG,
-        _catalog_columns,
-        _desi_columns,
-        decode_legacy_row,
-    )
-
-    desi_columns = _desi_columns(config)
-    if desi_columns is None:
-        catalog = open_catalog(LEGACY_CATALOG, columns=_catalog_columns(config))
-        stream = InfiniteStream(catalog, client=None, partitions_per_chunk=1, seed=stream_seed)
-        frame = next(iter(stream))
-        if max(rows) >= len(frame):
-            raise ValueError(f"drew {len(frame)} rows, but --rows asked for index {max(rows)}")
-        return [decode_legacy_row(dict(frame.iloc[i].items())) for i in rows]
-
-    from lsdb.streams.catalog_streams import CrossMatchStream
-
-    from astropt3.data.nanotron_loader import (
-        _CROSSMATCH_COUNT_FRACTION_THRESHOLD,
-        _CROSSMATCH_NESTED,
-        _CROSSMATCH_RADIUS_ARCSEC,
-        DESI_CATALOG,
-        _map_rows_columns,
-        _row_from_map_rows,
-        decode_crossmatch_row,
-    )
-    from astropt3.data.outer_crossmatch import OuterKdTreeCrossmatch
-
-    legacy_cat = open_catalog(
-        LEGACY_CATALOG, columns=_catalog_columns(config, include_position=True)
-    ).rename_catalog("legacy")  # see nanotron_loader._open_records for why
-    desi_cat = open_catalog(DESI_CATALOG, columns=desi_columns)
-    stream = CrossMatchStream(
-        desi_cat,
-        {
-            "other": legacy_cat,
-            "algorithm": OuterKdTreeCrossmatch(radius_arcsec=_CROSSMATCH_RADIUS_ARCSEC),
-        },
-        client=None,
-        partitions_per_chunk=1,
-        seed=stream_seed,
-        count_fraction_threshold=_CROSSMATCH_COUNT_FRACTION_THRESHOLD,
-    )
-    frame = next(iter(stream))
-
-    columns = _map_rows_columns(frame, _CROSSMATCH_NESTED)
-
-    def decode(mapped):
-        return {"record": decode_crossmatch_row(_row_from_map_rows(mapped, _CROSSMATCH_NESTED))}
-
-    decoded = frame.map_rows(decode, columns=columns, infer_nesting=False)
-    records = list(decoded["record"])
-    matched = [r for r in records if "image" in r and "spectrum" in r]
-    spectrum_only = [r for r in records if "image" not in r and "spectrum" in r]
-    image_only = [r for r in records if "image" in r and "spectrum" not in r]
-    ordered = matched + spectrum_only + image_only
-    if max(rows) >= len(ordered):
-        raise ValueError(f"drew {len(ordered)} usable rows, but --rows asked for index {max(rows)}")
-    return [ordered[i] for i in rows]
+def _draw_live_records(config, catalog_stream: dict, rows: list[int], stream_seed: int) -> list[dict]:
+    """Select templates from one upstream draw, closing its client afterward."""
+    if not rows or any(index < 0 for index in rows):
+        raise ValueError("--rows must contain nonnegative indices")
+    stream = CatalogStream(catalog_stream, config)
+    with closing(stream.draws(seed=stream_seed, rank=0, worker_id=0)) as draws:
+        _, records = next(draws)
+        records = list(records)
+    modalities = config.modality_registry().modalities.values()
+    records.sort(key=lambda record: sum(
+        all(key in record for key in modality.record_keys)
+        and (modality.name != "Z" or record.get("ZWARN") == 0)
+        for modality in modalities
+    ), reverse=True)
+    if max(rows) >= len(records):
+        raise ValueError(f"drew {len(records)} usable rows, but --rows asked for index {max(rows)}")
+    return [records[index] for index in rows]
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True, help="HF checkpoint dir")
+    parser.add_argument("--config-file", required=True, type=Path, help="training YAML with explicit catalog_stream")
     parser.add_argument(
         "--mode",
         choices=["unconditional", "image-to-spectra", "spectra-to-images", "reconstruct"],
@@ -118,40 +57,34 @@ def main():
     parser.add_argument("--n", type=int, default=4, help="samples to draw per mode")
     parser.add_argument("--temperature", type=float, default=1.0, help="scales GMM sigma")
     parser.add_argument("--seed", type=int, default=0, help="sampling RNG seed")
-    parser.add_argument(
-        "--stream-seed", type=int, default=0, help="LSDB InfiniteStream draw seed"
-    )
-    parser.add_argument(
-        "--rows",
-        default="0",
-        help="comma-separated row positions in the drawn chunk to render",
-    )
+    parser.add_argument("--stream-seed", type=int, default=0, help="catalog draw seed")
+    parser.add_argument("--rows", default="0", help="comma-separated nonnegative template indices")
     parser.add_argument("--out", default="generated", help="output directory")
     parser.add_argument("--device", default=None)
-    parser.add_argument(
-        "--wandb",
-        action="store_true",
-        help="log the figures to wandb (project astropt3, job_type generation)",
-    )
-    parser.add_argument(
-        "--wandb-run-id",
-        default=None,
-        help="append to an existing wandb run (e.g. the training run) instead of a new one",
-    )
+    parser.add_argument("--wandb", action="store_true", help="log sample figures to W&B")
+    parser.add_argument("--wandb-run-id", default=None, help="append to an existing W&B run")
     args = parser.parse_args()
 
     from transformers import AutoConfig
 
-    import astropt3  # noqa: F401  -- registers the Auto classes
+    import astropt3  # noqa: F401 -- registers the Auto classes
     from astropt3.eval.samples import sample_checkpoint
 
     try:
-        rows = [int(i) for i in args.rows.split(",")]
-    except ValueError:
-        parser.error("--rows must be a comma-separated list of integers")
+        rows = [int(index) for index in args.rows.split(",")]
+        recipe = yaml.safe_load(args.config_file.read_text())
+        stages = recipe["data_stages"]
+        if len(stages) != 1:
+            raise ValueError("generation requires exactly one data stage")
+        dataset = stages[0]["data"]["dataset"]
+        if "crossmatch_desi" in dataset:
+            raise ValueError("crossmatch_desi is removed; use an explicit catalog_stream")
+        spec = dataset["catalog_stream"]
+    except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError) as error:
+        parser.error(f"Invalid rows or catalog configuration: {error}")
 
     config = AutoConfig.from_pretrained(args.checkpoint)
-    records = _draw_live_records(config, rows, args.stream_seed)
+    records = _draw_live_records(config, spec, rows, args.stream_seed)
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -166,7 +99,6 @@ def main():
         device=args.device,
     )
 
-    wandb_run = None
     if args.wandb:
         wandb_module = cast(Any, importlib.import_module("wandb"))
         wandb_run = wandb_module.init(
@@ -175,7 +107,7 @@ def main():
             resume="allow" if args.wandb_run_id else None,
             name=None if args.wandb_run_id else "generate",
             job_type="generation",
-            config={k: v for k, v in vars(args).items() if k not in ("wandb", "wandb_run_id")},
+            config={k: v for k, v in vars(args).items() if k not in ("wandb", "wandb_run_id", "config_file")},
         )
         wandb_run.log({f"generation/{key}": wandb_module.Image(png) for key, png in pngs.items()})
         wandb_run.finish()

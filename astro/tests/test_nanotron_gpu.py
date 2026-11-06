@@ -26,13 +26,14 @@ import os
 import re
 import subprocess
 import sys
-from itertools import islice
+from itertools import count, islice
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 import yaml
+from legacy_fixture import TINY_CATALOG_STREAM, make_record
 
 pytestmark = pytest.mark.gpu
 
@@ -196,8 +197,12 @@ def build_nt_model(nt, nt_config):
 def micro_batch(hf_config, device="cuda", skip=0):
     from astropt3.data.nanotron_loader import PackedMicroBatches
 
-    stream = iter(PackedMicroBatches(hf_config, MBS, SEQ_LEN))
-    flat = next(islice(stream, skip, None))
+    dataset = PackedMicroBatches(
+        hf_config, MBS, SEQ_LEN, catalog_stream=TINY_CATALOG_STREAM
+    )
+    # Parity needs deterministic tensors, not a live LSDB connection.
+    records = (make_record(i) for i in count())
+    flat = next(islice(dataset._pack_records(records), skip, None))
     return {k: v.to(device) for k, v in flat.items()}
 
 

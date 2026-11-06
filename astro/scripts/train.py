@@ -68,8 +68,8 @@ def prepare_config(
     validate_echo_factor(factor)
     if factor > 1 and config["tokens"]["batch_accumulation_per_replica"] != 1:
         raise ValueError("echo-factor > 1 requires batch_accumulation_per_replica=1")
-    if dataset.get("crossmatch_desi", False):
-        raise ValueError("use catalog_stream instead of crossmatch_desi with this runner")
+    if "crossmatch_desi" in dataset:
+        raise ValueError("crossmatch_desi is removed; use an explicit catalog_stream")
     model = config["model"]["model_config"]
     hf_config = loader.hf_config_from_modalities(model["modalities"], vocab_size=model.get("vocab_size", 64))
     dataset["catalog_stream"] = CatalogStream(dataset.get("catalog_stream"), hf_config).spec

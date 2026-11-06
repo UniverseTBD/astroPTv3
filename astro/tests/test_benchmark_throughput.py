@@ -179,13 +179,11 @@ def test_flop_capture_undoes_world_size_and_records_model_costs(monkeypatch):
     }
 
 
-@pytest.mark.parametrize("configured", [False, True])
-def test_capture_reports_actual_catalog_policy(monkeypatch, configured):
+def test_capture_reports_actual_catalog_policy(monkeypatch):
     spec = {"catalogs": [{"name": "sdss", "repo": "offline/sdss"}], "min_surveys": 1}
     dataset = SimpleNamespace(
-        catalog_stream=SimpleNamespace(spec=spec) if configured else None,
+        catalog_stream=SimpleNamespace(spec=spec),
         config=SimpleNamespace(modalities=[{"name": "custom_mode"}]),
-        columns=["object_id", "image"], desi_columns=None,
     )
     fake_torch = SimpleNamespace(
         __version__="test", version=SimpleNamespace(cuda=None),
@@ -203,9 +201,5 @@ def test_capture_reports_actual_catalog_policy(monkeypatch, configured):
     context = bench.capture_context(fake_torch, trainer, SimpleNamespace(dataset=dataset, num_workers=0))
     report = context["loader"]
     assert report["modalities"] == dataset.config.modalities
-    if configured:
-        assert report["catalog_stream"] == spec
-        assert "legacy_catalog" not in report
-    else:
-        assert report["legacy_columns"] == dataset.columns
-        assert "catalog_stream" not in report
+    assert report["catalog_stream"] == spec
+    assert not {"legacy_catalog", "legacy_columns", "desi_catalog", "desi_columns"} & report.keys()

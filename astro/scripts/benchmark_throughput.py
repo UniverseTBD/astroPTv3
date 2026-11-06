@@ -152,8 +152,6 @@ def capture_flop_estimate(trainer) -> dict:
 def capture_context(torch, trainer, loader) -> dict:
     import psutil
 
-    from astropt3.data import nanotron_loader as data
-
     device = torch.cuda.get_device_properties(torch.cuda.current_device())
     cpuinfo = Path("/proc/cpuinfo")
     cpu_model = next((line.split(":", 1)[1].strip() for line in cpuinfo.read_text().splitlines()
@@ -179,13 +177,6 @@ def capture_context(torch, trainer, loader) -> dict:
         "loader": {
             "catalog_stream": dataset.catalog_stream.spec,
             "modalities": dataset.config.modalities,
-        } if dataset.catalog_stream is not None else {
-            "legacy_catalog": data.LEGACY_CATALOG, "legacy_columns": dataset.columns,
-            "desi_catalog": data.DESI_CATALOG if dataset.desi_columns else None,
-            "desi_columns": dataset.desi_columns, "modalities": dataset.config.modalities,
-            "crossmatch_radius_arcsec": data._CROSSMATCH_RADIUS_ARCSEC,
-            "count_fraction_threshold": data._CROSSMATCH_COUNT_FRACTION_THRESHOLD,
-            "partitions_per_chunk": data._PARTITIONS_PER_CHUNK,
         },
         "init_method": trainer.config.model.init_method.__class__.__name__,
         "resumed_from": str(trainer.init_checkpoint_path) if trainer.init_checkpoint_path else None,
