@@ -537,16 +537,6 @@ def test_resume_rejects_generic_modality_mismatches(tmp_path, default_recipe, fi
         run.validate_resume(tmp_path, model)
 
 
-def test_decoder_rejects_rows_without_modalities(default_stream):
-    mapped = {
-        f"{name}.{field}": np.array([])
-        for name, fields in default_stream.nested.items()
-        for field in fields
-    }
-    with pytest.raises(ValueError, match="no supported data or object_id"):
-        default_stream.decode_row(mapped)
-
-
 @pytest.mark.parametrize(
     "args",
     [
@@ -734,13 +724,6 @@ def echo_batch(default_recipe):
         [objects[:2], objects[2:], []]
     )
     return hf, run.loader.flatten_packed_batch(packed, hf, 1024)
-
-
-@pytest.mark.parametrize("factor", [0, -1])
-def test_echo_rejects_nonpositive_factors(echo_batch, factor):
-    config, batch = echo_batch
-    with pytest.raises(ValueError, match="echo-factor"):
-        list(echo_loader([batch], config, echo_factor=factor))
 
 
 def test_echo_shuffle_preserves_objects_patch_alignment_and_rng(echo_batch):

@@ -88,8 +88,6 @@ class ObjectSeq:
     values: dict  # name -> [n_m, input_size]
     positions: dict  # name -> long [n_m] or float [n_m, pos_input_size]
     object_id: str = ""
-    # the span order this sequence was serialized in
-    order: tuple[str, ...] = ()
 
     def __len__(self) -> int:
         return len(self.input_ids)
@@ -302,7 +300,6 @@ class ObjectSequencer:
             values=values,
             positions=positions,
             object_id=str(record.get("object_id", "")),
-            order=tuple(order),
         )
 
 

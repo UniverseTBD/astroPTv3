@@ -329,7 +329,7 @@ def test_empty_and_no_active_records(recipe, offline):
     inactive = {"object_id": "inactive", "image": row["image"]}
     assert _decode(stream, inactive) is None
     assert _decode(stream, {"object_id": "empty"}) is None
-    with pytest.raises(ValueError, match="object_id"):
+    with pytest.raises(ValueError, match="no supported data or object_id"):
         _decode(stream, {})
     frames = [pd.DataFrame(), nested_frame([inactive, row], tuple(stream.nested))]
     offline.frames = lambda: frames

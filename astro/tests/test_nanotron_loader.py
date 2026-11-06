@@ -379,7 +379,7 @@ def test_packing_keeps_each_record_once_and_preserves_base_shuffle(tiny_config, 
         expected = nanotron_loader.flatten_packed_batch(expected, tiny_config, stream.seq_len)
         for key in batch:
             assert torch.equal(batch[key], expected[key])
-    assert len({obj.order for obj in objects}) > 1
+    assert len({tuple(obj.input_ids.tolist()) for obj in objects}) > 1
 
 
 def test_unequal_objects_keep_emptiest_first_placement_across_flushes(tiny_config, monkeypatch):

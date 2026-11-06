@@ -38,9 +38,7 @@ def validate_resume(resume_from: Path, model_config: dict) -> int:
     saved = json.loads((resume_from / step / "model_config.json").read_text())
     expected_registry = loader.hf_config_from_modalities(model_config["modalities"]).modality_registry()
     saved_registry = loader.hf_config_from_modalities(saved["modalities"]).modality_registry()
-    expected = {name: expected_registry.get_config(name) for name in expected_registry.names()}
-    actual = {name: saved_registry.get_config(name) for name in saved_registry.names()}
-    if expected != actual:
+    if expected_registry.modalities != saved_registry.modalities:
         raise ValueError("Checkpoint modalities differ from the selected YAML; use the matching recipe")
     for key, value in model_config.items():
         if key not in {"modalities", "is_astropt3_config"} and key in saved and saved[key] != value:
