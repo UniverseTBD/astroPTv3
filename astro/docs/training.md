@@ -109,8 +109,8 @@ recipe and size-ladder rationale live in
 Single GPU (from the repo root; choose an available device):
 
 ```bash
-bash astro/scripts/run_train.bash GPU_INDEX       # default recipe, echo 4
-bash astro/scripts/run_train.bash GPU_INDEX 1     # disable echoing
+bash astro/scripts/run_train.bash GPU_INDEX       # default recipe, no echo
+bash astro/scripts/run_train.bash GPU_INDEX 4     # echo each draw 4 times
 bash astro/scripts/run_train.bash GPU_INDEX 2 --config-file my-recipe.yaml
 ```
 
@@ -284,7 +284,7 @@ for the machine.
 ### Echoing, accounting, and resume
 
 `data_stages[].data.dataset.echo_factor` counts **total uses**, including the
-original: a positive integer, **4** in the recipe, **1** when omitted. Precedence:
+original: a positive integer, **1** when omitted (as in the ladder recipes). Precedence:
 CLI > checkpoint factor on resume > recipe/default. It is saved in checkpoint YAML.
 
 - **Factor 1:** normal streaming packing, including across draw boundaries.
