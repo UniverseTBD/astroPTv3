@@ -552,3 +552,18 @@ def test_galaxies_with_hats_png_scalars_and_sentinels(recipe):
     torch.testing.assert_close(values["gwh_redshift"], torch.log1p(torch.tensor([[0.1]])))
     assert "gwh_mass_med_photoz" not in values
     assert set(values) == {m["name"] for m in modalities} - {"gwh_mass_med_photoz"}
+
+
+def test_left_joined_galaxy_without_match_is_skipped(recipe):
+    spec = deepcopy(recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"])
+    config = AstroPT3Config(modalities=recipe["model"]["model_config"]["modalities"])
+    stream = streaming.CatalogStream(spec, config)
+    row = _row(spec)
+    row["dr8_id_galaxies"] = pd.NA
+    row["image_galaxies"] = pd.NA  # no galaxy within the match radius
+    for column in spec["catalogs"][-1]["scalar_columns"].values():
+        row[f"{column}_galaxies"] = pd.NA
+    record = _decode(stream, row)
+    assert record["object_id"] == "legacy-1"
+    assert "galaxy_image" not in record and not any(key.startswith("gwh_") for key in record)
+    assert "galaxies" not in ObjectSequencer(config).build(record).values

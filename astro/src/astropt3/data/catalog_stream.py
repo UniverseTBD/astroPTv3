@@ -139,6 +139,8 @@ class CatalogStream:
             payload, _, _ = _PROFILES[decoder]
             suffix = "" if index == 0 else f"_{name}"
             value = row.get(f"{payload}{suffix}") if payload else None
+            if value is not None and not isinstance(value, dict) and pd.isna(value):
+                value = None  # a left-joined struct column with no match arrives as NA
             scalars = {
                 key: loader._finite_scalar(row.get(f"{column}{suffix}"))
                 for key, column in catalog["scalar_columns"].items()
