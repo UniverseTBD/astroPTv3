@@ -62,9 +62,8 @@ Full nanotron run configs live in `astro/configs/nanotron/`: the Pythia ladder
 recipes `astropt3-{1m,10m}.yaml`. Every ladder rung trains the same four
 modalities from the same catalog streams; rungs differ in model size, cluster
 topology, batch and LR. The convenience launcher's default is
-**`astropt3-70m.yaml`**, run at DP=1 (TP=1 rungs only). Ladder rungs without
-gradient accumulation (70M–1.4B) echo each draw 4 times; 2.8B–12B use
-accumulation, which echoing does not support, so they stream without echo.
+**`astropt3-70m.yaml`**, run at DP=1 (TP=1 rungs only). Every ladder rung echoes
+each draw 4 times.
 Model, catalog list, join policy, worker count and schedule are explicit YAML,
 not injected by the script (see §9).
 
@@ -285,14 +284,16 @@ for the machine.
 ### Echoing, accounting, and resume
 
 `data_stages[].data.dataset.echo_factor` counts **total uses**, including the
-original: a positive integer, **4** in the ladder recipes up to 1.4B, **1** when omitted. Precedence:
+original: a positive integer, **4** in the ladder recipes, **1** when omitted. Precedence:
 CLI > checkpoint factor on resume > recipe/default. It is saved in checkpoint YAML.
 
 - **Factor 1:** normal streaming packing, including across draw boundaries.
 - **Factor N > 1:** each worker packs and caches one finite LSDB/HEALPix draw,
   including its padded tail, then shuffles exactly N references to each batch.
   Every exposure is a separate optimizer update, including single-modality
-  batches. Requires `batch_accumulation_per_replica=1`. Under DP each rank echoes
+  batches. With gradient accumulation (2.8B–12B), exposures of one batch can share
+  an optimizer update, and the logged per-step `echo_index` is the step's last
+  micro-batch's; fresh/replayed totals stay exact. Under DP each rank echoes
   its own draws with a rank-seeded shuffle; telemetry records echo counters per
   rank (`steps.rankN.jsonl`).
 - Later exposures reshuffle whole modality spans with private RNG; orders can

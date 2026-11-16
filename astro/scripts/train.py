@@ -67,8 +67,6 @@ def prepare_config(
     dataset = config["data_stages"][0]["data"]["dataset"]
     factor = dataset.get("echo_factor", 1) if echo_factor is None else echo_factor
     validate_echo_factor(factor)
-    if factor > 1 and config["tokens"]["batch_accumulation_per_replica"] != 1:
-        raise ValueError("echo-factor > 1 requires batch_accumulation_per_replica=1")
     if "crossmatch_desi" in dataset:
         raise ValueError("crossmatch_desi is removed; use an explicit catalog_stream")
     model = config["model"]["model_config"]

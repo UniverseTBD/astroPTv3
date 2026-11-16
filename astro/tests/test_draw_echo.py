@@ -292,14 +292,6 @@ def test_invalid_factors_fail_before_data_open(tiny_config, factor):
         build_astropt3_dataloader(SimpleNamespace(echo_factor=factor), object(), 1, 200, 0)
 
 
-def test_accumulation_rejected_before_constructing_dataset(monkeypatch):
-    monkeypatch.setattr(nanotron_loader, "PackedMicroBatches", _no_io)
-    with pytest.raises(ValueError, match="echo-factor.*requires"):
-        build_astropt3_dataloader(
-            SimpleNamespace(echo_factor=3), object(), 1, 200, 0, batch_accumulation_per_replica=2,
-        )
-
-
 def test_dp_ranks_echo_their_draws_independently(tiny_config, records, monkeypatch):
     monkeypatch.setattr(torch.utils.data, "get_worker_info", lambda: None)
     exposures = {}
@@ -318,13 +310,10 @@ def test_dp_ranks_echo_their_draws_independently(tiny_config, records, monkeypat
 
 
 @pytest.mark.parametrize("factor", [None, 1, 3])
-def test_builder_wires_echo_factor_and_preserves_factor_one_topologies(tiny_config, factor):
+def test_builder_wires_echo_factor(tiny_config, factor):
     args = SimpleNamespace(catalog_stream=TINY_CATALOG_STREAM)
     if factor is not None:
         args.echo_factor = factor
-    loader = build_astropt3_dataloader(
-        args, tiny_config, 1, 200, 0,
-        batch_accumulation_per_replica=1 if factor == 3 else 2,
-    )
+    loader = build_astropt3_dataloader(args, tiny_config, 1, 200, 0)
     assert loader.dataset.echo_factor == (factor or 1)
     assert isinstance(loader, telemetry.TelemetryLoader) == (factor == 3)

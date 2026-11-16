@@ -312,15 +312,12 @@ def build_astropt3_dataloader(
     num_workers: int = 0,
     seed: int = 0,
     multiprocessing_context: str | None = None,
-    batch_accumulation_per_replica: int = 1,
 ) -> Any:
     """Build worker-side draw echoing, then main-process telemetry/device inputs."""
     echo_factor = getattr(dataset_args, "echo_factor", 1)
     validate_echo_factor(echo_factor)
-    # Each DP rank echoes its own draws (rank-seeded shuffle), so DP needs no coordination;
-    # accumulation would put two exposures of one batch into a single update.
-    if echo_factor > 1 and batch_accumulation_per_replica != 1:
-        raise ValueError("echo-factor > 1 requires batch_accumulation_per_replica=1")
+    # Each DP rank echoes its own draws (rank-seeded shuffle), so DP needs no coordination.
+    # With accumulation, two exposures of one batch can share an optimizer update.
     config = hf_config_from_modalities(
         model_config.modalities,
         # Fields absent from a partial model_config keep the HF config defaults.

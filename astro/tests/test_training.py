@@ -52,7 +52,6 @@ def test_all_recipes_use_configured_catalog_loader(recipe):
         batches = run.loader.build_astropt3_dataloader(
             SimpleNamespace(**data["dataset"]), SimpleNamespace(**config["model"]["model_config"]),
             tokens["micro_batch_size"], tokens["sequence_length"], 0,
-            batch_accumulation_per_replica=tokens["batch_accumulation_per_replica"],
         )
         assert isinstance(batches.dataset.catalog_stream, catalog_stream.CatalogStream)
         assert batches.dataset.echo_factor == data["dataset"].get("echo_factor", 1)
@@ -1104,7 +1103,7 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize("factor", [None, "3"])
-def test_python_cli_forwards_echo_and_checks_accumulation_before_outputs(monkeypatch, tmp_path, capsys, factor):
+def test_python_cli_forwards_echo_and_validates_before_outputs(monkeypatch, tmp_path, capsys, factor):
     monkeypatch.setenv("WORLD_SIZE", "1")
     monkeypatch.delenv("NANOTRON_BENCHMARK", raising=False)
     output = tmp_path / "output"
@@ -1115,15 +1114,14 @@ def test_python_cli_forwards_echo_and_checks_accumulation_before_outputs(monkeyp
 
     def prepare(baseline, output, resume, echo_factor):
         assert echo_factor == expected
-        baseline["data_stages"][0]["data"]["dataset"]["echo_factor"] = 4  # a configured echo recipe
-        baseline["tokens"]["batch_accumulation_per_replica"] = 2
+        baseline["parallelism"]["tp"] = 2  # any invalid recipe must fail before outputs exist
         return original(baseline, output, resume, echo_factor)
 
     monkeypatch.setattr(run, "prepare_config", prepare)
     with pytest.raises(SystemExit) as error:
         run.main()
     assert error.value.code == 2
-    assert "requires batch_accumulation_per_replica=1" in capsys.readouterr().err
+    assert "requires TP=PP=CP=EP=1" in capsys.readouterr().err
     assert not output.exists()
 
 
