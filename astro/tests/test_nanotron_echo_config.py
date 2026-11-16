@@ -56,7 +56,7 @@ def test_default_recipe_round_trips_catalog_stream(tmp_path):
     config.save_as_yaml(path)
     restored = nanotron_config.get_config_from_file(path)
     dataset = restored.data_stages[0].data.dataset
-    assert dataset.echo_factor == 1
+    assert dataset.echo_factor == 4
     assert dataset.catalog_stream == raw["data_stages"][0]["data"]["dataset"]["catalog_stream"]
     assert len(restored.model.model_config.modalities) == 4
 

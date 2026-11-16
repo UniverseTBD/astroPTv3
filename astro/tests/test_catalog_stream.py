@@ -234,8 +234,8 @@ def test_packed_modalities_and_alignment(recipe, offline, count):
 
 
 def test_recipe_and_shared_builder(recipe, offline):
-    assert "echo_factor" not in recipe["data_stages"][0]["data"]["dataset"]  # ladder recipes do not echo
-    dataset_args = {**recipe["data_stages"][0]["data"]["dataset"], "echo_factor": 4}
+    dataset_args = recipe["data_stages"][0]["data"]["dataset"]
+    assert dataset_args["echo_factor"] == 4
     assert len(recipe["model"]["model_config"]["modalities"]) == 4
     batches = loader.build_astropt3_dataloader(
         SimpleNamespace(**dataset_args), SimpleNamespace(**recipe["model"]["model_config"]),

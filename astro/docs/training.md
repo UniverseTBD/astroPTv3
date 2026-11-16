@@ -62,9 +62,9 @@ Full nanotron run configs live in `astro/configs/nanotron/`: the Pythia ladder
 recipes `astropt3-{1m,10m}.yaml`. Every ladder rung trains the same four
 modalities from the same catalog streams; rungs differ in model size, cluster
 topology, batch and LR. The convenience launcher's default is
-**`astropt3-70m.yaml`**, run at DP=1 (TP=1 rungs only); pass an echo factor to
-`run_train.bash` to echo, or set `echo_factor` in the YAML (the ladder YAMLs
-use 1).
+**`astropt3-70m.yaml`**, run at DP=1 (TP=1 rungs only). Ladder rungs without
+gradient accumulation (70M–1.4B) echo each draw 4 times; 2.8B–12B use
+accumulation, which echoing does not support, so they stream without echo.
 Model, catalog list, join policy, worker count and schedule are explicit YAML,
 not injected by the script (see §9).
 
@@ -110,8 +110,8 @@ recipe and size-ladder rationale live in
 Single GPU (from the repo root; choose an available device):
 
 ```bash
-bash astro/scripts/run_train.bash GPU_INDEX       # default recipe, no echo
-bash astro/scripts/run_train.bash GPU_INDEX 4     # echo each draw 4 times
+bash astro/scripts/run_train.bash GPU_INDEX       # default recipe, echo 4
+bash astro/scripts/run_train.bash GPU_INDEX 1     # disable echoing
 bash astro/scripts/run_train.bash GPU_INDEX 2 --config-file my-recipe.yaml
 ```
 
@@ -285,7 +285,7 @@ for the machine.
 ### Echoing, accounting, and resume
 
 `data_stages[].data.dataset.echo_factor` counts **total uses**, including the
-original: a positive integer, **1** when omitted (as in the ladder recipes). Precedence:
+original: a positive integer, **4** in the ladder recipes up to 1.4B, **1** when omitted. Precedence:
 CLI > checkpoint factor on resume > recipe/default. It is saved in checkpoint YAML.
 
 - **Factor 1:** normal streaming packing, including across draw boundaries.

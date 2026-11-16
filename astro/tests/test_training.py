@@ -105,7 +105,7 @@ def test_training_config_keeps_batch_shape_and_checkpoint_schedule(tmp_path, def
     ids = [token for modality in hf.modalities for token in modality["token_ids"]]
     assert len(ids) == len(set(ids))
     dataset = config["data_stages"][0]["data"]["dataset"]
-    assert dataset["echo_factor"] == 1
+    assert dataset["echo_factor"] == 4
     assert config["data_stages"][0]["data"]["num_loading_workers"] == 8
     assert dataset["catalog_stream"]["min_catalogs"] == 3
     catalogs = {cat["name"]: cat["repo"] for cat in dataset["catalog_stream"]["catalogs"]}
@@ -170,7 +170,7 @@ def test_wandb_config_keeps_training_settings_without_local_provenance(tmp_path,
     payload = run.wandb_config(config, 1)
     assert config == before
     assert set(payload) == {"training", "stream", "max_steps", "echo_factor", "echo_order", "throughput_policy"}
-    assert payload["echo_factor"] == 1
+    assert payload["echo_factor"] == 4
     configured = run.prepare_config(baseline, tmp_path / "configured", echo_factor=3)
     assert run.wandb_config(configured, 1)["echo_factor"] == 3
     assert configured["data_stages"][0]["data"]["dataset"]["echo_factor"] == 3

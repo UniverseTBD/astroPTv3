@@ -120,6 +120,7 @@ data_stages:
     data:
       dataset:
         is_astropt3_streaming: true
+        echo_factor: 4
         catalog_stream:
           # First catalog anchors the join; right-only rows remain separate.
           catalogs:
