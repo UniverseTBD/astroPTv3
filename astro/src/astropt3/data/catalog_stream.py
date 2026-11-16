@@ -15,7 +15,7 @@ import pandas as pd
 from dask.distributed import Client, LocalCluster
 from PIL import Image
 from lsdb.loaders.hats.read_hats import open_catalog
-from lsdb.streams.catalog_streams import CrossMatchStream, InfiniteStream
+from lsdb.streams.catalog_streams import CrossMatchStream, InfiniteStream, _restrict_to_footprint
 
 from . import nanotron_loader as loader
 from . import telemetry
@@ -229,6 +229,13 @@ class CatalogStream:
                     if len(catalogs) == 1:
                         stream = InfiniteStream(catalogs[0], **kwargs)
                     else:
+                        minimum = self.spec["min_catalogs"]
+                        outer = [catalog for catalog, spec in zip(catalogs[1:], self.catalogs[1:], strict=True)
+                                 if spec.get("how", self.spec["how"]) == "outer"]
+                        if minimum > 1 and len(outer) < len(catalogs) - 1:
+                            # Left-joined catalogs only decorate anchor rows: select sky from the
+                            # anchor and outer catalogs alone, so they cannot widen min_catalogs.
+                            _, kwargs["footprint"] = _restrict_to_footprint(catalogs[0], None, outer, minimum)
                         stream = CrossMatchStream(
                             catalogs[0], *[
                                 {"other": catalog, "how": spec.get("how", self.spec["how"]),

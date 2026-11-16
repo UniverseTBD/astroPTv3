@@ -427,6 +427,7 @@ def test_stream_retains_matched_and_unpaired_records(monkeypatch, default_recipe
 
     monkeypatch.setattr(catalog_stream, "open_catalog", open_catalog)
     monkeypatch.setattr(catalog_stream, "CrossMatchStream", FakeStream)
+    monkeypatch.setattr(catalog_stream, "_restrict_to_footprint", lambda anchor, *args: (anchor, "survey-footprint"))
     monkeypatch.setattr(catalog_stream, "LocalCluster", lambda **kwargs: nullcontext())
     monkeypatch.setattr(catalog_stream, "Client", lambda cluster: nullcontext())
     hf_config = run.loader.hf_config_from_modalities(

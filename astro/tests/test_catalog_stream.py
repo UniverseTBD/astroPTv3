@@ -167,6 +167,8 @@ def offline(monkeypatch):
     monkeypatch.setattr(streaming, "open_catalog", open_catalog)
     monkeypatch.setattr(streaming, "InfiniteStream", SingleStream)
     monkeypatch.setattr(streaming, "CrossMatchStream", FakeStream)
+    monkeypatch.setattr(streaming, "_restrict_to_footprint",
+                        lambda anchor, footprint, rights, minimum: (anchor, ("footprint", anchor, tuple(rights), minimum)))
     monkeypatch.setattr(streaming.time, "sleep", state.sleeps.append)
     monkeypatch.setattr(streaming.telemetry, "_REPO_TO_SOURCE", {})
     monkeypatch.delenv("ASTROPT3_TELEMETRY_DIR", raising=False)
@@ -427,8 +429,12 @@ def test_per_catalog_join_overrides_stream_join(recipe, offline):
     offline.frames = lambda: [frame]
     with closing(stream.draws(seed=0, rank=0, worker_id=0)) as draws:
         next(draws)
-    joins = {right["suffixes"][1]: right["how"] for right in offline.streams[0].rights}
+    opened = offline.streams[0]
+    joins = {right["suffixes"][1]: right["how"] for right in opened.rights}
     assert joins == {"_sdss": "outer", "_desi": "outer", "_hsc": "outer", "_galaxies": "left"}
+    # sky is selected from the anchor and outer surveys only; galaxies cannot widen it
+    surveys = tuple(f"hf://datasets/{c['repo']}" for c in spec["catalogs"][1:4])
+    assert opened.kwargs["footprint"] == ("footprint", f"hf://datasets/{spec['catalogs'][0]['repo']}", surveys, 3)
     spec["catalogs"][-1]["how"] = "inner"
     with pytest.raises(ValueError, match="left or outer"):
         streaming.CatalogStream(spec, config)
