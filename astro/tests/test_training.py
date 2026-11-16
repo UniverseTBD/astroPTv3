@@ -399,7 +399,7 @@ def test_stream_retains_matched_and_unpaired_records(monkeypatch, default_recipe
             assert [right["other"] for right in rights] == [
                 f"hf://datasets/{catalogs[name]}" for name in names
             ]
-            assert [right["how"] for right in rights] == ["outer"] * len(names)
+            assert [right["how"] for right in rights] == ["outer", "outer", "outer", "left"]
             assert [right["suffixes"] for right in rights] == [
                 ("", f"_{name}") for name in names
             ]

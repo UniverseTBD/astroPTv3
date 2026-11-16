@@ -241,6 +241,7 @@ data_stages:
                 Smith42/galaxies-with-hats@c0188b776c4ce6312a805a04cbc25c891a075933/train
               decoder: rgb_png
               record_key: galaxy_image
+              how: left # no HATS margin cache, which outer joins require
               scalar_columns:
                 gwh_redshift: redshift
                 gwh_mass_med_photoz: mass_med_photoz

@@ -419,6 +419,21 @@ def test_redshift_requires_quality_from_same_catalog(separate_flag):
         streaming.CatalogStream({"catalogs": catalogs}, AstroPT3Config(modalities=[DEFAULT_MODALITIES[2]]))
 
 
+def test_per_catalog_join_overrides_stream_join(recipe, offline):
+    spec = deepcopy(recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"])
+    config = AstroPT3Config(modalities=recipe["model"]["model_config"]["modalities"])
+    stream = streaming.CatalogStream(spec, config)
+    frame = nested_frame([_row(stream.spec)], tuple(stream.nested))
+    offline.frames = lambda: [frame]
+    with closing(stream.draws(seed=0, rank=0, worker_id=0)) as draws:
+        next(draws)
+    joins = {right["suffixes"][1]: right["how"] for right in offline.streams[0].rights}
+    assert joins == {"_sdss": "outer", "_desi": "outer", "_hsc": "outer", "_galaxies": "left"}
+    spec["catalogs"][-1]["how"] = "inner"
+    with pytest.raises(ValueError, match="left or outer"):
+        streaming.CatalogStream(spec, config)
+
+
 @pytest.mark.parametrize("key,value", [
     ("min_catalogs", 0), ("min_catalogs", 5), ("min_catalogs", True),
     ("how", "inner"), ("radius_arcsec", 0), ("radius_arcsec", np.nan),

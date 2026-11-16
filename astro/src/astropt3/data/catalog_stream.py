@@ -61,7 +61,7 @@ class CatalogStream:
         names = set()
         for index, catalog in enumerate(self.catalogs):
             if not isinstance(catalog, dict) or set(catalog) - {
-                "name", "repo", "decoder", "record_key", "scalar_columns",
+                "name", "repo", "decoder", "record_key", "scalar_columns", "how",
             }:
                 raise ValueError("catalog entry has unknown fields or is not a mapping")
             name = catalog.get("name")
@@ -118,7 +118,9 @@ class CatalogStream:
         minimum = self.spec["min_catalogs"]
         if type(minimum) is not int or not 1 <= minimum <= len(self.catalogs):
             raise ValueError("min_catalogs must be an integer in 1..number of catalogs")
-        if self.spec["how"] not in ("left", "outer"):
+        # A catalog's own `how` overrides the stream's: outer joins need a HATS margin
+        # cache on both sides, so a margin-less catalog can still join left.
+        if any(c.get("how", self.spec["how"]) not in ("left", "outer") for c in self.catalogs):
             raise ValueError("catalog_stream.how must be left or outer")
         radius = self.spec["radius_arcsec"]
         if type(radius) not in (int, float) or not math.isfinite(radius) or radius <= 0:
@@ -227,7 +229,7 @@ class CatalogStream:
                     else:
                         stream = CrossMatchStream(
                             catalogs[0], *[
-                                {"other": catalog, "how": self.spec["how"],
+                                {"other": catalog, "how": spec.get("how", self.spec["how"]),
                                  "suffixes": ("", f"_{spec['name']}"),
                                  "radius_arcsec": self.spec["radius_arcsec"]}
                                 for catalog, spec in zip(catalogs[1:], self.catalogs[1:], strict=True)
