@@ -98,26 +98,6 @@ def test_family_loss_matches_adr_0013(tiny_model, sequencer, collator, full_reco
     assert torch.allclose(out.loss, expected, atol=1e-6)
 
 
-def test_legacy_loss_mode_stays_checkpoint_compatible(
-    tiny_model, tiny_config, sequencer, collator, full_record
-):
-    from astropt3 import AstroPT3Config, AstroPT3Model
-
-    config = AstroPT3Config(
-        **{**tiny_config.to_dict(), "loss_aggregation": "legacy_modality_mean"}
-    )
-    model = AstroPT3Model(config).eval()
-    model.load_state_dict(tiny_model.state_dict())
-    batch = collator([sequencer.build(full_record)])
-    with torch.no_grad():
-        out = model(**batch)
-    weights = {"images": 1.0, "spectra": 1.0, "Z": 0.1, "ebv": 0.1, "photometry": 0.1}
-    expected = torch.stack(
-        [weights[name] * loss for name, loss in out.modality_losses.items()]
-    ).sum() / len(out.modality_losses)
-    assert torch.allclose(out.loss, expected, atol=1e-6)
-
-
 def test_loss_matches_manual_computation(tiny_model, sequencer, collator, full_record):
     """outputs.loss must equal NLL_GMM(z) - logdet recomputed from the
     model's own flow + GMM head, for each patch modality.

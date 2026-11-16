@@ -87,9 +87,6 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
             name: cast(str, registry.get_config(name).family)
             for name in self.modality_names
         }
-        self.modality_loss_weights = {
-            name: registry.get_config(name).loss_weight for name in self.modality_names
-        }
         # ADR 0008: scalar modalities are GMM-headed directly and never
         # flow — one-token spans over raw normalized values
         self.scalar_names = {
@@ -310,14 +307,7 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
                 family_losses[family] = family_loss
                 weighted = weighted + family_weights[family] * family_loss
                 weight_sum += family_weights[family]
-            if self.config.loss_aggregation == "family":
-                loss = weighted / weight_sum if weight_sum else weighted
-            else:
-                legacy = [
-                    self.modality_loss_weights[name] * mod_loss
-                    for name, mod_loss in modality_losses.items()
-                ]
-                loss = torch.stack(legacy).sum() / len(legacy) if legacy else weighted
+            loss = weighted / weight_sum if weight_sum else weighted
 
             if self.config.special_token_ce_weight > 0:
                 logits = self.special_head(hidden[:, :-1])

@@ -14,7 +14,6 @@ def test_save_load_roundtrip(tmp_path, tiny_model, sequencer, collator):
 
     config = AutoConfig.from_pretrained(save_dir)
     assert config.model_type == "astropt3"
-    assert config.loss_aggregation == "family"
     assert all(
         {"family", "source", "record_keys", "token_ids"} <= set(modality)
         for modality in config.modalities

@@ -20,7 +20,6 @@ model:
   make_vocab_size_divisible_by: 1
   model_config:
     is_astropt3_config: true
-    loss_aggregation: family
     # JetFormer flow; width = min(hidden_size // 4, 512) (docs/jetformer-flow.md)
     jetformer_flow_steps: 8
     jetformer_flow_hidden: 256
@@ -37,7 +36,6 @@ model:
         pos_type: index
         pos_input_size: 1
         max_positions: 361
-        loss_weight: 1.0
       - name: spectra
         family: spectrum
         source: desi
@@ -48,7 +46,6 @@ model:
         pos_type: continuous
         pos_input_size: 1
         max_positions: 1024
-        loss_weight: 1.0
       - name: sdss_spectra
         family: spectrum
         source: sdss
@@ -59,7 +56,6 @@ model:
         pos_type: continuous
         pos_input_size: 1
         max_positions: 1024
-        loss_weight: 1.0
       - name: hsc_images
         family: image
         source: hsc
@@ -70,7 +66,6 @@ model:
         pos_type: index
         pos_input_size: 1
         max_positions: 144
-        loss_weight: 1.0
     spiral: true
     hidden_size: 1024
     num_hidden_layers: 27

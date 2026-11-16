@@ -480,7 +480,6 @@ def test_hsc_head_forward_backward(default_recipe, tiny_config, hsc_only):
         **{
             **tiny_config.to_dict(),
             "modalities": default_recipe["model"]["model_config"]["modalities"],
-            "loss_aggregation": "family",
         }
     )
     record = {"object_id": "hsc-only", "hsc_image": hsc_image()}

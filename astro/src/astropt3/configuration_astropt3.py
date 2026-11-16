@@ -16,9 +16,8 @@ from .tokenization import assign_modality_token_ids, required_vocab_size
 #   mean wavelength, normalized, projected by an affine PositionEmbedder
 # - Z / ebv / photometry: ADR 0008 scalar modalities — one-token spans over
 #   the catalog scalars the records already carry, GMM-headed like every
-#   other modality. ``loss_weight=0.1`` remains for historical configs; ADR
-#   0013 family configs collectively cap all present scalar modalities at
-#   weight 0.1.
+#   other modality. The ADR 0013 family loss collectively caps all present
+#   scalar modalities at weight 0.1.
 DEFAULT_MODALITIES = [
     {
         "name": "images",
@@ -30,7 +29,6 @@ DEFAULT_MODALITIES = [
         "source": "legacy",
         "record_keys": ["image"],
         "token_ids": [2, 3, 4],
-        "loss_weight": 1.0,
     },
     {
         "name": "spectra",
@@ -42,7 +40,6 @@ DEFAULT_MODALITIES = [
         "source": "desi",
         "record_keys": ["spectrum"],
         "token_ids": [5, 6, 7],
-        "loss_weight": 1.0,
     },
     {
         "name": "Z",
@@ -54,7 +51,6 @@ DEFAULT_MODALITIES = [
         "source": "desi",
         "record_keys": ["Z"],
         "token_ids": [8, 9, 10],
-        "loss_weight": 0.1,
     },
     {
         "name": "ebv",
@@ -66,7 +62,6 @@ DEFAULT_MODALITIES = [
         "source": "legacy",
         "record_keys": ["ebv"],
         "token_ids": [11, 12, 13],
-        "loss_weight": 0.1,
     },
     {
         # one joint 3-dim span (g, r, z), not three modalities: colour is
@@ -80,7 +75,6 @@ DEFAULT_MODALITIES = [
         "source": "legacy",
         "record_keys": ["flux_g", "flux_r", "flux_z"],
         "token_ids": [14, 15, 16],
-        "loss_weight": 0.1,
     },
 ]
 
@@ -121,7 +115,6 @@ class AstroPT3Config(SmolLM3Config):
         jetformer_noise_max: float = 0.1,
         jetformer_noise_min: float = 0.0,
         scalar_gmm_k: int = 5,
-        loss_aggregation: str = "legacy_modality_mean",
         special_token_ce_weight: float = 0.0,
         image_norm_divisor: float = _DIV_FACTOR,
         spectra_norm_divisor: float = _SPECTRA_DIV_FACTOR,
@@ -168,9 +161,6 @@ class AstroPT3Config(SmolLM3Config):
         # mixture count of the ADR 0008 scalar GMM heads (photometric-redshift
         # posteriors are multimodal; K=5 is the ADR's unswept starting point)
         self.scalar_gmm_k = scalar_gmm_k
-        if loss_aggregation not in {"legacy_modality_mean", "family"}:
-            raise ValueError(f"unknown loss_aggregation {loss_aggregation!r}")
-        self.loss_aggregation = loss_aggregation
         self.special_token_ce_weight = special_token_ce_weight
         # arcsinh divisor of the physical image normalization; consumed by
         # ObjectSequencer (forward) and scripts/generate.py (inverse), so a

@@ -152,7 +152,6 @@ def nt():
 
 
 def tiny_nt_config(nt, **overrides):
-    overrides.setdefault("loss_aggregation", "family")
     return nt.config_cls(
         hidden_size=64,
         num_hidden_layers=4,  # crosses one NoPE layer (idx 3)

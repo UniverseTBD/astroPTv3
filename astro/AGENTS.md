@@ -87,8 +87,8 @@ stages is implicit and easy to break, so understand it before editing:
    (192 floats); spectra → 31 patch-256 tokens with normalized per-patch
    mean wavelength as a continuous position; ADR 0008 adds one-token
    **scalar modalities** (`Z` gated on ZWARN==0, `ebv`, joint 3-band
-   `photometry`; `data/scalar_registry.py` fixed transforms, loss_weight
-   0.1) predicted by `GMMHead`s (`scalar_gmm_k`) directly — no flow, no
+   `photometry`; `data/scalar_registry.py` fixed transforms; the scalar family
+   is weighted 0.1) predicted by `GMMHead`s (`scalar_gmm_k`) directly — no flow, no
    logdet, plain `gmm_nll` on the raw normalized value. The
    linear probe builds scalar-free sequences (`include_scalars=False`)
    so R² stays a representation metric; `eval/scalar_head.py` is the

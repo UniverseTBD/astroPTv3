@@ -35,8 +35,6 @@ class ModalityConfig:
         source: source survey/product name used for provenance and dispatch.
         record_keys: record field(s) carrying this modality.
         token_ids: frozen (begin, placeholder, end) special-token block.
-        loss_weight: legacy field retained for checkpoint compatibility;
-            ADR 0013 aggregates by family instead.
         channel_tokenization: image factorisation (ADR 0014 §8).
             ``fused`` (default) makes one token per patch across all bands
             (8*8*3 = 192 floats); ``per_band`` makes one token per patch PER
@@ -64,7 +62,6 @@ class ModalityConfig:
     source: str | None = None
     record_keys: tuple[str, ...] = ()
     token_ids: tuple[int, int, int] | None = None
-    loss_weight: float = 1.0
     channel_tokenization: str = "fused"
     band_order: tuple[str, ...] = ()
 
@@ -130,7 +127,6 @@ class ModalityConfig:
             "source": self.source,
             "record_keys": list(self.record_keys),
             "token_ids": list(self.token_ids or ()),
-            "loss_weight": self.loss_weight,
             "channel_tokenization": self.channel_tokenization,
             "band_order": list(self.band_order),
         }

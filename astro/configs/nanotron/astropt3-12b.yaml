@@ -44,14 +44,12 @@ model:
         pos_type: index
         pos_input_size: 1
         max_positions: 361
-        loss_weight: 1.0
       - name: spectra
         input_size: 256
         patch_size: 256
         pos_type: continuous
         pos_input_size: 1
         max_positions: 1024
-        loss_weight: 1.0
     spiral: true # center-outward image patch order (ADR 0004)
     hidden_size: 5120
     num_hidden_layers: 42

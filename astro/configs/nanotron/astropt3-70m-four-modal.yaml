@@ -26,7 +26,6 @@ model:
     jetformer_flow_hidden: 128
     jetformer_flow_depth: 4
     jetformer_flow_heads: 8
-    loss_aggregation: family
     modalities:
       - name: images
         family: image
@@ -38,7 +37,6 @@ model:
         pos_type: index
         pos_input_size: 1
         max_positions: 361
-        loss_weight: 1.0
       - name: spectra
         family: spectrum
         source: desi
@@ -49,7 +47,6 @@ model:
         pos_type: continuous
         pos_input_size: 1
         max_positions: 1024
-        loss_weight: 1.0
       - name: sdss_spectra
         family: spectrum
         source: sdss
@@ -60,7 +57,6 @@ model:
         pos_type: continuous
         pos_input_size: 1
         max_positions: 1024
-        loss_weight: 1.0
       - name: hsc_images
         family: image
         source: hsc
@@ -71,7 +67,6 @@ model:
         pos_type: index
         pos_input_size: 1
         max_positions: 144
-        loss_weight: 1.0
     spiral: true
     hidden_size: 512
     num_hidden_layers: 23

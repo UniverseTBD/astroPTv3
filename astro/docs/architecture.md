@@ -115,10 +115,9 @@ reference):
   (may be negative) computed at positions **one to the left** of each
   modality token — `<|begin_m|>` predicts patch 0, patch *i* predicts patch
   *i+1* (AstroPT's `starts−1` alignment, implemented via `left_shift_mask`).
-  ADR 0013 configs average present modalities within image/spectrum/scalar,
-  then combine present family means at 1:1:0.1. Historical configs retain the
-  former per-modality `loss_weight` mean. Special tokens and pads carry no
-  loss.
+  The loss averages present modalities within image/spectrum/scalar, then
+  combines present family means at 1:1:0.1 (ADR 0013). Special tokens and
+  pads carry no loss.
 - **Init**: stock SmolLM3 `_init_weights`, normal(0, 0.02).
 
 ### Size family (Pythia-mirrored nominal sizes, no vocab head)
