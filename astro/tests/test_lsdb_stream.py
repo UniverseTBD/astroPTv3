@@ -1,14 +1,17 @@
 """Bounded live checks of the shared configured CatalogStream.
 
-Requires hub access; exclude with ``pytest -m 'not network'`` for offline runs.
+Requires hub access and 16 GiB available RAM; exclude with
+``pytest -m 'not network'`` for offline runs.
 """
 
 from contextlib import closing
 from copy import deepcopy
 from itertools import islice
 
+import psutil
 import pytest
 import torch
+from distributed.system import MEMORY_LIMIT
 from legacy_fixture import TINY_CATALOG_STREAM
 
 from astropt3.configuration_astropt3 import AstroPT3Config
@@ -18,13 +21,18 @@ from astropt3.data.packing import ObjectSequencer
 pytestmark = pytest.mark.network
 
 ROWS_TO_CHECK = 5
+WORKER_MEMORY_GIB = 16
 
 
 @pytest.mark.parametrize("catalog_count", [1, 2])
 def test_live_catalog_stream_decodes_and_selects(tiny_config, catalog_count):
+    if min(MEMORY_LIMIT, psutil.virtual_memory().available) < WORKER_MEMORY_GIB * 1024**3:
+        pytest.skip(f"Live catalog tests require {WORKER_MEMORY_GIB} GiB available RAM")
     spec = deepcopy(TINY_CATALOG_STREAM)
     spec["catalogs"] = spec["catalogs"][:catalog_count]
     spec["partitions_per_chunk"] = 1
+    # Explicit auto scales by thread count and can pause the sole worker mid-crossmatch.
+    spec["worker_memory_limit"] = f"{WORKER_MEMORY_GIB}GiB"
     modalities = tiny_config.modalities
     if catalog_count == 1:
         modalities = [m for m in modalities if m["source"] == "legacy"]
