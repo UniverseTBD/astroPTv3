@@ -55,7 +55,6 @@ DEFAULT_MODALITIES = [
         "record_keys": ["Z"],
         "token_ids": [8, 9, 10],
         "loss_weight": 0.1,
-        "scalar": True,
     },
     {
         "name": "ebv",
@@ -68,7 +67,6 @@ DEFAULT_MODALITIES = [
         "record_keys": ["ebv"],
         "token_ids": [11, 12, 13],
         "loss_weight": 0.1,
-        "scalar": True,
     },
     {
         # one joint 3-dim span (g, r, z), not three modalities: colour is
@@ -83,7 +81,6 @@ DEFAULT_MODALITIES = [
         "record_keys": ["flux_g", "flux_r", "flux_z"],
         "token_ids": [14, 15, 16],
         "loss_weight": 0.1,
-        "scalar": True,
     },
 ]
 
@@ -106,7 +103,6 @@ def _complete_modalities(modalities: list[dict]) -> list[dict]:
             raise ValueError(
                 f"new modality {modality.get('name')!r} must declare family, source, and record_keys"
             )
-        modality["scalar"] = modality["family"] == "scalar"
         completed.append(modality)
     return assign_modality_token_ids(completed)
 
@@ -155,15 +151,12 @@ class AstroPT3Config(SmolLM3Config):
                 f"vocab_size={vocab_size} cannot hold modality token id "
                 f"{required_vocab - 1}; set vocab_size >= {required_vocab}"
             )
-        # Saved configs may carry the retired flow selector; the per-patch flow is gone.
-        if kwargs.pop("jetformer_flow_type", None) == "patch_mlp":
-            raise ValueError("checkpoint uses the removed per-patch jetformer flow; retrain it")
         for value in (jetformer_flow_steps, jetformer_flow_hidden, jetformer_flow_depth, jetformer_flow_heads):
             if type(value) is not int or value <= 0:
                 raise ValueError("jetformer flow dimensions must be positive integers")
         if jetformer_flow_hidden % jetformer_flow_heads:
             raise ValueError("jetformer_flow_hidden must be divisible by jetformer_flow_heads")
-        if any(m["input_size"] % 2 for m in self.modalities if not m.get("scalar", False)):
+        if any(m["input_size"] % 2 for m in self.modalities if m["family"] != "scalar"):
             raise ValueError("jetformer flows require an even input_size for patch modalities")
         self.jetformer_flow_steps = jetformer_flow_steps
         self.jetformer_flow_hidden = jetformer_flow_hidden
@@ -182,27 +175,17 @@ class AstroPT3Config(SmolLM3Config):
         # arcsinh divisor of the physical image normalization; consumed by
         # ObjectSequencer (forward) and scripts/generate.py (inverse), so a
         # checkpoint always normalizes and inverts with the divisor it
-        # trained with (the default back-fills configs/checkpoints saved
-        # before the field existed — note pre-physical-norm PU-asinh
-        # checkpoints are incompatible regardless, see docs)
+        # trained with
         self.image_norm_divisor = image_norm_divisor
         # arcsinh knee (nMgy) of the physical spectra normalization (ADR
         # 0007), the spectra counterpart of image_norm_divisor: consumed by
-        # ObjectSequencer (forward) and eval/samples.py (inverse). Spectra
-        # checkpoints saved before the field existed trained on raw DESI
-        # flux and are incompatible regardless of the back-fill — retrain.
+        # ObjectSequencer (forward) and eval/samples.py (inverse).
         self.spectra_norm_divisor = spectra_norm_divisor
         # center-outward spiral patch order for image tokens (ADR 0004).
         # The field is the single source of truth for the order a checkpoint
         # trained in: ObjectSequencer spiralises iff it is True, and the
         # inverse path (eval/samples.py) antispiralises iff the LOADED
-        # checkpoint's config says True. The __init__ default is True so every
-        # run (and any config/older fork config missing the field) is spiral
-        # by default; all configs/model + configs/nanotron YAMLs set the field
-        # explicitly. NOTE: this flips the old back-fill from raster to spiral,
-        # so any raster checkpoint saved before the field existed (the 70M/160M
-        # raster shakeouts) now loads as spiral and decodes scrambled — retrain
-        # or load those with `spiral: false` passed explicitly.
+        # checkpoint's config says True.
         self.spiral = spiral
         kwargs["use_cache"] = False  # reload passes it back through kwargs
         super().__init__(  # type: ignore[call-arg]

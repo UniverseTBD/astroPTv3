@@ -57,19 +57,6 @@ survey data to model input (using LegacySurvey and DESI as examples):
    `arcsinh(f_ν/10)` (knee = 10 nMgy, the fiber sky-noise scale). Exactly
    invertible (`spectral_inverse`); unknown grids raise.
 
-   > **Migration note:** checkpoints trained before this change (on the
-   > percentile-calibrated Platonic-Universe asinh stretch) are
-   > **incompatible** — the normalization target is different. The config
-   > field `image_norm_divisor` is back-filled on load, but the weights were
-   > trained on a different target: declare incompatible, retrain. The same
-   > applies to physnorm checkpoints trained before the switch to knee-unit
-   > tokens (dropping the trailing `·divisor`) and the 96×96 central crop
-   > (361 → 144 image tokens): incompatible, retrain. Likewise all
-   > spectra-bearing checkpoints trained before the physical spectra
-   > normalization (ADR 0007, raw-DESI-flux tokens): the config field
-   > `spectra_norm_divisor` back-fills, but the record→token map changed —
-   > incompatible, retrain.
-
 3. **Patchify** (`tokenization.py`):
    - images → central 96×96 crop (`packing.IMAGE_CROP`; JWST cubes are
      already 96×96) → **144 patches of 192 floats** (8×8×3), integer

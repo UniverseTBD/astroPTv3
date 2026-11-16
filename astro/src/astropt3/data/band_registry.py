@@ -11,9 +11,6 @@ pixels.
 
 Everything is keyed to LegacySurvey: nanomaggies with AB zeropoint 22.5 and
 0.262 arcsec/pixel (``m_AB = 22.5 - 2.5*log10(flux_nmgy)``).
-The corrected zero-point conversion changes historical HSC/JWST normalization;
-checkpoints trained with the reversed factor need their original preprocessing
-or retraining. LegacySurvey's identity conversion is unchanged.
 
 Records with bands that are all in :data:`RAW_BANDS` pass through untouched;
 records mixing RAW and registry bands raise (not a real case for us — records

@@ -134,7 +134,7 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
             self.decoders[name] = GMMHead(
                 config.hidden_size,
                 registry.get_config(name).input_size,
-                getattr(config, "scalar_gmm_k", 5),
+                config.scalar_gmm_k,
             )
         self.pos_embeds = nn.ModuleDict(
             {
@@ -160,19 +160,6 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
         super()._init_weights(module)
         if isinstance(module, FlowCoupling):
             module.reset_permutations()
-
-    @classmethod
-    def from_pretrained(cls, *args, **kwargs):
-        # Per-patch-flow checkpoints would otherwise load with random flows and only a warning.
-        want_info = kwargs.pop("output_loading_info", False)
-        model, info = super().from_pretrained(*args, output_loading_info=True, **kwargs)
-        bad = [k for k in (*info["missing_keys"], *info["unexpected_keys"]) if k.startswith("flows.")]
-        if bad:
-            raise ValueError(
-                f"checkpoint flow weights do not match the JetFormer flow (e.g. {bad[0]!r}); "
-                "checkpoints from the removed per-patch flow are incompatible — retrain"
-            )
-        return (model, info) if want_info else model
 
     def set_jet_noise_frac(self, frac: float):
         self.jet_noise_frac = min(max(frac, 0.0), 1.0)

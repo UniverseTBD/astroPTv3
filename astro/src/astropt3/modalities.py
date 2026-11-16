@@ -47,9 +47,7 @@ class ModalityConfig:
             record band names (``des-g``, ``des-r``, ``des-z``). Fixed, not
             shuffled: band order as an ADR 0008 ordering decision is a
             separate experiment, and this one changes one variable.
-        scalar: ADR 0008 scalar-modality compatibility marker. It must agree
-            with ``family == "scalar"``.
-        ADR 0008 scalar modality — a one-token span holding a
+        ADR 0008 scalar modality (``family == "scalar"``) — a one-token span holding a
             physical quantity (Z, ebv, photometry). Scalars bypass the
             jetformer flow (their dims are odd and a flow buys nothing on a
             scalar) and are predicted by a ``GMMHead`` directly, with
@@ -67,7 +65,6 @@ class ModalityConfig:
     record_keys: tuple[str, ...] = ()
     token_ids: tuple[int, int, int] | None = None
     loss_weight: float = 1.0
-    scalar: bool = False
     channel_tokenization: str = "fused"
     band_order: tuple[str, ...] = ()
 
@@ -100,11 +97,6 @@ class ModalityConfig:
                     f"{self.patch_size}, so input_size must be {expected}, "
                     f"got {self.input_size}"
                 )
-        if self.scalar != (self.family == "scalar"):
-            raise ValueError(
-                f"modality {self.name!r} scalar={self.scalar} disagrees with "
-                f"family={self.family!r}"
-            )
         if not self.source:
             raise ValueError(f"modality {self.name!r} is missing source provenance")
         self.record_keys = tuple(self.record_keys)
@@ -122,6 +114,10 @@ class ModalityConfig:
             raise ValueError(f"modality {self.name!r} token_ids must be consecutive")
         self.token_ids = token_ids
 
+    @property
+    def scalar(self) -> bool:
+        return self.family == "scalar"
+
     def to_dict(self) -> dict:
         return {
             "name": self.name,
@@ -135,7 +131,6 @@ class ModalityConfig:
             "record_keys": list(self.record_keys),
             "token_ids": list(self.token_ids or ()),
             "loss_weight": self.loss_weight,
-            "scalar": self.scalar,
             "channel_tokenization": self.channel_tokenization,
             "band_order": list(self.band_order),
         }

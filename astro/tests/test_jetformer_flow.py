@@ -157,7 +157,7 @@ def test_packed_object_ids_do_not_merge_adjacent_rows():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("jetformer_flow_type", "patch_mlp"), ("jetformer_flow_steps", 0),
+    ("jetformer_flow_steps", 0),
     ("jetformer_flow_depth", True), ("jetformer_flow_hidden", 15),
 ])
 def test_reject_invalid_flow_config(field, value):
@@ -215,15 +215,6 @@ def test_generation_uses_latent_prefixes_and_complete_span_inverse():
     assert reconstructed["images"].shape == (144, 192)
     assert torch.isfinite(reconstructed["spectra"]).all()
 
-
-
-def test_checkpoint_with_mismatched_flow_weights_is_rejected(tmp_path):
-    cfg = flow_config()
-    AstroPT3Model(cfg).save_pretrained(tmp_path / "model")
-    # A saved flow that does not match the configured one (as from the removed per-patch flow).
-    other = AstroPT3Config(**{**cfg.to_dict(), "jetformer_flow_steps": 1})
-    with pytest.raises(ValueError, match="flow weights do not match"):
-        AstroPT3Model.from_pretrained(tmp_path / "model", config=other)
 
 
 RECIPES = CONFIG.parents[1] / "nanotron"

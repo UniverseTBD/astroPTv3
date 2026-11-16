@@ -12,8 +12,6 @@ parity rule — at two spans the shuffle IS that rule's 50/50 flip). Every
 conditional among the present spans lands in the training distribution;
 the seed changes each epoch, and being a pure function of (object_id,
 epoch) the order is exact under checkpoint resume (no ambient RNG state).
-Checkpoints trained before these rules (fixed images-first) are
-incompatible with sequences the rule builds — retrain.
 
 ADR 0008 scalar modalities (Z / ebv / photometry) are one-token spans over
 the record's catalog scalars, normalized by ``data/scalar_registry.py``;
@@ -52,9 +50,8 @@ from ..tokenization import (
     patchify_spectrum,
     spiralise,
 )
-from .band_registry import _DIV_FACTOR, physical_normalize
+from .band_registry import physical_normalize
 from .scalar_registry import scalar_normalize
-from .spectral import _DIV_FACTOR as _SPECTRA_DIV_FACTOR
 from .spectral import spectral_normalize
 
 # side of the central image crop applied before patchify, in pixels
@@ -108,16 +105,14 @@ class ObjectSequencer:
         # checkpoint self-describes the order it trained in, and the inverse
         # path keys off the same field — a caller-supplied override would
         # reopen the silent-scramble mismatch, so there deliberately isn't one
-        self.spiral = getattr(config, "spiral", True)
+        self.spiral = config.spiral
         # arcsinh knee of the physical image normalization; carried on the
         # config so checkpoints are self-describing and the inverse
         # (scripts/generate.py) uses the divisor the model trained with
-        self.image_norm_divisor = getattr(config, "image_norm_divisor", _DIV_FACTOR)
+        self.image_norm_divisor = config.image_norm_divisor
         # spectra counterpart (ADR 0007): arcsinh knee of the DESI f_ν
         # normalization, likewise carried on the config
-        self.spectra_norm_divisor = getattr(
-            config, "spectra_norm_divisor", _SPECTRA_DIV_FACTOR
-        )
+        self.spectra_norm_divisor = config.spectra_norm_divisor
 
     def _image_tokens(self, name: str, record: dict):
         mod = self.registry.get_config(name)

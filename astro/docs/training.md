@@ -309,8 +309,7 @@ only metrics/config: paths, provenance, code, data, and machine metadata stay lo
 Resume with the matching `--config-file`, not the default. Model settings and
 modalities are validated; weights/optimizer/scheduler/RNG restore, but **no data
 cursor or pending echoes are saved**. Ordinary Nanotron launches use their
-supplied YAML. Historical HSC/JWST weights trained with reversed zero-point
-scaling need their original preprocessing or retraining.
+supplied YAML.
 
 [Data echoing](https://arxiv.org/abs/1907.05550) motivates reuse, not a guaranteed
 AstroPT speedup or quality gain. Factor 4 is policy, not a measured optimum.

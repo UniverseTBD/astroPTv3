@@ -18,10 +18,8 @@ import pandas as pd
 import torch
 
 from ..configuration_astropt3 import AstroPT3Config
-from .band_registry import _DIV_FACTOR
 from .echo import echo_draw, validate_echo_factor
 from .packing import ObjectSequencer, PackedCollator
-from .spectral import _DIV_FACTOR as _SPECTRA_DIV_FACTOR
 from .telemetry import install_byte_probe, instrument
 
 IMAGE_SHAPE = (3, 152, 152)
@@ -328,21 +326,16 @@ def build_astropt3_dataloader(
             raise ValueError("echo-factor > 1 currently requires world_size=dp_size=1")
     config = hf_config_from_modalities(
         model_config.modalities,
+        # Fields absent from a partial model_config keep the HF config defaults.
         **{
-            field: getattr(model_config, field, default)
-            for field, default in [
-                ("jetformer_flow_steps", 8),
-                ("jetformer_flow_hidden", 128),
-                ("jetformer_flow_depth", 4),
-                ("jetformer_flow_heads", 8),
-                ("jetformer_gmm_k", 4),
-                ("jetformer_noise_max", 0.1),
-                ("jetformer_noise_min", 0.0),
-                ("scalar_gmm_k", 5),
-                ("image_norm_divisor", _DIV_FACTOR),
-                ("spectra_norm_divisor", _SPECTRA_DIV_FACTOR),
-                ("spiral", True),
-            ]
+            field: getattr(model_config, field)
+            for field in (
+                "jetformer_flow_steps", "jetformer_flow_hidden", "jetformer_flow_depth",
+                "jetformer_flow_heads", "jetformer_gmm_k", "jetformer_noise_max",
+                "jetformer_noise_min", "scalar_gmm_k", "image_norm_divisor",
+                "spectra_norm_divisor", "spiral",
+            )
+            if hasattr(model_config, field)
         },
     )
     catalog_stream = getattr(dataset_args, "catalog_stream", None)

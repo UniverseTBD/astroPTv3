@@ -83,8 +83,7 @@ stages is implicit and easy to break, so understand it before editing:
    modality, spans serialized in a **uniform random order seeded on
    `crc32(object_id) ^ epoch`** (resume-exact, always on — every
    conditional among the present spans lands in training; ADR 0008,
-   generalizing 0005's bimodal 50/50 flip; pre-rule fixed-order
-   checkpoints are incompatible). Images → 144 patch-8 tokens
+   generalizing 0005's bimodal 50/50 flip). Images → 144 patch-8 tokens
    (192 floats); spectra → 31 patch-256 tokens with normalized per-patch
    mean wavelength as a continuous position; ADR 0008 adds one-token
    **scalar modalities** (`Z` gated on ZWARN==0, `ebv`, joint 3-band
@@ -165,5 +164,4 @@ standardization turns flat/noise-only patches into irreducible N(0,1)
 targets — synthetic fixtures must contain patch-scale structure or smoke
 training cannot learn. The fixtures' image flux is nMgy-scale (cores ~0.1,
 noise ~0.001) so the physical normalization's fixed 0.01 nMgy arcsinh knee
-lands in the same regime as on real LegacySurvey data; pre-physical-norm
-(PU-asinh) checkpoints are incompatible — retrain.
+lands in the same regime as on real LegacySurvey data.
