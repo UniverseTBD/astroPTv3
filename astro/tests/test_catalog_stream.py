@@ -552,7 +552,12 @@ def test_galaxies_with_hats_png_scalars_and_sentinels(recipe):
     assert record["object_id"] == "galaxies-3"
     image = record["galaxy_image"]
     assert image["band"] == ["rgb-r", "rgb-g", "rgb-b"]
-    assert image["flux"].shape == (3, 256, 256) and 0 <= image["flux"].min() <= image["flux"].max() <= 1
+    assert image["flux"].shape == (3, 256, 256)
+    # dequantized: each value lies uniformly inside its own 8-bit bin [k, k + 1) / 255
+    pixels = np.asarray(Image.open(io.BytesIO(row["image"]["bytes"])).convert("RGB")).transpose(2, 0, 1)
+    offsets = image["flux"].astype(np.float64) * 255 - pixels
+    assert offsets.min() > -1e-4 and offsets.max() < 1 + 1e-4  # float32 rounding at the bin top
+    assert 0.45 < offsets.mean() < 0.55 and offsets.std() > 0.25
     values = ObjectSequencer(config).build(record).values
     assert values["galaxies"].shape == (256, 768)  # whole image (image_crop 0), raw [0, 1] pixels
     torch.testing.assert_close(values["gwh_redshift"], torch.log1p(torch.tensor([[0.1]])))

@@ -28,11 +28,13 @@ _PROFILES = {
     "desi_spectrum": ("spectrum", ("flux", "lambda", "mask"), "spectrum"),
     "sdss_spectrum": ("spectrum", ("flux", "lambda", "mask"), "spectrum"),
     "scalars": (None, (), "scalar"),
-    # 8-bit RGB PNG/JPEG struct {bytes, path} (e.g. galaxies-with-hats); scaled x/255, no crop needed
+    # 8-bit RGB PNG/JPEG struct {bytes, path} (e.g. galaxies-with-hats); dequantized to (k + U(0,1)) / 255
     "rgb_png": ("image", (), "image"),
 }
 # Catalogs whose identifier column is not ``object_id``.
 _ID_COLUMNS = {"rgb_png": "dr8_id"}
+# OS-seeded per process, so every DataLoader worker draws independent noise.
+_DEQUANTIZE = np.random.default_rng()
 _DEFAULTS = {
     "how": "outer", "radius_arcsec": 1.0,
     "partitions_per_chunk": 4, "worker_memory_limit": "auto",
@@ -176,7 +178,10 @@ class CatalogStream:
                 result = {"flux": flux, "band": bands}
             elif decoder == "rgb_png":
                 with Image.open(io.BytesIO(value["bytes"])) as png:
-                    rgb = np.asarray(png.convert("RGB"), dtype=np.float32) / 255.0
+                    rgb = np.asarray(png.convert("RGB"), dtype=np.float32)
+                # Uniform dequantization: a continuous likelihood on exact k/255 levels
+                # rewards piling density onto the 8-bit grid instead of modelling galaxies.
+                rgb = (rgb + _DEQUANTIZE.random(rgb.shape, dtype=np.float32)) / 255.0
                 result = {"flux": rgb.transpose(2, 0, 1), "band": ["rgb-r", "rgb-g", "rgb-b"]}
             else:
                 result = loader._decode_spectrum(value)
