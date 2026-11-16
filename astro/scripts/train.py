@@ -222,18 +222,21 @@ def main():
             }
             return super().save_checkpoint()
 
-        def train_step_logs(self, outputs, loss_avg, z_loss_avg, tbi_logs):
-            super().train_step_logs(outputs, loss_avg, z_loss_avg, tbi_logs)
+        def training_step(self, dataloader):
+            result = super().training_step(dataloader)
+            outputs, loss_avg, _, _ = result
             self.step_metrics = {
                 "train/loss": loss_avg.item(),
                 "train/lr": self.lr_scheduler.get_last_lr()[0],
-                "train/grad_norm": self.grad_norm_unclipped.item(),
             }
+            if self.config.optimizer.clip_grad is not None:
+                self.step_metrics["train/grad_norm"] = self.grad_norm_unclipped.item()
             for key in outputs[0]:
                 if key.endswith("_loss") and isinstance(outputs[0][key], torch.Tensor):
                     self.step_metrics[f"train/{key}"] = torch.stack([item[key] for item in outputs]).mean().item()
             if not all(math.isfinite(value) for value in self.step_metrics.values()):
                 raise ValueError("Non-finite loss or gradient; refusing to continue or save this step")
+            return result
 
     import lsdb
 

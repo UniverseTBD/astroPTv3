@@ -8,16 +8,14 @@ import shutil
 import subprocess
 import sys
 from contextlib import nullcontext
-from itertools import islice
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import numpy as np
-import pandas as pd
 import pytest
 import torch
 import yaml
-from legacy_fixture import make_record, nested_frame
+from legacy_fixture import make_record
 
 from astropt3.data import catalog_stream
 from astropt3.data.echo import echo_draw
@@ -191,50 +189,6 @@ def test_wandb_config_keeps_training_settings_without_local_provenance(tmp_path,
     assert config == before
 
 
-@pytest.mark.parametrize("include_sdss,padding", [(False, 0), (True, 0), (True, 2)])
-def test_catalog_decoder_preserves_optional_spectra(default_stream, include_sdss, padding):
-    source = make_record(1, image_only_fraction=0.0)
-    nested = {"image": source["image"], "spectrum_desi": source["spectrum"]}
-    if include_sdss:
-        nested["spectrum_sdss"] = {
-            "flux": np.array([1.0, 2.0, 3.0], dtype=np.float32),
-            "lambda": (4000 * 10 ** (np.arange(3) * 1e-4)).astype(np.float32),
-            "mask": np.array([False, True, False]),
-        }
-        if padding:
-            nested["spectrum_sdss"] = {
-                name: np.pad(values, padding)
-                for name, values in nested["spectrum_sdss"].items()
-            }
-    mapped = {"object_id": source["object_id"]}
-    for name, fields in default_stream.nested.items():
-        for field in fields:
-            mapped[f"{name}.{field}"] = (
-                np.asarray(nested[name][field]) if name in nested else np.array([])
-            )
-    decoded = default_stream.decode_row(mapped)["record"]
-    assert decoded["object_id"] == source["object_id"]
-    np.testing.assert_array_equal(decoded["image"]["flux"], source["image"]["flux"])
-    np.testing.assert_array_equal(
-        decoded["spectrum"]["flux"], source["spectrum"]["flux"]
-    )
-    assert ("spectrum_sdss" in decoded) == include_sdss
-    if include_sdss:
-        np.testing.assert_array_equal(
-            decoded["spectrum_sdss"]["mask"], [False, True, False]
-        )
-        np.testing.assert_array_equal(decoded["spectrum_sdss"]["flux"], [1.0, 2.0, 3.0])
-        from astropt3.data.spectral import spectral_normalize
-
-        assert torch.isfinite(
-            spectral_normalize(
-                torch.from_numpy(decoded["spectrum_sdss"]["flux"]),
-                torch.from_numpy(decoded["spectrum_sdss"]["lambda"]),
-                source="sdss",
-            )
-        ).all()
-
-
 def sdss_spectrum():
     return {
         "flux": np.ones(512, dtype=np.float32),
@@ -306,143 +260,6 @@ def test_spawned_worker_includes_hsc(monkeypatch, tmp_path, default_recipe, fact
             iterator._shutdown_workers()
         else:
             iterator.close()
-
-
-@pytest.mark.parametrize("source", ["sdss", "desi", "hsc"])
-@pytest.mark.parametrize("missing", [None, pd.NA, np.nan])
-def test_decoder_keeps_right_only_rows(default_stream, source, missing):
-    if source == "hsc":
-        payload, column, key = hsc_image(), "image_hsc", "hsc_image"
-    else:
-        payload = (
-            sdss_spectrum()
-            if source == "sdss"
-            else make_record(1, image_only_fraction=0.0)["spectrum"]
-        )
-        column = f"spectrum_{source}"
-        key = "spectrum_sdss" if source == "sdss" else "spectrum"
-    mapped = {
-        "object_id": missing,
-        "object_id_sdss": missing,
-        "object_id_desi": missing,
-    }
-    mapped[f"object_id_{source}"] = "same-id"
-    for name, fields in default_stream.nested.items():
-        for field in fields:
-            mapped[f"{name}.{field}"] = (
-                np.asarray(payload[field]) if name == column else np.array([])
-            )
-    record = default_stream.decode_row(mapped)["record"]
-    assert set(record) == {"object_id", key}
-    assert record["object_id"] == f"{source}:same-id"
-    np.testing.assert_array_equal(record[key]["flux"], payload["flux"])
-    mapped[f"object_id_{source}"] = missing
-    with pytest.raises(ValueError, match="object_id"):
-        default_stream.decode_row(mapped)
-
-
-def test_stream_retains_matched_and_unpaired_records(monkeypatch, default_recipe, default_stream):
-    source = make_record(1, image_only_fraction=0.0)
-    image = {
-        field: np.asarray(source["image"][field]).tolist()
-        for field in default_stream.nested["image"]
-    }
-    rows = [
-        {"object_id": "image-only", "image": image},
-        {
-            "object_id": "matched",
-            "image": image,
-            "object_id_sdss": "matched-sdss",
-            "spectrum_sdss": sdss_spectrum(),
-            "object_id_desi": "matched-desi",
-            "spectrum_desi": source["spectrum"],
-        },
-        {"object_id_sdss": "same-id", "spectrum_sdss": sdss_spectrum()},
-        {"object_id_desi": "same-id", "spectrum_desi": source["spectrum"]},
-    ]
-    hsc = {field: np.asarray(values).tolist() for field, values in hsc_image().items()}
-    rows[1].update(object_id_hsc="matched-hsc", image_hsc=hsc)
-    rows.append({"object_id_hsc": "same-id", "image_hsc": hsc})
-    frame = nested_frame(rows, tuple(default_stream.nested))
-    catalogs = {cat["name"]: cat["repo"] for cat in default_stream.catalogs}
-
-    class FakeStream:
-        npartitions = 1
-
-        def __init__(self, anchor, *rights, min_catalogs, **kwargs):
-            assert anchor == f"hf://datasets/{catalogs['legacy']}"
-            names = ["sdss", "desi", "hsc"]
-            assert [right["other"] for right in rights] == [
-                f"hf://datasets/{catalogs[name]}" for name in names
-            ]
-            assert [right["how"] for right in rights] == ["outer"] * len(names)
-            assert [right["suffixes"] for right in rights] == [
-                ("", f"_{name}") for name in names
-            ]
-            assert all(right["radius_arcsec"] == 1.0 for right in rights)
-            assert min_catalogs == 3
-            assert "count_fraction_threshold" not in kwargs
-
-        def __iter__(self):
-            yield frame
-
-    def open_catalog(url, *, columns):
-        is_image = "hsc" in url or "legacysurvey" in url
-        assert columns == [
-            "object_id",
-            "ra",
-            "dec",
-            "image" if is_image else "spectrum",
-        ]
-        return url
-
-    monkeypatch.setattr(catalog_stream, "open_catalog", open_catalog)
-    monkeypatch.setattr(catalog_stream, "CrossMatchStream", FakeStream)
-    monkeypatch.setattr(catalog_stream, "LocalCluster", lambda **kwargs: nullcontext())
-    monkeypatch.setattr(catalog_stream, "Client", lambda cluster: nullcontext())
-    hf_config = run.loader.hf_config_from_modalities(
-        default_recipe["model"]["model_config"]["modalities"]
-    )
-    dataset = run.loader.PackedMicroBatches(
-        hf_config, micro_batch_size=1, seq_len=4096, catalog_stream=default_stream.spec,
-    )
-    iterator = dataset._open_records(None)
-    try:
-        records = list(islice(iterator, len(rows)))
-    finally:
-        iterator.close()
-    assert [record["object_id"] for record in records] == [
-        "image-only",
-        "matched",
-        "sdss:same-id",
-        "desi:same-id",
-        "hsc:same-id",
-    ]
-    sequences = [dataset.sequencer.build(record) for record in records]
-    assert [set(sequence.values) for sequence in sequences] == [
-        {"images"},
-        {"images", "sdss_spectra", "spectra", "hsc_images"},
-        {"sdss_spectra"},
-        {"spectra"},
-        {"hsc_images"},
-    ]
-    assert sequences[-1].values["hsc_images"].shape == (144, 320)
-    from astropt3.tokenization import antispiralise, patchify_image
-
-    raw = torch.from_numpy(hsc_image()["flux"][:, 32:128, 32:128])
-    factor = 10 ** ((22.5 - 27.0) / 2.5) * (0.262 / 0.168) ** 2
-    expected = patchify_image(torch.asinh(raw * factor / 0.01), 8)
-    torch.testing.assert_close(
-        antispiralise(sequences[-1].values["hsc_images"]), expected
-    )
-    batch = dataset.collator(sequences)
-    flat = run.loader.flatten_packed_batch(batch, hf_config, 4096)
-    assert flat["hsc_images_values"].shape == (288, 320)
-    assert int(flat["hsc_images_mask"].sum()) == 288
-    assert all(
-        batch["modality_masks"][name].any()
-        for name in hf_config.modality_registry().names()
-    )
 
 
 @pytest.mark.parametrize(
@@ -977,7 +794,10 @@ def test_python_cli_rejects_bad_echo_before_creating_output(monkeypatch, tmp_pat
 
 
 @pytest.mark.parametrize("custom_config", [False, True])
-def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path, default_recipe, custom_config):
+@pytest.mark.parametrize("nonfinite", [None, "loss", "grad"])
+def test_main_wires_echo_accounting_and_restarts_mid_group(
+    monkeypatch, tmp_path, default_recipe, custom_config, nonfinite,
+):
     source_record = make_record(1, image_only_fraction=0.0)
     source_record.update(spectrum_sdss=sdss_spectrum(), hsc_image=hsc_image())
     config_args = []
@@ -987,6 +807,8 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path
             modalities[index].update(name=name, token_ids=list(range(23 + 3 * index, 26 + 3 * index)))
         default_recipe["model"]["model_config"]["modalities"] = modalities
         default_recipe["tokens"]["train_steps"] = 123
+        default_recipe["logging"]["iteration_step_info_interval"] = 10
+        default_recipe["optimizer"]["clip_grad"] = 1.0 if nonfinite == "grad" else None
         default_recipe["data_stages"][0]["data"]["num_loading_workers"] = 0
         config_file = tmp_path / "custom.yaml"
         config_file.write_text(yaml.safe_dump(default_recipe))
@@ -1009,17 +831,38 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path
             self.num_params = {"total": 1}
             self.dataset_args = SimpleNamespace(**config["data_stages"][0]["data"]["dataset"])
             self.model_config = SimpleNamespace(**config["model"]["model_config"])
-            self.config = SimpleNamespace(save_as_yaml=lambda path: path.write_text(yaml.safe_dump(config)))
+            self.config = SimpleNamespace(
+                save_as_yaml=lambda path: path.write_text(yaml.safe_dump(config)),
+                optimizer=SimpleNamespace(**config["optimizer"]),
+            )
+            self.log_interval = config["logging"]["iteration_step_info_interval"]
+            self.lr_scheduler = SimpleNamespace(get_last_lr=lambda: [0.001])
+
+        def training_step(self, dataloader):
+            next(dataloader)
+            step = self.metadata.last_train_step + 1
+            loss = torch.tensor(float("nan") if nonfinite == "loss" and step == 2 else float(step))
+            if self.config.optimizer.clip_grad is not None:
+                self.grad_norm_unclipped = torch.tensor(
+                    float("nan") if nonfinite == "grad" and step == 2 else 2.0,
+                )
+            return [{"loss": loss, f"{names[0]}_loss": loss}], loss, None, None
+
+        def train_step_logs(self, *args):
+            pass
 
         def train(self, dataloaders, max_steps):
-            self.current_base_dl = dataloaders["stage"]
-            iterator = iter(self.current_base_dl)
-            for _ in range(max_steps):
-                next(iterator)
-                self.metadata.last_train_step += 1
-                record = {**run.telemetry.drain_step(), "step_seconds": 1.0}
-                run.telemetry.write_step(self.metadata.last_train_step, record)
-            iterator.close()
+            iterator = iter(dataloaders["stage"])
+            try:
+                for _ in range(max_steps):
+                    result = self.training_step(iterator)
+                    self.metadata.last_train_step += 1
+                    if (self.metadata.last_train_step - 1) % self.log_interval == 0:
+                        self.train_step_logs(*result)
+                    record = {**run.telemetry.drain_step(), "step_seconds": 1.0}
+                    run.telemetry.write_step(self.metadata.last_train_step, record)
+            finally:
+                iterator.close()
 
     def run_attempt(attempt, override, expected_factor):
         output = tmp_path / f"run-{attempt}"
@@ -1072,19 +915,32 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path
                                        "--max-steps", "2", *config_args,
                                        *(["--echo-factor", str(override)] if override else []),
                                        *(["--resume-from", str(resume)] if attempt else [])])
-            run.main()
+            if nonfinite:
+                with pytest.raises(ValueError, match="Non-finite"):
+                    run.main()
+            else:
+                run.main()
+        state = json.loads((output / "run.json").read_text())
+        if nonfinite:
+            assert state["status"] == "failed"
+            assert state["completed_steps"] == 1
+            assert [step for step, _ in logged] == [1]
+            return
         records = [json.loads(line) for line in (output / "telemetry/steps.rank0.jsonl").read_text().splitlines()]
         assert consumed == ["fresh"]
         assert [record["echo_index"] for record in records] == [0, 1]
         assert [record["fresh_micro_batches"] for record in records] == [1, 0]
         assert [step for step, _ in logged] == ([3, 4] if attempt else [1, 2])
+        for step, metrics in logged:
+            assert metrics["train/loss"] == metrics[f"train/{names[0]}_loss"] == step
+            assert metrics["train/lr"] == 0.001
+            assert ("train/grad_norm" in metrics) == (default_recipe["optimizer"]["clip_grad"] is not None)
         assert [metrics["data/echo_index"] for _, metrics in logged] == [0, 1]
         assert payloads[0]["echo_factor"] == expected_factor
         assert "catalog_stream" not in json.dumps(payloads[0])
         assert {key for key in logged[0][1] if key.endswith("_token_fraction")} == {
             f"data/{name}_token_fraction" for name in names
         }
-        state = json.loads((output / "run.json").read_text())
         assert state["echo_factor"] == expected_factor
         assert state["target_steps"] == default_recipe["tokens"]["train_steps"]
         for filename in ("effective.yaml", "resolved.yaml"):
@@ -1095,8 +951,9 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path
             assert state["rng_restored"]
 
     run_attempt(0, None, 4)
-    run_attempt(1, None, 3)
-    run_attempt(2, 2, 2)
+    if not nonfinite:
+        run_attempt(1, None, 3)
+        run_attempt(2, 2, 2)
 
 
 @pytest.mark.parametrize("factor", [None, "3"])

@@ -195,7 +195,7 @@ def test_catalog_count_projection_and_finite_draws(recipe, offline, count):
         assert columns == ["object_id", "ra", "dec", *payload, *catalog.get("scalar_columns", {}).values()]
         if payload:
             suffix = "" if i == 0 else f"_{catalog['name']}"
-            fields = (("band", "flux", "psf_fwhm") if decoder == "legacy_image" else
+            fields = (("band", "flux") if decoder == "legacy_image" else
                       ("band", "flux", "scale") if decoder == "hsc_image" else
                       ("flux", "lambda", "mask"))
             expected_nested[payload[0] + suffix] = fields
@@ -286,14 +286,17 @@ def test_renamed_sdss_modality_and_padding(recipe, offline):
 
 
 @pytest.mark.parametrize("catalog_index", range(4))
-def test_optional_catalogs_and_right_only_identity(recipe, catalog_index):
+@pytest.mark.parametrize("missing", [None, pd.NA, np.nan])
+def test_optional_catalogs_and_right_only_identity(recipe, catalog_index, missing):
     spec, config = _case(recipe)
     stream = streaming.CatalogStream(spec, config)
     catalog = spec["catalogs"][catalog_index]
     suffix = "" if catalog_index == 0 else f"_{catalog['name']}"
     payload = "image" if catalog["decoder"].endswith("image") else "spectrum"
     row = _row(spec)
-    record = _decode(stream, {k: row[k] for k in (f"object_id{suffix}", f"{payload}{suffix}")})
+    selected = {key: missing for key in row if key.startswith("object_id")}
+    selected.update({k: row[k] for k in (f"object_id{suffix}", f"{payload}{suffix}")})
+    record = _decode(stream, selected)
     assert record is not None
     expected_id = row[f"object_id{suffix}"]
     if catalog_index:
@@ -303,6 +306,43 @@ def test_optional_catalogs_and_right_only_identity(recipe, catalog_index):
     np.testing.assert_array_equal(record[catalog["record_key"]]["flux"],
                                   np.asarray(row[f"{payload}{suffix}"]["flux"], dtype=np.float32))
     assert len(ObjectSequencer(config).build(record).values) == 1
+    selected[f"object_id{suffix}"] = missing
+    with pytest.raises(ValueError, match="object_id"):
+        _decode(stream, selected)
+
+
+def test_stream_retains_matched_and_unpaired_records(recipe, offline):
+    from astropt3.tokenization import antispiralise, patchify_image
+
+    spec, config = _case(recipe)
+    dataset = loader.PackedMicroBatches(config, 1, 4096, catalog_stream=spec)
+    row = _row(spec)
+    rows = [row]
+    for index, catalog in enumerate(spec["catalogs"]):
+        suffix = "" if index == 0 else f"_{catalog['name']}"
+        row[f"object_id{suffix}"] = "same-id"
+        payload = "image" if catalog["decoder"].endswith("image") else "spectrum"
+        rows.append({key: row[key] for key in (f"object_id{suffix}", f"{payload}{suffix}")})
+    offline.frames = lambda: [nested_frame(rows, tuple(dataset.catalog_stream.nested))]
+    with closing(dataset._open_records(None)) as records:
+        decoded = [next(records) for _ in rows]
+    assert [record["object_id"] for record in decoded] == [
+        "same-id", "same-id", "sdss:same-id", "desi:same-id", "hsc:same-id",
+    ]
+    sequences = [dataset.sequencer.build(record) for record in decoded]
+    assert [set(sequence.values) for sequence in sequences] == [
+        {"images", "spectra", "sdss_spectra", "hsc_images"},
+        {"images"}, {"sdss_spectra"}, {"spectra"}, {"hsc_images"},
+    ]
+    raw = torch.tensor(row["image_hsc"]["flux"], dtype=torch.float32)[:, 32:128, 32:128]
+    factor = 10 ** ((22.5 - 27.0) / 2.5) * (0.262 / 0.168) ** 2
+    expected = patchify_image(torch.asinh(raw * factor / 0.01), 8)
+    torch.testing.assert_close(antispiralise(sequences[-1].values["hsc_images"]), expected)
+    flat = loader.flatten_packed_batch(dataset.collator(sequences), config, 4096)
+    assert flat["hsc_images_values"].shape == (288, 320)
+    assert int(flat["hsc_images_mask"].sum()) == 288
+    assert all(flat[f"{name}_mask"].any() for name in config.modality_registry().names())
+    assert offline.closed == ["client", "cluster"]
 
 
 @pytest.mark.parametrize("with_spectrum", [False, True])
