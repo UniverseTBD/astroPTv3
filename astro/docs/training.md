@@ -62,8 +62,8 @@ Full nanotron run configs live in `astro/configs/nanotron/`: the Pythia ladder
 recipes `astropt3-{1m,10m}.yaml`. Every ladder rung trains the same four
 modalities from the same catalog streams; rungs differ in model size, cluster
 topology, batch and LR. The convenience launcher's default is
-**`astropt3-70m.yaml`**, run at DP=1 (TP=1 rungs only). Every ladder rung echoes
-each draw 4 times.
+**`astropt3-70m.yaml`**, run at DP=1 with at most 4 loader workers (TP=1 rungs
+only). Every ladder rung echoes each draw 4 times.
 Model, catalog list, join policy, worker count and schedule are explicit YAML,
 not injected by the script (see §9).
 

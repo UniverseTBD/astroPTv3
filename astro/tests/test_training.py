@@ -64,6 +64,12 @@ def test_training_rejects_retired_selection(tmp_path, default_recipe, crossmatch
         run.prepare_config(default_recipe, tmp_path / "run")
 
 
+def test_training_caps_loader_workers_on_one_gpu(tmp_path, default_recipe):
+    assert default_recipe["data_stages"][0]["data"]["num_loading_workers"] == 8
+    config = run.prepare_config(default_recipe, tmp_path / "run")
+    assert config["data_stages"][0]["data"]["num_loading_workers"] == 4
+
+
 def test_training_rejects_tensor_parallel_recipes(tmp_path, default_recipe):
     default_recipe["parallelism"]["tp"] = 2
     with pytest.raises(ValueError, match="TP=PP=CP=EP=1"):
@@ -105,7 +111,7 @@ def test_training_config_keeps_batch_shape_and_checkpoint_schedule(tmp_path, def
     assert len(ids) == len(set(ids))
     dataset = config["data_stages"][0]["data"]["dataset"]
     assert dataset["echo_factor"] == 4
-    assert config["data_stages"][0]["data"]["num_loading_workers"] == 8
+    assert config["data_stages"][0]["data"]["num_loading_workers"] == 4
     assert dataset["catalog_stream"]["min_catalogs"] == 3
     catalogs = {cat["name"]: cat["repo"] for cat in dataset["catalog_stream"]["catalogs"]}
     assert set(catalogs) == {"legacy", "sdss", "desi", "hsc"}
@@ -1002,8 +1008,8 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path
         def __init__(self, effective, benchmark):
             config = yaml.safe_load(Path(effective).read_text())
             assert config["tokens"] == default_recipe["tokens"]
-            assert config["data_stages"][0]["data"]["num_loading_workers"] == (
-                default_recipe["data_stages"][0]["data"]["num_loading_workers"]
+            assert config["data_stages"][0]["data"]["num_loading_workers"] == min(
+                default_recipe["data_stages"][0]["data"]["num_loading_workers"], 4
             )
             self.init_checkpoint_path = config["checkpoints"]["resume_checkpoint_path"]
             self.metadata = SimpleNamespace(last_train_step=2 if self.init_checkpoint_path else 0)

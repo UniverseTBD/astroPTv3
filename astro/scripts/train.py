@@ -53,7 +53,8 @@ def prepare_config(
     baseline: dict, output: Path, resume_from: Path | None = None,
     echo_factor: int | None = None,
 ) -> dict:
-    """Validate the recipe; override only run paths, echoing, and output services."""
+    """Validate the recipe; override only run paths, echoing, output services, and the
+    one-GPU topology (DP=1, at most 4 loader workers)."""
     config = copy.deepcopy(baseline)
     if len(config["data_stages"]) != 1:
         raise ValueError("this runner requires exactly one data stage")
@@ -61,6 +62,9 @@ def prepare_config(
         if config["parallelism"].get(key, 1) != 1:
             raise ValueError("this runner requires TP=PP=CP=EP=1; use nanotron/run_train.py otherwise")
     config["parallelism"]["dp"] = 1  # one GPU: the recipe's per-GPU workload, without its DP replicas
+    # Cluster recipes size readers per rank; on one GPU, 8 echo workers double startup and draw-cache memory.
+    data = config["data_stages"][0]["data"]
+    data["num_loading_workers"] = min(data["num_loading_workers"], 4)
     target = config["tokens"]["train_steps"]
     if type(target) is not int or target < 1:
         raise ValueError("train_steps must be a positive integer")
