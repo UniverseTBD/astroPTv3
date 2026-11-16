@@ -117,8 +117,10 @@ class AstroPT3Config(SmolLM3Config):
     def __init__(
         self,
         modalities: list[dict] | None = None,
-        jetformer_flow_steps: int = 4,
+        jetformer_flow_steps: int = 8,
         jetformer_flow_hidden: int = 128,
+        jetformer_flow_depth: int = 4,
+        jetformer_flow_heads: int = 8,
         jetformer_gmm_k: int = 4,
         jetformer_noise_max: float = 0.1,
         jetformer_noise_min: float = 0.0,
@@ -153,8 +155,20 @@ class AstroPT3Config(SmolLM3Config):
                 f"vocab_size={vocab_size} cannot hold modality token id "
                 f"{required_vocab - 1}; set vocab_size >= {required_vocab}"
             )
+        # Saved configs may carry the retired flow selector; the per-patch flow is gone.
+        if kwargs.pop("jetformer_flow_type", None) == "patch_mlp":
+            raise ValueError("checkpoint uses the removed per-patch jetformer flow; retrain it")
+        for value in (jetformer_flow_steps, jetformer_flow_hidden, jetformer_flow_depth, jetformer_flow_heads):
+            if type(value) is not int or value <= 0:
+                raise ValueError("jetformer flow dimensions must be positive integers")
+        if jetformer_flow_hidden % jetformer_flow_heads:
+            raise ValueError("jetformer_flow_hidden must be divisible by jetformer_flow_heads")
+        if any(m["input_size"] % 2 for m in self.modalities if not m.get("scalar", False)):
+            raise ValueError("jetformer flows require an even input_size for patch modalities")
         self.jetformer_flow_steps = jetformer_flow_steps
         self.jetformer_flow_hidden = jetformer_flow_hidden
+        self.jetformer_flow_depth = jetformer_flow_depth
+        self.jetformer_flow_heads = jetformer_flow_heads
         self.jetformer_gmm_k = jetformer_gmm_k
         self.jetformer_noise_max = jetformer_noise_max
         self.jetformer_noise_min = jetformer_noise_min

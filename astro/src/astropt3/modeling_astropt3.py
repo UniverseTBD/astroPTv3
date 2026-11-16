@@ -24,7 +24,7 @@ Sequence contract (built by data/packing.py):
 - ADR 0008 scalar modalities (``ModalityConfig.scalar``) are GMM-headed
   directly (``scalar_gmm_k`` mixture over the raw normalized value; loss
   is plain ``gmm_nll``, no flow, no logdet — a scalar needs no
-  invertibility machinery and its odd dim cannot feed ``TinyFlow1D``).
+  invertibility machinery and its odd dim cannot feed a flow).
 """
 
 from dataclasses import dataclass
@@ -40,11 +40,11 @@ from transformers.models.smollm3.modeling_smollm3 import (
 from transformers.utils.generic import ModelOutput
 
 from .configuration_astropt3 import AstroPT3Config
+from .flows import FlowCoupling, JetFormerFlow, flow_object_ids
 from .modalities import (
     Encoder,
     GMMHead,
     PositionEmbedder,
-    TinyFlow1D,
     gmm_nll,
 )
 from .tokenization import PAD_ID
@@ -107,16 +107,19 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
         # Per-modality flow (data -> latent z, with logdet) and GMM head; the
         # head predicts the latent z, and the loss path below stays a single
         # branch since every patch modality goes through it.
-        self.flows = nn.ModuleDict(
-            {
-                name: TinyFlow1D(
-                    registry.get_config(name).input_size,
-                    steps=config.jetformer_flow_steps,
-                    hidden_dim=config.jetformer_flow_hidden,
-                )
-                for name in patch_names
-            }
-        )
+        self.flows = nn.ModuleDict()
+        for name in patch_names:
+            modality = registry.get_config(name)
+            self.flows[name] = JetFormerFlow(
+                modality.input_size,
+                steps=config.jetformer_flow_steps,
+                hidden_dim=config.jetformer_flow_hidden,
+                depth=config.jetformer_flow_depth,
+                num_heads=config.jetformer_flow_heads,
+                pos_type=modality.pos_type,
+                max_positions=modality.max_positions,
+                pos_input_size=modality.pos_input_size,
+            )
         self.decoders = nn.ModuleDict(
             {
                 name: GMMHead(
@@ -143,13 +146,33 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
             self.special_head = nn.Linear(
                 config.hidden_size, config.vocab_size, bias=False
             )
-        # Noise-curriculum position (jetformer, v2 sogol_branch semantics):
+        # Noise-curriculum position (jetformer, astroPT v2 semantics):
         # sigma = noise_max + (noise_min - noise_max) * frac, so frac 0 -> 1
         # anneals noise_max -> noise_min over training. Default 1.0 means
         # sigma = noise_min (= 0 by default): eval and existing checkpoints
         # are unaffected unless the trainer drives the curriculum.
         self.jet_noise_frac = 1.0
         self.post_init()
+        for flow in self.flows.values():
+            flow.reset_coupling_outputs()
+
+    def _init_weights(self, module):
+        super()._init_weights(module)
+        if isinstance(module, FlowCoupling):
+            module.reset_permutations()
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        # Per-patch-flow checkpoints would otherwise load with random flows and only a warning.
+        want_info = kwargs.pop("output_loading_info", False)
+        model, info = super().from_pretrained(*args, output_loading_info=True, **kwargs)
+        bad = [k for k in (*info["missing_keys"], *info["unexpected_keys"]) if k.startswith("flows.")]
+        if bad:
+            raise ValueError(
+                f"checkpoint flow weights do not match the JetFormer flow (e.g. {bad[0]!r}); "
+                "checkpoints from the removed per-patch flow are incompatible — retrain"
+            )
+        return (model, info) if want_info else model
 
     def set_jet_noise_frac(self, frac: float):
         self.jet_noise_frac = min(max(frac, 0.0), 1.0)
@@ -199,8 +222,11 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
         attention_mask: torch.Tensor | None = None,
         compute_loss: bool = True,
         output_hidden_states: bool = False,
+        values_are_latents: bool = False,
         **kwargs,
     ) -> AstroPT3Output:
+        if values_are_latents and (compute_loss or self.training):
+            raise ValueError("pre-flowed latent values are supported only for loss-free inference")
         modality_values = modality_values or {}
         modality_masks = modality_masks or {}
         modality_positions = modality_positions or {}
@@ -211,7 +237,7 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
         # GMM target z and the logdet stay clean.
         flow_logdets = {}
         embed_values = modality_values
-        if modality_values:
+        if modality_values and not values_are_latents:
             flowed = {}
             for name in self.modality_names:
                 # scalars bypass the flow: their raw normalized value is both
@@ -220,7 +246,10 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
                     continue
                 flow = self.flows[name]
                 values = modality_values[name].to(next(flow.parameters()).dtype)
-                flowed[name], flow_logdets[name] = flow(values)
+                flowed[name], flow_logdets[name] = flow(
+                    values, modality_positions[name],
+                    flow_object_ids(position_ids, modality_masks[name]),
+                )
             modality_values = {**modality_values, **flowed}
             embed_values = modality_values
             sigma = self._jet_noise_sigma()

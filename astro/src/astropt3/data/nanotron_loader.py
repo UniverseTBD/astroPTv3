@@ -331,8 +331,10 @@ def build_astropt3_dataloader(
         **{
             field: getattr(model_config, field, default)
             for field, default in [
-                ("jetformer_flow_steps", 4),
+                ("jetformer_flow_steps", 8),
                 ("jetformer_flow_hidden", 128),
+                ("jetformer_flow_depth", 4),
+                ("jetformer_flow_heads", 8),
                 ("jetformer_gmm_k", 4),
                 ("jetformer_noise_max", 0.1),
                 ("jetformer_noise_min", 0.0),

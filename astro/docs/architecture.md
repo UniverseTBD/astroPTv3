@@ -116,8 +116,9 @@ reference):
 - **Encoders** are a single per-modality `nn.Linear` (data space -> embedding
   space). Image positions go through an `nn.Embedding` (index type), spectra
   positions through a small affine layer (continuous type). Each patch
-  modality also has a per-modality normalizing flow (`TinyFlow1D`) that maps
-  its raw patch value to a latent z — z is both what gets embedded and what
+  modality also has a per-modality normalizing flow (`JetFormerFlow`, ViT
+  conditioners over each object's modality span; `docs/jetformer-flow.md`)
+  that maps its raw patch values to latents z — z is both what gets embedded and what
   the `GMMHead` decoder predicts; scalar modalities (`Z`, `ebv`, `photometry`)
   skip the flow and feed a `GMMHead` directly on the raw normalized value.
 - **Body**: the stock SmolLM3 decoder stack, consuming `inputs_embeds`.

@@ -110,7 +110,9 @@ stages is implicit and easy to break, so understand it before editing:
    `SmolLM3Model(inputs_embeds=…)` → per-modality regression heads. The
    jetformer tokeniser (JetFormer/GIVT, ported from astroPT v2's
    sogol_branch) is the sole regression head: each patch modality's tokens
-   flow through a per-modality `TinyFlow1D` to a latent z that is both
+   flow through a per-modality `JetFormerFlow` (`flows.py`: affine couplings
+   with ViT conditioners attending across each object's modality span;
+   `docs/jetformer-flow.md`) to a latent z that is both
    embedded and predicted by a per-modality `GMMHead`, with loss the exact
    patch-space likelihood `mean(NLL_GMM(z) - logdet)` at positions one left
    of each modality token (`<|begin_m|>` predicts patch 0 — astroPT's

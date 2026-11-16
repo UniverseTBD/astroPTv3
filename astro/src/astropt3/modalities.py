@@ -5,7 +5,7 @@ Ported from astroPT (src/astropt/model.py). Each modality contributes:
 - ``Encoder``:   data space  -> embedding space (one token per patch)
 - ``PositionEmbedder``: per-modality positional information, added to the
   input embeddings (SmolLM3's RoPE/NoPE over the flat sequence is unchanged).
-- a per-modality flow (``TinyFlow1D``) + ``GMMHead`` (embedding space -> data
+- a per-modality flow (``flows.JetFormerFlow``) + ``GMMHead`` (embedding space -> data
   space, the jetformer regression head; see below).
 """
 
@@ -206,72 +206,18 @@ class PositionEmbedder(nn.Module):
         return self.embed(pos.to(self.embed.weight.dtype))
 
 
-# --- "jetformer" tokeniser: per-token normalizing flow + GMM head -----------
+# --- "jetformer" tokeniser: normalizing flow + GMM head ---------------------
 #
-# Ported from astroPT v2's sogol_branch (src/astropt/jetformer.py), which
+# Ported from astroPT v2's jetformer (src/astropt/jetformer.py), which
 # follows JetFormer (Tschannen et al. 2024) / GIVT (Tschannen et al. 2023).
-# v2 flowed on raw image space (TinyFlow2D); here the flow runs on patch
-# tokens instead, because the packed collator only ever hands the model flat
-# (N, D) token values — this is also what makes the flow modality-generic
-# (images and spectra alike). Per-modality loss is
+# v2 flowed on raw image space (TinyFlow2D); here the flow
+# (``flows.JetFormerFlow``) runs on patch tokens, with a ViT conditioner
+# attending across each object's modality span, because the packed collator
+# only ever hands the model flat (N, D) token values — this is also what makes
+# the flow modality-generic (images and spectra alike). Per-modality loss is
 # ``mean_tokens(NLL_GMM(z) - logdet)``: exact likelihood in (standardized)
 # patch space, so it can be negative. The v2 noise curriculum lives on the
 # model (``AstroPT3Model.set_jet_noise_frac``), not here.
-
-
-class CouplingMLP(nn.Module):
-    """RealNVP-style affine coupling over the feature dim of one token.
-
-    flip=False transforms the second half conditioned on the first;
-    flip=True the reverse. Requires an even feature dim.
-    """
-
-    def __init__(self, dim: int, hidden_dim: int):
-        super().__init__()
-        self.split = dim // 2
-        self.net = nn.Sequential(
-            nn.Linear(self.split, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, 2 * (dim - self.split)),
-        )
-
-    def forward(self, x, reverse: bool = False, flip: bool = False):
-        x1 = x[..., : self.split]
-        x2 = x[..., self.split :]
-        ident, moved = (x2, x1) if flip else (x1, x2)
-        s, t = self.net(ident).chunk(2, dim=-1)
-        s = torch.tanh(s) * 1.5  # bound the scale for numerical stability
-        if not reverse:
-            moved = moved * torch.exp(s) + t
-            logdet = s.sum(dim=-1)
-        else:
-            moved = (moved - t) * torch.exp(-s)
-            logdet = -s.sum(dim=-1)
-        halves = [moved, ident] if flip else [ident, moved]
-        return torch.cat(halves, dim=-1), logdet
-
-
-class TinyFlow1D(nn.Module):
-    """Stack of affine couplings over (..., D) patch tokens.
-
-    Returns the transformed tokens and a per-token log-determinant with
-    shape ``x.shape[:-1]``. Invertible via ``reverse=True``.
-    """
-
-    def __init__(self, dim: int, steps: int = 4, hidden_dim: int = 128):
-        super().__init__()
-        if dim % 2 != 0:
-            raise ValueError(f"TinyFlow1D requires an even token dim, got {dim}")
-        self.blocks = nn.ModuleList(CouplingMLP(dim, hidden_dim) for _ in range(steps))
-
-    def forward(self, x, reverse: bool = False):
-        logdet = x.new_zeros(x.shape[:-1])
-        indexed = list(enumerate(self.blocks))
-        z = x
-        for i, block in reversed(indexed) if reverse else indexed:
-            z, ld = block(z, reverse=reverse, flip=(i % 2 == 1))
-            logdet = logdet + ld
-        return z, logdet
 
 
 class GMMHead(nn.Module):

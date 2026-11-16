@@ -11,4 +11,8 @@ rope_theta: 100000.0
 no_rope_layer_interval: 4
 loss_aggregation: family
 spiral: true # center-outward image patch order (ADR 0004)
-jetformer_flow_hidden: 64 # smaller than the 128 default to keep the tiny model tiny
+# smaller than the recipe flow to keep the tiny model tiny
+jetformer_flow_steps: 2
+jetformer_flow_hidden: 16
+jetformer_flow_depth: 1
+jetformer_flow_heads: 2

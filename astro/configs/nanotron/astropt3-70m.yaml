@@ -31,6 +31,11 @@ model:
   make_vocab_size_divisible_by: 1
   model_config:
     is_astropt3_config: true
+    # JetFormer flow; width = min(hidden_size // 4, 512) (docs/jetformer-flow.md)
+    jetformer_flow_steps: 8
+    jetformer_flow_hidden: 128
+    jetformer_flow_depth: 4
+    jetformer_flow_heads: 8
     # pinned pilot modalities (verified MMU schemas); written out explicitly
     # here for the record — these match the dataclass defaults
     modalities:

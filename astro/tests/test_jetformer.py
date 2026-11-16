@@ -1,4 +1,4 @@
-"""jetformer tokeniser: per-token flow + GMM head (JetFormer/GIVT-style)."""
+"""jetformer tokeniser: flow + GMM head (JetFormer/GIVT-style); flow internals in test_jetformer_flow.py."""
 
 from pathlib import Path
 
@@ -8,7 +8,7 @@ from legacy_fixture import record_stream
 
 from astropt3.config_io import load_model_config
 from astropt3.data.packing import ObjectSequencer, PackedCollator
-from astropt3.modalities import GMMHead, TinyFlow1D, gmm_nll
+from astropt3.modalities import GMMHead, gmm_nll
 
 CONFIG = Path(__file__).resolve().parents[1] / "configs" / "model" / "test-tiny.yaml"
 
@@ -34,28 +34,6 @@ def jet_batch(jet_config):
     sequencer = ObjectSequencer(jet_config)
     collator = PackedCollator(jet_config, seq_len=896)
     return collator([sequencer.build(r) for r in record_stream(2)])
-
-
-def test_flow_roundtrip_and_logdet_antisymmetry():
-    torch.manual_seed(0)
-    flow = TinyFlow1D(192, steps=4, hidden_dim=32)
-    x = torch.randn(10, 192)
-    z, logdet = flow(x)
-    x_back, logdet_back = flow(z, reverse=True)
-    assert torch.allclose(x, x_back, atol=1e-5)
-    assert torch.allclose(logdet, -logdet_back, atol=1e-5)
-    assert not torch.allclose(z, x)  # the flow actually transforms
-
-
-def test_flow_logdet_matches_autograd_jacobian():
-    torch.manual_seed(0)
-    dim = 6
-    flow = TinyFlow1D(dim, steps=3, hidden_dim=16)
-    x = torch.randn(dim)
-    _, logdet = flow(x.unsqueeze(0))
-    jac = torch.autograd.functional.jacobian(lambda v: flow(v.unsqueeze(0))[0][0], x)
-    _, expected = torch.linalg.slogdet(jac)
-    assert torch.allclose(logdet[0], expected, atol=1e-5)
 
 
 def test_gmm_nll_matches_torch_distributions():

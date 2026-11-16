@@ -1,6 +1,8 @@
 import torch
 from legacy_fixture import record_stream
 
+from astropt3.flows import flow_object_ids
+
 
 def _batch(sequencer, collator, records):
     return collator([sequencer.build(r) for r in records])
@@ -133,7 +135,10 @@ def test_loss_matches_manual_computation(tiny_model, sequencer, collator, full_r
         for m in ("images", "spectra"):
             mask = batch["modality_masks"][m]
             hidden = out.last_hidden_state[left_shift_mask(mask)]
-            z, logdet = tiny_model.flows[m](batch["modality_values"][m])
+            z, logdet = tiny_model.flows[m](
+                batch["modality_values"][m], batch["modality_positions"][m],
+                flow_object_ids(batch["position_ids"], mask),
+            )
             logits_pi, mu, log_sigma = tiny_model.decoders[m](hidden)
             nll = gmm_nll(z, logits_pi, mu, log_sigma)
             manual.append((nll - logdet).mean())
