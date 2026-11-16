@@ -18,6 +18,7 @@ dependencies = [
     "lsdb",
     "hats",
     "huggingface-hub",
+    "pillow>=12.3.0",
 ]
 
 [project.optional-dependencies]

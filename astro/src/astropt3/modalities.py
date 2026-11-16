@@ -41,6 +41,8 @@ class ModalityConfig:
             band (8*8 = 64 floats, 3x the tokens) from identical bytes — a
             finer autoregressive factorisation with narrower heads, not more
             information. ``E_values`` is unchanged either way.
+        image_crop: central crop side in pixels before patchify (0 keeps the
+            whole image); 96 turns 152x152 survey cutouts into 144 patch-8 tokens.
         band_order: fixed band serialization order for ``per_band``, in
             record band names (``des-g``, ``des-r``, ``des-z``). Fixed, not
             shuffled: band order as an ADR 0008 ordering decision is a
@@ -64,6 +66,7 @@ class ModalityConfig:
     token_ids: tuple[int, int, int] | None = None
     channel_tokenization: str = "fused"
     band_order: tuple[str, ...] = ()
+    image_crop: int = 96
 
     def __post_init__(self):
         if self.family not in {"image", "spectrum", "scalar"}:
@@ -76,6 +79,8 @@ class ModalityConfig:
                 f"{self.channel_tokenization!r} (fused | per_band)"
             )
         self.band_order = tuple(self.band_order)
+        if type(self.image_crop) is not int or self.image_crop < 0:
+            raise ValueError(f"modality {self.name!r} image_crop must be a nonnegative integer")
         if self.channel_tokenization == "per_band":
             if self.family != "image":
                 raise ValueError(
@@ -129,6 +134,7 @@ class ModalityConfig:
             "token_ids": list(self.token_ids or ()),
             "channel_tokenization": self.channel_tokenization,
             "band_order": list(self.band_order),
+            "image_crop": self.image_crop,
         }
 
 

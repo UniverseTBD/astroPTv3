@@ -110,6 +110,21 @@ SCALAR_TRANSFORMS = {
     # PSF moments: same units, tighter knee. A8 records that this target is
     # narrow enough (p1-p99 0.094-0.147) to be beaten by predicting a constant.
     "hsc_psf_shape": (lambda x: torch.arcsinh(x / 0.1), lambda x: torch.sinh(x) * 0.1),
+    # galaxies-with-hats physical scalars. redshift and photo-z stellar mass reuse
+    # the Z and PROVABGS log-mass maps; MPA-JHU SFR/sSFR are already log10 and land
+    # O(1) with fixed offsets (sSFR p50 -11.1, p99 -9.5).
+    "gwh_redshift": (torch.log1p, torch.expm1),
+    "gwh_mass_med_photoz": (lambda x: (x - 10.0) / 2.0, lambda x: x * 2.0 + 10.0),
+    "gwh_total_sfr_median": (lambda x: x, lambda x: x),
+    "gwh_total_ssfr_median": (lambda x: x + 11.0, lambda x: x - 11.0),
+}
+
+# Catalog fill values that mean "not measured" for a scalar (photo-z and
+# MPA-JHU use -99); such a value drops the span like a missing one.
+MISSING_SENTINELS = {
+    "gwh_mass_med_photoz": -99.0,
+    "gwh_total_sfr_median": -99.0,
+    "gwh_total_ssfr_median": -99.0,
 }
 
 _GWH_FRACTION = (lambda x: 2.0 * x - 1.0, lambda x: (x + 1.0) / 2.0)

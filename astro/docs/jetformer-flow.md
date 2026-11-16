@@ -15,18 +15,20 @@ while growing the trunk. Ours is a convention: 8 stages, depth 4, 8 heads, and
 
     jetformer_flow_hidden = min(hidden_size // 4, 512)
 
-Flow parameters scale as width², like a trunk layer, so the four flows stay at
-~20–40% of trunk parameters up to 1B. The 512 cap (JetFormer's flow size)
-keeps them at ~411M from 1B upward. `tests/test_jetformer_flow.py` enforces the
+Flow parameters scale as width², like a trunk layer. With the five patch
+modalities (Legacy, HSC and galaxies-with-hats images; DESI and SDSS spectra)
+the flows are ~33–50% of trunk parameters up to 1B; the 512 cap (JetFormer's
+flow size) holds them at ~519M from 1B upward. The 768-wide galaxies-with-hats
+patches make its flow the largest. `tests/test_jetformer_flow.py` enforces the
 rule on every `configs/nanotron/*.yaml`. `scripts/count_params.py` reports
 flows in their own column and excludes them from the nominal-size check.
 
-| Trunk | hidden_size | Flow width | Four flows |
+| Trunk | hidden_size | Flow width | Five flows |
 |---|---:|---:|---:|
-| 70M | 512 | 128 | 27.5M |
-| 160M | 768 | 192 | ~59M |
-| 410M | 1024 | 256 | 105.3M |
-| 1B and up | ≥2048 | 512 | ~411M |
+| 70M | 512 | 128 | 35.3M |
+| 160M | 768 | 192 | 76.5M |
+| 410M | 1024 | 256 | 133.5M |
+| 1B and up | ≥2048 | 512 | 518.6M |
 
 ## Limits
 

@@ -59,8 +59,9 @@ errors fail immediately.
 
 Full nanotron run configs live in `astro/configs/nanotron/`: the Pythia ladder
 `astropt3-{70m,160m,410m,1b,1p4b,2p8b,6p9b,12b}.yaml` plus single-GPU smoke
-recipes `astropt3-{1m,10m}.yaml`. Every ladder rung trains the same four
-modalities from the same catalog streams; rungs differ in model size, cluster
+recipes `astropt3-{1m,10m}.yaml`. Every ladder rung trains the same
+modalities from the same catalog streams (four MMU surveys plus galaxies-with-hats
+RGB images and nine scalars); rungs differ in model size, cluster
 topology, batch and LR. The convenience launcher's default is
 **`astropt3-70m.yaml`**, run at DP=1 with at most 4 loader workers (TP=1 rungs
 only). Every ladder rung echoes each draw 4 times.

@@ -32,9 +32,11 @@ are hosted in the
 
 The [default 70M recipe](configs/nanotron/astropt3-70m.yaml) streams
 [Multimodal Universe](https://huggingface.co/collections/UniverseTBD/multimodal-universe-hats)
-LegacySurvey North images, DESI and SDSS spectra, and HSC Wide images; every
-rung of the Pythia ladder (`astropt3-{70m…12b}.yaml`) trains the same four
-modalities. All training recipes use YAML-configured catalog streams and
+LegacySurvey North images, DESI and SDSS spectra, HSC Wide images, and
+[galaxies-with-hats](https://huggingface.co/datasets/Smith42/galaxies-with-hats)
+RGB images with nine scalars (redshift, photo-z stellar mass, SFR, sSFR and five
+Galaxy Zoo vote fractions); every rung of the Pythia ladder
+(`astropt3-{70m…12b}.yaml`) trains the same modalities. All training recipes use YAML-configured catalog streams and
 modality lists; N-modal training is the normal path. New physical survey
 calibrations still require code.
 

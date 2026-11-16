@@ -1,5 +1,6 @@
 """Offline contracts for configured catalogs, independent of the training runner."""
 
+import io
 from contextlib import closing, nullcontext
 from copy import deepcopy
 from inspect import signature
@@ -12,6 +13,7 @@ import pytest
 import torch
 import yaml
 from legacy_fixture import make_record, nested_frame
+from PIL import Image
 
 from astropt3.configuration_astropt3 import DEFAULT_MODALITIES, AstroPT3Config
 from astropt3.data import catalog_stream as streaming
@@ -60,6 +62,9 @@ def recipe():
 def _case(recipe, count=4):
     spec = deepcopy(recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"])
     modalities = deepcopy(recipe["model"]["model_config"]["modalities"])
+    # the four survey catalogs; galaxies-with-hats has its own test
+    spec["catalogs"] = [c for c in spec["catalogs"] if c["decoder"] != "rgb_png"]
+    modalities = [m for m in modalities if m["source"] != "galaxies_with_hats"]
     if count < 4:
         names = ("sdss", "desi")[:count]
         spec["catalogs"] = [next(c for c in spec["catalogs"] if c["name"] == n) for n in names]
@@ -74,6 +79,13 @@ def _case(recipe, count=4):
         modalities += deepcopy([m for m in DEFAULT_MODALITIES if m["name"] in ("Z", "ebv")])
     spec["min_catalogs"] = min(count, 3)
     return spec, AstroPT3Config(modalities=modalities)
+
+
+def _png(index, size=256):
+    pixels = (np.arange(size * size * 3, dtype=np.uint32).reshape(size, size, 3) * (index + 1)) % 256
+    buffer = io.BytesIO()
+    Image.fromarray(pixels.astype(np.uint8)).save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _row(spec, index=1):
@@ -92,19 +104,22 @@ def _row(spec, index=1):
             "flux": np.broadcast_to(np.linspace(-0.2, 1, 160), (5, 160, 160)),
             "scale": np.full(5, 0.168),
         },
+        "rgb_png": {"bytes": _png(index), "path": f"{index}.png"},
     }
     row = {}
     for i, catalog in enumerate(spec["catalogs"]):
         suffix = "" if i == 0 else f"_{catalog['name']}"
-        row[f"object_id{suffix}"] = f"{catalog['name']}-{index}"
         decoder = catalog["decoder"]
-        if decoder != "scalars":
+        row[f"{streaming._ID_COLUMNS.get(decoder, 'object_id')}{suffix}"] = f"{catalog['name']}-{index}"
+        if decoder == "rgb_png":
+            row[f"image{suffix}"] = payloads[decoder]
+        elif decoder != "scalars":
             payload = "image" if decoder.endswith("image") else "spectrum"
             row[f"{payload}{suffix}"] = {
                 k: np.asarray(v).tolist() for k, v in payloads[decoder].items()
             }
         for key, column in catalog.get("scalar_columns", {}).items():
-            row[f"{column}{suffix}"] = source[key]
+            row[f"{column}{suffix}"] = source.get(key, 0.5)  # gwh_* scalars are not in the legacy fixture
     return row
 
 
@@ -236,7 +251,7 @@ def test_packed_modalities_and_alignment(recipe, offline, count):
 def test_recipe_and_shared_builder(recipe, offline):
     dataset_args = recipe["data_stages"][0]["data"]["dataset"]
     assert dataset_args["echo_factor"] == 4
-    assert len(recipe["model"]["model_config"]["modalities"]) == 4
+    assert len(recipe["model"]["model_config"]["modalities"]) == 14
     batches = loader.build_astropt3_dataloader(
         SimpleNamespace(**dataset_args), SimpleNamespace(**recipe["model"]["model_config"]),
         micro_batch_size=1, sequence_length=1024, dp_rank=0, num_workers=0,
@@ -254,6 +269,8 @@ def test_recipe_and_shared_builder(recipe, offline):
             assert batches.echo_factor == 4
             assert "_astropt3_echo" not in batch
             assert batch["hsc_images_values"].shape == (144, 320)
+            assert batch["galaxies_values"].shape == (256, 768)
+            assert batch["gwh_redshift_values"].shape == (1, 1)
     assert len(offline.streams) == 1
     assert offline.closed == ["client", "cluster"]
 
@@ -496,3 +513,27 @@ def test_nonretryable_errors_close_resources(recipe, offline, failure):
     assert len(offline.streams) == 1
     assert not offline.sleeps
     assert offline.closed == ["client", "cluster"]
+
+
+def test_galaxies_with_hats_png_scalars_and_sentinels(recipe):
+    spec = deepcopy(recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"])
+    spec["catalogs"] = [c for c in spec["catalogs"] if c["decoder"] == "rgb_png"]
+    spec["min_catalogs"] = 1
+    modalities = [m for m in recipe["model"]["model_config"]["modalities"] if m["source"] == "galaxies_with_hats"]
+    config = AstroPT3Config(modalities=modalities)
+    stream = streaming.CatalogStream(spec, config)
+    assert stream.columns[0] == "dr8_id" and "image" in stream.columns and not stream.nested
+    row = _row(spec, index=3)
+    scalars = spec["catalogs"][0]["scalar_columns"]
+    row[scalars["gwh_redshift"]] = 0.1
+    row[scalars["gwh_mass_med_photoz"]] = -99.0  # photo-z fill value means "not measured"
+    record = _decode(stream, row)
+    assert record["object_id"] == "galaxies-3"
+    image = record["galaxy_image"]
+    assert image["band"] == ["rgb-r", "rgb-g", "rgb-b"]
+    assert image["flux"].shape == (3, 256, 256) and 0 <= image["flux"].min() <= image["flux"].max() <= 1
+    values = ObjectSequencer(config).build(record).values
+    assert values["galaxies"].shape == (256, 768)  # whole image (image_crop 0), raw [0, 1] pixels
+    torch.testing.assert_close(values["gwh_redshift"], torch.log1p(torch.tensor([[0.1]])))
+    assert "gwh_mass_med_photoz" not in values
+    assert set(values) == {m["name"] for m in modalities} - {"gwh_mass_med_photoz"}

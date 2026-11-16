@@ -1,6 +1,7 @@
 """Offline checks for YAML-driven N-modal training and launchers."""
 
 import copy
+import io
 import json
 import os
 import shlex
@@ -18,6 +19,7 @@ import pytest
 import torch
 import yaml
 from legacy_fixture import make_record, nested_frame
+from PIL import Image
 
 from astropt3.data import catalog_stream
 from astropt3.data.echo import echo_draw
@@ -95,17 +97,20 @@ def test_training_config_keeps_batch_shape_and_checkpoint_schedule(tmp_path, def
         tmp_path / "old-checkpoints"
     )
     modalities = config["model"]["model_config"]["modalities"]
-    assert [modality["name"] for modality in modalities] == [
+    assert [modality["name"] for modality in modalities][:5] == [
         "images",
         "spectra",
         "sdss_spectra",
         "hsc_images",
+        "galaxies",
     ]
+    assert len(modalities) == 14 and all(m["family"] == "scalar" for m in modalities[5:])
     assert modalities[2]["token_ids"] == [17, 18, 19]
-    assert modalities[-1]["token_ids"] == [20, 21, 22]
-    assert modalities[-1]["input_size"] == 320
-    assert modalities[-1]["record_keys"] == ["hsc_image"]
-    assert modalities[-1]["family"] == "image"
+    assert modalities[3]["token_ids"] == [20, 21, 22]
+    assert modalities[3]["input_size"] == 320
+    assert modalities[3]["record_keys"] == ["hsc_image"]
+    assert modalities[3]["family"] == "image"
+    assert modalities[4]["record_keys"] == ["galaxy_image"] and modalities[4]["image_crop"] == 0
     hf = run.loader.hf_config_from_modalities(modalities)
     ids = [token for modality in hf.modalities for token in modality["token_ids"]]
     assert len(ids) == len(set(ids))
@@ -114,7 +119,7 @@ def test_training_config_keeps_batch_shape_and_checkpoint_schedule(tmp_path, def
     assert config["data_stages"][0]["data"]["num_loading_workers"] == 4
     assert dataset["catalog_stream"]["min_catalogs"] == 3
     catalogs = {cat["name"]: cat["repo"] for cat in dataset["catalog_stream"]["catalogs"]}
-    assert set(catalogs) == {"legacy", "sdss", "desi", "hsc"}
+    assert set(catalogs) == {"legacy", "sdss", "desi", "hsc", "galaxies"}
     assert catalogs["hsc"] == (
         "hugging-science/mmu_hsc_pdr3_wide_21@7de6b92fd99097207a00b9c42f2d2862d62662bf"
     )
@@ -372,6 +377,15 @@ def test_stream_retains_matched_and_unpaired_records(monkeypatch, default_recipe
     ]
     hsc = {field: np.asarray(values).tolist() for field, values in hsc_image().items()}
     rows[1].update(object_id_hsc="matched-hsc", image_hsc=hsc)
+    galaxies = next(cat for cat in default_stream.catalogs if cat["name"] == "galaxies")
+    png = io.BytesIO()
+    Image.new("RGB", (256, 256), (10, 20, 30)).save(png, format="PNG")
+    scalar_values = {"gwh_redshift": 0.1, "gwh_mass_med_photoz": 10.0, "gwh_total_ssfr_median": -11.0}
+    rows.append({
+        "dr8_id_galaxies": "same-id",
+        "image_galaxies": {"bytes": png.getvalue(), "path": "same-id.png"},
+        **{f"{column}_galaxies": scalar_values.get(key, 0.5) for key, column in galaxies["scalar_columns"].items()},
+    })
     rows.append({"object_id_hsc": "same-id", "image_hsc": hsc})
     frame = nested_frame(rows, tuple(default_stream.nested))
     catalogs = {cat["name"]: cat["repo"] for cat in default_stream.catalogs}
@@ -381,7 +395,7 @@ def test_stream_retains_matched_and_unpaired_records(monkeypatch, default_recipe
 
         def __init__(self, anchor, *rights, min_catalogs, **kwargs):
             assert anchor == f"hf://datasets/{catalogs['legacy']}"
-            names = ["sdss", "desi", "hsc"]
+            names = ["sdss", "desi", "hsc", "galaxies"]
             assert [right["other"] for right in rights] == [
                 f"hf://datasets/{catalogs[name]}" for name in names
             ]
@@ -396,7 +410,12 @@ def test_stream_retains_matched_and_unpaired_records(monkeypatch, default_recipe
         def __iter__(self):
             yield frame
 
+    galaxy_scalars = list(next(c for c in default_stream.catalogs if c["name"] == "galaxies")["scalar_columns"].values())
+
     def open_catalog(url, *, columns):
+        if "galaxies-with-hats" in url:
+            assert columns == ["dr8_id", "ra", "dec", "image", *galaxy_scalars]
+            return url
         is_image = "hsc" in url or "legacysurvey" in url
         assert columns == [
             "object_id",
@@ -426,6 +445,7 @@ def test_stream_retains_matched_and_unpaired_records(monkeypatch, default_recipe
         "matched",
         "sdss:same-id",
         "desi:same-id",
+        "galaxies:same-id",
         "hsc:same-id",
     ]
     sequences = [dataset.sequencer.build(record) for record in records]
@@ -434,6 +454,7 @@ def test_stream_retains_matched_and_unpaired_records(monkeypatch, default_recipe
         {"images", "sdss_spectra", "spectra", "hsc_images"},
         {"sdss_spectra"},
         {"spectra"},
+        {"galaxies", *galaxies["scalar_columns"]},
         {"hsc_images"},
     ]
     assert sequences[-1].values["hsc_images"].shape == (144, 320)
@@ -576,7 +597,7 @@ def test_resume_uses_new_catalogs_without_rewriting_old_saved_yaml(
 
 
 @pytest.mark.parametrize("field,value", [
-    ("missing", None), ("name", "renamed"), ("token_ids", [23, 24, 25]),
+    ("missing", None), ("name", "renamed"), ("token_ids", [53, 54, 55]),
     ("source", "different-survey"), ("input_size", 384), ("pos_input_size", 2),
 ])
 def test_resume_rejects_generic_modality_mismatches(tmp_path, default_recipe, field, value):

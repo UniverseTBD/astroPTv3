@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import io
 import math
 import re
 import time
@@ -12,6 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from dask.distributed import Client, LocalCluster
+from PIL import Image
 from lsdb.loaders.hats.read_hats import open_catalog
 from lsdb.streams.catalog_streams import CrossMatchStream, InfiniteStream
 
@@ -26,7 +28,11 @@ _PROFILES = {
     "desi_spectrum": ("spectrum", ("flux", "lambda", "mask"), "spectrum"),
     "sdss_spectrum": ("spectrum", ("flux", "lambda", "mask"), "spectrum"),
     "scalars": (None, (), "scalar"),
+    # 8-bit RGB PNG/JPEG struct {bytes, path} (e.g. galaxies-with-hats); scaled x/255, no crop needed
+    "rgb_png": ("image", (), "image"),
 }
+# Catalogs whose identifier column is not ``object_id``.
+_ID_COLUMNS = {"rgb_png": "dr8_id"}
 _DEFAULTS = {
     "how": "outer", "radius_arcsec": 1.0,
     "partitions_per_chunk": 4, "worker_memory_limit": "auto",
@@ -70,15 +76,18 @@ class CatalogStream:
                 raise ValueError(f"catalog {name!r} has unsupported decoder {decoder!r}")
             payload, fields, family = _PROFILES[decoder]
             suffix = "" if index == 0 else f"_{name}"
-            self.columns.append(f"object_id{suffix}")
+            self.columns.append(f"{_ID_COLUMNS.get(decoder, 'object_id')}{suffix}")
             if payload:
                 key = catalog.get("record_key")
                 if not isinstance(key, str) or not key or key == "object_id" or key in outputs:
                     raise ValueError("catalog record keys must be nonempty and unique")
                 outputs[key] = (family, decoder, name)
                 column = f"{payload}{suffix}"
-                self.nested[column] = fields
-                self.columns.extend(f"{column}.{field}" for field in fields)
+                if fields:
+                    self.nested[column] = fields
+                    self.columns.extend(f"{column}.{field}" for field in fields)
+                else:
+                    self.columns.append(column)  # plain struct column, read whole
             elif "record_key" in catalog:
                 raise ValueError("scalar-only catalogs use scalar_columns, not record_key")
             scalars = catalog.setdefault("scalar_columns", {})
@@ -140,7 +149,7 @@ class CatalogStream:
             if value is None and not scalars:
                 continue
             if "object_id" not in record:
-                object_id = row.get(f"object_id{suffix}")
+                object_id = row.get(f"{_ID_COLUMNS.get(decoder, 'object_id')}{suffix}")
                 if bool(pd.isna(object_id)):
                     raise ValueError(f"{name} row has no object_id")
                 record["object_id"] = str(object_id) if index == 0 else f"{name}:{object_id}"
@@ -161,6 +170,10 @@ class CatalogStream:
                 if scale.shape != (5,) or not np.allclose(scale, 0.168, rtol=1e-6, atol=0):
                     raise ValueError("HSC Wide pixel scale must be 0.168 arcsec in all five bands")
                 result = {"flux": flux, "band": bands}
+            elif decoder == "rgb_png":
+                with Image.open(io.BytesIO(value["bytes"])) as png:
+                    rgb = np.asarray(png.convert("RGB"), dtype=np.float32) / 255.0
+                result = {"flux": rgb.transpose(2, 0, 1), "band": ["rgb-r", "rgb-g", "rgb-b"]}
             else:
                 result = loader._decode_spectrum(value)
                 if decoder == "sdss_spectrum":
@@ -169,7 +182,8 @@ class CatalogStream:
                     result = {key: values[keep] for key, values in result.items()}
             record[catalog["record_key"]] = result
         if not record:
-            if any(not bool(pd.isna(row.get(f"object_id{'' if i == 0 else '_' + cat['name']}")))
+            if any(not bool(pd.isna(row.get(
+                    f"{_ID_COLUMNS.get(cat['decoder'], 'object_id')}{'' if i == 0 else '_' + cat['name']}")))
                    for i, cat in enumerate(self.catalogs)):
                 return {"record": None}
             raise ValueError("crossmatched row has no supported data or object_id")
@@ -197,7 +211,8 @@ class CatalogStream:
                     catalogs = []
                     for catalog in self.catalogs:
                         payload = _PROFILES[catalog["decoder"]][0]
-                        columns = ["object_id", "ra", "dec", *([payload] if payload else []),
+                        columns = [_ID_COLUMNS.get(catalog["decoder"], "object_id"), "ra", "dec",
+                                   *([payload] if payload else []),
                                    *catalog["scalar_columns"].values()]
                         catalogs.append(open_catalog(
                             f"hf://datasets/{catalog['repo']}", columns=list(dict.fromkeys(columns)),

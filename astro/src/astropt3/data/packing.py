@@ -42,6 +42,7 @@ from typing import Any
 import torch
 
 from ..configuration_astropt3 import AstroPT3Config
+from ..modalities import ModalityConfig
 from ..tokenization import (
     BOS_ID,
     PAD_ID,
@@ -51,11 +52,11 @@ from ..tokenization import (
     spiralise,
 )
 from .band_registry import physical_normalize
-from .scalar_registry import scalar_normalize
+from .scalar_registry import MISSING_SENTINELS, scalar_normalize
 from .spectral import spectral_normalize
 
 # side of the central image crop applied before patchify, in pixels
-IMAGE_CROP = 96
+IMAGE_CROP = ModalityConfig.image_crop
 
 # ADR 0014 §5: bumped whenever :func:`span_order` changes, since a different
 # permutation rule changes the emitted sequences without changing record
@@ -121,10 +122,11 @@ class ObjectSequencer:
         # central crop: 152x152 survey cutouts -> 96x96 (144 patch-8 tokens);
         # JWST cubes are already 96x96 and pass through untouched
         h, w = flux.shape[-2:]
-        if h > IMAGE_CROP or w > IMAGE_CROP:
-            top = (h - IMAGE_CROP) // 2
-            left = (w - IMAGE_CROP) // 2
-            flux = flux[..., top : top + IMAGE_CROP, left : left + IMAGE_CROP]
+        crop = mod.image_crop  # 0 keeps the whole image
+        if crop and (h > crop or w > crop):
+            top = (h - crop) // 2
+            left = (w - crop) // 2
+            flux = flux[..., top : top + crop, left : left + crop]
         # may arrive as a list or an array after a parquet round-trip
         bands = [str(b) for b in image["band"]]
         flux = physical_normalize(
@@ -203,6 +205,8 @@ class ObjectSequencer:
                     f"modality {name!r} has a non-numeric value"
                 ) from error
         if not all(math.isfinite(value) for value in values):
+            return None
+        if any(value == MISSING_SENTINELS.get(name) for value in values):
             return None
         if name == "Z" and bool(record.get("ZWARN") or False):
             return None
