@@ -104,7 +104,7 @@ def wandb_config(config: dict, max_steps: int | None) -> dict:
         "training": training,
         "stream": {
             key: copy.deepcopy(stream[key])
-            for key in ("how", "min_surveys", "radius_arcsec", "count_fraction_threshold", "partitions_per_chunk")
+            for key in ("how", "min_catalogs", "radius_arcsec", "partitions_per_chunk")
         },
         "max_steps": max_steps,
         "echo_factor": dataset["echo_factor"],

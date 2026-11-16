@@ -134,9 +134,8 @@ data_stages:
               decoder: hsc_image
               record_key: hsc_image
           how: outer
-          min_surveys: 3
+          min_catalogs: 3
           radius_arcsec: 1.0
-          count_fraction_threshold: 0.0
           partitions_per_chunk: 4
           worker_memory_limit: 64GiB
       seed: 42

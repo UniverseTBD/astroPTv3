@@ -101,7 +101,7 @@ def test_training_config_keeps_batch_shape_and_checkpoint_schedule(tmp_path, def
     dataset = config["data_stages"][0]["data"]["dataset"]
     assert dataset["echo_factor"] == 4
     assert config["data_stages"][0]["data"]["num_loading_workers"] == 4
-    assert dataset["catalog_stream"]["min_surveys"] == 3
+    assert dataset["catalog_stream"]["min_catalogs"] == 3
     catalogs = {cat["name"]: cat["repo"] for cat in dataset["catalog_stream"]["catalogs"]}
     assert set(catalogs) == {"legacy", "sdss", "desi", "hsc"}
     assert catalogs["hsc"] == (
@@ -178,7 +178,7 @@ def test_wandb_config_keeps_training_settings_without_local_provenance(tmp_path,
     assert payload["training"]["tokens"]["train_steps"] == 30_000
     assert payload["training"]["seed"] == config["general"]["seed"]
     assert payload["training"]["checkpoints"]["checkpoint_interval"] == 1000
-    assert payload["stream"]["min_surveys"] == 3
+    assert payload["stream"]["min_catalogs"] == 3
     assert payload["stream"]["how"] == "outer"
     serialized = json.dumps(payload)
     assert "catalog_stream" not in serialized
@@ -369,7 +369,7 @@ def test_stream_retains_matched_and_unpaired_records(monkeypatch, default_recipe
     class FakeStream:
         npartitions = 1
 
-        def __init__(self, anchor, *rights, min_surveys, **kwargs):
+        def __init__(self, anchor, *rights, min_catalogs, **kwargs):
             assert anchor == f"hf://datasets/{catalogs['legacy']}"
             names = ["sdss", "desi", "hsc"]
             assert [right["other"] for right in rights] == [
@@ -380,8 +380,8 @@ def test_stream_retains_matched_and_unpaired_records(monkeypatch, default_recipe
                 ("", f"_{name}") for name in names
             ]
             assert all(right["radius_arcsec"] == 1.0 for right in rights)
-            assert min_surveys == 3
-            assert kwargs["count_fraction_threshold"] == 0.0
+            assert min_catalogs == 3
+            assert "count_fraction_threshold" not in kwargs
 
         def __iter__(self):
             yield frame
@@ -864,7 +864,7 @@ def test_echo_runs_independent_model_optimizer_updates(echo_batch, tiny_config, 
 
 @pytest.mark.gpu
 def test_pinned_echo_cache_survives_nanotron_device_transfer(echo_batch):
-    from nanotron.data.dataloader import sanity_check_dataloader
+    sanity_check_dataloader = pytest.importorskip("nanotron.data.dataloader").sanity_check_dataloader
 
     config, batch = echo_batch
     pinned = {key: value.pin_memory() for key, value in batch.items()}

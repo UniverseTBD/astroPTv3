@@ -46,15 +46,15 @@ stages is implicit and easy to break, so understand it before editing:
    live in `tests/legacy_fixture.py` (ADR 0015 deleted `data/synthetic.py`
    with the rest of the local-corpus path). Real records are **streamed
    live from the HF hub inside each DataLoader worker** by
-   `data/catalog_stream.py` via LSDB PR #1584 (`selective-x-match`, pinned in
+   `data/catalog_stream.py` via merged LSDB main (commit pinned in
    `uv.lock`): `InfiniteStream` for one catalog, `CrossMatchStream` for several.
    Explicit YAML `catalog_stream` lists define the sources and join policy;
    the legacy selector and custom crossmatcher are removed. Generation uses
    this same stream. Upstream owns footprint and boundary-match semantics;
    AstroPT retains decoding, calibration, quality gates and bounded retries.
-   `count_fraction_threshold` defaults to
-   0.0: 0.5 saved 31% Legacy bytes but cost ~20% tokens/s and image
-   coverage (EXPERIMENTS.md §9). Each worker owns a dask `LocalCluster`
+   `min_catalogs` selects sky coverage, not a per-record modality count;
+   the old `min_surveys` and `count_fraction_threshold` settings are rejected.
+   Each worker owns a dask `LocalCluster`
    (threads only, `partitions_per_chunk=4`) so the next draw's fetch
    overlaps the current one's decode; rows decode through
    `NestedFrame.map_rows`, never `iterrows`. `num_loading_workers` counts

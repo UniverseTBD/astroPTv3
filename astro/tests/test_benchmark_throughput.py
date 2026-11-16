@@ -180,7 +180,7 @@ def test_flop_capture_undoes_world_size_and_records_model_costs(monkeypatch):
 
 
 def test_capture_reports_actual_catalog_policy(monkeypatch):
-    spec = {"catalogs": [{"name": "sdss", "repo": "offline/sdss"}], "min_surveys": 1}
+    spec = {"catalogs": [{"name": "sdss", "repo": "offline/sdss"}], "min_catalogs": 1}
     dataset = SimpleNamespace(
         catalog_stream=SimpleNamespace(spec=spec),
         config=SimpleNamespace(modalities=[{"name": "custom_mode"}]),

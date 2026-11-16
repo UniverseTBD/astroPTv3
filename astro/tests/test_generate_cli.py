@@ -28,7 +28,7 @@ def test_templates_use_selected_catalogs_and_close_after_one_draw(monkeypatch, r
     keys = [modality["record_keys"][0] for modality in modalities]
     spec = recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
     spec["catalogs"] = [next(cat for cat in spec["catalogs"] if cat["record_key"] == key) for key in keys]
-    spec["min_surveys"] = min(count, 3)
+    spec["min_catalogs"] = min(count, 3)
     before = copy.deepcopy(spec)
     sparse = {"object_id": "sparse", keys[0]: {}}
     full = {"object_id": "full", **dict.fromkeys(keys, {})}

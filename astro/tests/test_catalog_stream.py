@@ -22,7 +22,33 @@ from astropt3.data.packing import ObjectSequencer
 def test_installed_lsdb_has_required_multi_catalog_api():
     from lsdb.streams.catalog_streams import CrossMatchStream
 
-    assert "min_surveys" in signature(CrossMatchStream).parameters
+    assert "min_catalogs" in signature(CrossMatchStream).parameters
+
+
+@pytest.mark.parametrize("count", [1, 4])
+def test_real_lsdb_stream_decodes_local_catalogs(recipe, monkeypatch, count):
+    from lsdb.loaders.dataframe.from_dataframe import from_dataframe
+    from lsdb.streams.catalog_streams import CrossMatchStream, InfiniteStream
+
+    spec, config = _case(recipe, count)
+    spec["partitions_per_chunk"] = 1
+    catalogs = {}
+    for catalog in spec["catalogs"]:
+        payload = "image" if catalog["decoder"].endswith("image") else "spectrum"
+        row = {"ra": 10.0, "dec": 0.0, **_row({"catalogs": [catalog]})}
+        catalogs[f"hf://datasets/{catalog['repo']}"] = from_dataframe(
+            nested_frame([row], (payload,)), catalog_name=catalog["name"],
+        )
+    monkeypatch.setattr(streaming, "open_catalog", lambda url, **kwargs: catalogs[url])
+    monkeypatch.setattr(streaming, "Client", lambda cluster: nullcontext())
+    monkeypatch.setattr(streaming, "CrossMatchStream", CrossMatchStream)
+    monkeypatch.setattr(streaming, "InfiniteStream", InfiniteStream)
+    stream = streaming.CatalogStream(spec, config)
+    with closing(stream.draws(seed=0, rank=0, worker_id=0)) as draws:
+        _, records = next(draws)
+        record, = records
+    assert record["object_id"] == f"{spec['catalogs'][0]['name']}-1"
+    assert len(ObjectSequencer(config).build(record).values) == count
 
 
 @pytest.fixture
@@ -46,7 +72,7 @@ def _case(recipe, count=4):
             "scalar_columns": {"ebv": "dust_amount"},
         })
         modalities += deepcopy([m for m in DEFAULT_MODALITIES if m["name"] in ("Z", "ebv")])
-    spec["min_surveys"] = min(count, 3)
+    spec["min_catalogs"] = min(count, 3)
     return spec, AstroPT3Config(modalities=modalities)
 
 
@@ -109,8 +135,8 @@ def offline(monkeypatch):
         return url
 
     class FakeStream:
-        def __init__(self, anchor, *rights, min_surveys=None, **kwargs):
-            self.anchor, self.rights, self.minimum = anchor, rights, min_surveys
+        def __init__(self, anchor, *rights, min_catalogs=None, **kwargs):
+            self.anchor, self.rights, self.minimum = anchor, rights, min_catalogs
             self.kwargs = kwargs
             self.npartitions = state.npartitions
             state.streams.append(self)
@@ -154,9 +180,8 @@ def test_catalog_count_projection_and_finite_draws(recipe, offline, count):
     assert opened.kwargs == {
         "client": "client", "seed": loader.consumer_seed(42, 2, 3, 0),
         "partitions_per_chunk": spec["partitions_per_chunk"],
-        **({"count_fraction_threshold": spec["count_fraction_threshold"]} if count > 1 else {}),
     }
-    assert opened.minimum == (spec["min_surveys"] if count > 1 else None)
+    assert opened.minimum == (spec["min_catalogs"] if count > 1 else None)
     assert list(opened.rights) == [
         {"other": f"hf://datasets/{c['repo']}", "how": spec["how"],
          "suffixes": ("", f"_{c['name']}"), "radius_arcsec": spec["radius_arcsec"]}
@@ -378,10 +403,10 @@ def test_redshift_requires_quality_from_same_catalog(separate_flag):
 
 
 @pytest.mark.parametrize("key,value", [
-    ("min_surveys", 0), ("min_surveys", 5), ("min_surveys", True),
+    ("min_catalogs", 0), ("min_catalogs", 5), ("min_catalogs", True),
     ("how", "inner"), ("radius_arcsec", 0), ("radius_arcsec", np.nan),
-    ("count_fraction_threshold", -0.1), ("count_fraction_threshold", 1.1),
-    ("count_fraction_threshold", np.inf), ("partitions_per_chunk", 0),
+    ("radius_arcsec", np.inf), ("radius_arcsec", True), ("radius_arcsec", "1"),
+    ("partitions_per_chunk", 0),
     ("partitions_per_chunk", True), ("worker_memory_limit", ""),
     ("worker_memory_limit", 123),
 ])
@@ -389,6 +414,17 @@ def test_invalid_stream_bounds(recipe, offline, key, value):
     spec, config = _case(recipe)
     spec[key] = value
     with pytest.raises(ValueError):
+        streaming.CatalogStream(spec, config)
+    assert not offline.opened
+
+
+@pytest.mark.parametrize("key,value", [
+    ("min_surveys", 1), ("count_fraction_threshold", 0.0), ("count_fraction_threshold", 0.5),
+])
+def test_retired_stream_settings_are_rejected(recipe, offline, key, value):
+    spec, config = _case(recipe)
+    spec[key] = value
+    with pytest.raises(ValueError, match="unknown settings"):
         streaming.CatalogStream(spec, config)
     assert not offline.opened
 

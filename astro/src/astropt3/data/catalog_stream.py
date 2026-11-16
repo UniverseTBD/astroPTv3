@@ -28,7 +28,7 @@ _PROFILES = {
     "scalars": (None, (), "scalar"),
 }
 _DEFAULTS = {
-    "how": "outer", "radius_arcsec": 1.0, "count_fraction_threshold": 0.0,
+    "how": "outer", "radius_arcsec": 1.0,
     "partitions_per_chunk": 4, "worker_memory_limit": "auto",
 }
 
@@ -41,12 +41,12 @@ class CatalogStream:
     """
 
     def __init__(self, spec: dict, config):
-        if not isinstance(spec, dict) or set(spec) - {*_DEFAULTS, "catalogs", "min_surveys"}:
+        if not isinstance(spec, dict) or set(spec) - {*_DEFAULTS, "catalogs", "min_catalogs"}:
             raise ValueError("catalog_stream has unknown settings or is not a mapping")
         catalogs = spec.get("catalogs")
         if not isinstance(catalogs, list) or not catalogs:
             raise ValueError("catalog_stream.catalogs must be a nonempty list")
-        self.spec = {**_DEFAULTS, "min_surveys": 1, **copy.deepcopy(spec)}
+        self.spec = {**_DEFAULTS, "min_catalogs": 1, **copy.deepcopy(spec)}
         self.catalogs = self.spec["catalogs"]
         self.registry = config.modality_registry()
         self.nested: dict[str, tuple[str, ...]] = {}
@@ -106,17 +106,14 @@ class CatalogStream:
                 outputs[key][2] != outputs["ZWARN"][2] for key in modality.record_keys
             )):
                 raise ValueError("Z requires an explicit ZWARN scalar column from the same catalog")
-        minimum = self.spec["min_surveys"]
+        minimum = self.spec["min_catalogs"]
         if type(minimum) is not int or not 1 <= minimum <= len(self.catalogs):
-            raise ValueError("min_surveys must be an integer in 1..number of catalogs")
+            raise ValueError("min_catalogs must be an integer in 1..number of catalogs")
         if self.spec["how"] not in ("left", "outer"):
             raise ValueError("catalog_stream.how must be left or outer")
-        for key in ("radius_arcsec", "count_fraction_threshold"):
-            value = self.spec[key]
-            if type(value) not in (int, float) or not math.isfinite(value):
-                raise ValueError(f"{key} must be a finite number")
-        if self.spec["radius_arcsec"] <= 0 or not 0 <= self.spec["count_fraction_threshold"] <= 1:
-            raise ValueError("radius must be positive and count_fraction_threshold in [0, 1]")
+        radius = self.spec["radius_arcsec"]
+        if type(radius) not in (int, float) or not math.isfinite(radius) or radius <= 0:
+            raise ValueError("radius_arcsec must be a positive finite number")
         if type(self.spec["partitions_per_chunk"]) is not int or self.spec["partitions_per_chunk"] < 1:
             raise ValueError("partitions_per_chunk must be a positive integer")
         if not isinstance(self.spec["worker_memory_limit"], str) or not self.spec["worker_memory_limit"]:
@@ -185,8 +182,8 @@ class CatalogStream:
 
     def draws(self, *, seed, rank, worker_id):
         """Yield (epoch, finite records) with bounded transport retries, no cursor."""
-        if len(self.catalogs) > 1 and "min_surveys" not in inspect.signature(CrossMatchStream).parameters:
-            raise RuntimeError("configured catalog streams require LSDB's multi-catalog/min_surveys API")
+        if len(self.catalogs) > 1 and "min_catalogs" not in inspect.signature(CrossMatchStream).parameters:
+            raise RuntimeError("configured catalog streams require LSDB's multi-catalog/min_catalogs API")
         telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in self.catalogs})
         failures = generation = draw = 0
         while True:
@@ -220,14 +217,13 @@ class CatalogStream:
                                  "radius_arcsec": self.spec["radius_arcsec"]}
                                 for catalog, spec in zip(catalogs[1:], self.catalogs[1:], strict=True)
                             ],
-                            min_surveys=self.spec["min_surveys"],
-                            count_fraction_threshold=self.spec["count_fraction_threshold"], **kwargs,
+                            min_catalogs=self.spec["min_catalogs"], **kwargs,
                         )
                     if not stream.npartitions:
                         raise ValueError("The selected catalog footprint contains no partitions")
                     print(f"[catalog-stream] worker={worker_id} pixels={stream.npartitions} "
                           f"generation={generation} catalogs={len(catalogs)} "
-                          f"min_surveys={self.spec['min_surveys']}", flush=True)
+                          f"min_catalogs={self.spec['min_catalogs']}", flush=True)
                     for frame in stream:
                         failures = 0
                         epoch = draw

@@ -70,8 +70,9 @@ See §9 for catalog/modality mappings.
 
 `catalog_stream` is required. Remove `crossmatch_desi` (even `false`) from old
 recipes and supply explicit catalogs. Matching and footprint selection follow
-[LSDB PR #1584](https://github.com/astronomy-commons/lsdb/pull/1584), pinned by
-`uv.lock`; the local crossmatcher and legacy loader are removed. Coverage and
+merged LSDB main, pinned by `uv.lock`; the local crossmatcher and legacy
+loader are removed. Rename `min_surveys` to `min_catalogs` and remove
+`count_fraction_threshold` from older YAMLs; both old settings are rejected. Coverage and
 boundary matches can differ from old runs. Calibration and quality gates remain.
 The retired knobs (`data_root`, `match_index`, synthetic fractions,
 `object_id_log`) are not supported.
@@ -117,7 +118,7 @@ bash astro/scripts/run_train.bash GPU_INDEX 2 --config-file my-recipe.yaml
 This launches `astro/scripts/train.py`. Set `ASTROPT3_ENV` to the GPU venv;
 the local launcher defaults to `.venv-astropt3` in the repository. It uses the
 installed LSDB/HATS versions, which must match `astro/uv.lock` and support the
-multi-catalog/min_surveys API. It no longer injects a sibling LSDB checkout;
+multi-catalog/min_catalogs API. It no longer injects a sibling LSDB checkout;
 older GPU environments need their dependencies updated before launching.
 
 Multi-GPU on one node uses the same YAML-configured loader:
@@ -276,8 +277,10 @@ Decoders are `legacy_image`, `hsc_image`, `desi_spectrum`, `sdss_spectrum`, and
 `scalars`; new calibrations require code. Scalars need registered transforms;
 DESI `Z` needs valid `ZWARN` from the same catalog. Missing modalities are
 omitted; rows with none are dropped. The first catalog anchors the join;
-right-only rows stay separate, not joined to one another. Adjust `min_surveys`
-to `1..number of catalogs`, and size workers/memory for the machine.
+right-only rows stay separate, not joined to one another. Adjust `min_catalogs`
+to `1..number of catalogs`: this selects sky covered by that many catalogs,
+not a minimum number of matched modalities per record. Size workers/memory
+for the machine.
 
 ### Echoing, accounting, and resume
 

@@ -47,7 +47,7 @@ TINY_CATALOG_STREAM = {
         },
     ],
     "how": "outer",
-    "min_surveys": 1,
+    "min_catalogs": 1,
 }
 
 
@@ -121,7 +121,7 @@ def make_record(
         # flattened here too — same keys the real adapter writes
         **{
             f"psf_fwhm_{band}": float(seeing * factor)
-            for band, factor in zip(IMAGE_BANDS, (1.10, 1.00, 0.78))
+            for band, factor in zip(IMAGE_BANDS, (1.10, 1.00, 0.78), strict=True)
         },
     }
 

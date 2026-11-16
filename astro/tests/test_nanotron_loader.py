@@ -55,7 +55,7 @@ def fake_lsdb(monkeypatch):
     class FakeStream:
         npartitions = 3
 
-        def __init__(self, anchor, *rights, min_surveys=None, **kwargs):
+        def __init__(self, anchor, *rights, min_catalogs=None, **kwargs):
             self.seed = kwargs["seed"]
             state.streams.append(self)
 
