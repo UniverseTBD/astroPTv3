@@ -239,7 +239,7 @@ def test_recipe_and_shared_builder(recipe, offline):
     assert len(recipe["model"]["model_config"]["modalities"]) == 4
     batches = loader.build_astropt3_dataloader(
         SimpleNamespace(**dataset_args), SimpleNamespace(**recipe["model"]["model_config"]),
-        micro_batch_size=1, sequence_length=1024, dp_rank=0, dp_size=1, num_workers=0,
+        micro_batch_size=1, sequence_length=1024, dp_rank=0, num_workers=0,
     )
     expected = streaming.CatalogStream(dataset_args["catalog_stream"], batches.dataset.config).spec
     assert batches.dataset.catalog_stream.spec == expected

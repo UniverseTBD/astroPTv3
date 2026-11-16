@@ -309,21 +309,18 @@ def build_astropt3_dataloader(
     micro_batch_size: int,
     sequence_length: int,
     dp_rank: int,
-    dp_size: int,
     num_workers: int = 0,
     seed: int = 0,
     multiprocessing_context: str | None = None,
     batch_accumulation_per_replica: int = 1,
-    world_size: int = 1,
 ) -> Any:
     """Build worker-side draw echoing, then main-process telemetry/device inputs."""
     echo_factor = getattr(dataset_args, "echo_factor", 1)
     validate_echo_factor(echo_factor)
-    if echo_factor > 1:
-        if batch_accumulation_per_replica != 1:
-            raise ValueError("echo-factor > 1 requires batch_accumulation_per_replica=1")
-        if world_size != 1 or dp_size != 1:
-            raise ValueError("echo-factor > 1 currently requires world_size=dp_size=1")
+    # Each DP rank echoes its own draws (rank-seeded shuffle), so DP needs no coordination;
+    # accumulation would put two exposures of one batch into a single update.
+    if echo_factor > 1 and batch_accumulation_per_replica != 1:
+        raise ValueError("echo-factor > 1 requires batch_accumulation_per_replica=1")
     config = hf_config_from_modalities(
         model_config.modalities,
         # Fields absent from a partial model_config keep the HF config defaults.

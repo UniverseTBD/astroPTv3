@@ -289,19 +289,32 @@ def test_invalid_factors_fail_before_data_open(tiny_config, factor):
             tiny_config, 1, 200, catalog_stream=TINY_CATALOG_STREAM, echo_factor=factor
         )
     with pytest.raises(ValueError, match="positive integer"):
-        build_astropt3_dataloader(SimpleNamespace(echo_factor=factor), object(), 1, 200, 0, 1)
+        build_astropt3_dataloader(SimpleNamespace(echo_factor=factor), object(), 1, 200, 0)
 
 
-@pytest.mark.parametrize("topology", [
-    {"dp_size": 2}, {"world_size": 2}, {"batch_accumulation_per_replica": 2},
-])
-def test_unsupported_topology_rejected_before_constructing_dataset(monkeypatch, topology):
+def test_accumulation_rejected_before_constructing_dataset(monkeypatch):
     monkeypatch.setattr(nanotron_loader, "PackedMicroBatches", _no_io)
     with pytest.raises(ValueError, match="echo-factor.*requires"):
         build_astropt3_dataloader(
-            SimpleNamespace(echo_factor=3), object(), 1, 200, 0,
-            **{"dp_size": 1, **topology},
+            SimpleNamespace(echo_factor=3), object(), 1, 200, 0, batch_accumulation_per_replica=2,
         )
+
+
+def test_dp_ranks_echo_their_draws_independently(tiny_config, records, monkeypatch):
+    monkeypatch.setattr(torch.utils.data, "get_worker_info", lambda: None)
+    exposures = {}
+    for rank in (0, 1):
+        dataset = FiniteDraws(
+            tiny_config, 1, 200, catalog_stream=TINY_CATALOG_STREAM,
+            draws=[records], echo_factor=3, seed=7, rank=rank,
+        )
+        delivered = list(dataset)
+        # payload identity: echoes reorder spans in input_ids but never touch values
+        exposures[rank] = [float(batch["images_values"].sum()) for batch in delivered]
+        assert len(set(exposures[rank])) == len(delivered) // 3 > 1
+        assert set(Counter(exposures[rank]).values()) == {3}  # each batch exactly N times per rank
+    assert sorted(exposures[0]) == sorted(exposures[1])
+    assert exposures[0] != exposures[1]  # rank-seeded shuffles: no cross-rank coordination needed
 
 
 @pytest.mark.parametrize("factor", [None, 1, 3])
@@ -310,8 +323,7 @@ def test_builder_wires_echo_factor_and_preserves_factor_one_topologies(tiny_conf
     if factor is not None:
         args.echo_factor = factor
     loader = build_astropt3_dataloader(
-        args, tiny_config, 1, 200, 0, 1 if factor == 3 else 2,
-        world_size=1 if factor == 3 else 4,
+        args, tiny_config, 1, 200, 0,
         batch_accumulation_per_replica=1 if factor == 3 else 2,
     )
     assert loader.dataset.echo_factor == (factor or 1)

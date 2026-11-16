@@ -63,7 +63,8 @@ recipes `astropt3-{1m,10m}.yaml`. Every ladder rung trains the same four
 modalities from the same catalog streams; rungs differ in model size, cluster
 topology, batch and LR. The convenience launcher's default is
 **`astropt3-70m.yaml`**, run at DP=1 (TP=1 rungs only); pass an echo factor to
-`run_train.bash` to echo (the ladder YAMLs use 1, as echoing requires DP=1).
+`run_train.bash` to echo, or set `echo_factor` in the YAML (the ladder YAMLs
+use 1).
 Model, catalog list, join policy, worker count and schedule are explicit YAML,
 not injected by the script (see §9).
 
@@ -291,7 +292,9 @@ CLI > checkpoint factor on resume > recipe/default. It is saved in checkpoint YA
 - **Factor N > 1:** each worker packs and caches one finite LSDB/HEALPix draw,
   including its padded tail, then shuffles exactly N references to each batch.
   Every exposure is a separate optimizer update, including single-modality
-  batches. Requires `batch_accumulation_per_replica=1` and `world_size=dp_size=1`.
+  batches. Requires `batch_accumulation_per_replica=1`. Under DP each rank echoes
+  its own draws with a rank-seeded shuffle; telemetry records echo counters per
+  rank (`steps.rankN.jsonl`).
 - Later exposures reshuffle whole modality spans with private RNG; orders can
   repeat. Targets, positions, patch order, model noise, and schedules stay unchanged.
 - The cache adds **one packed draw per worker**, on top of normal prefetch, and

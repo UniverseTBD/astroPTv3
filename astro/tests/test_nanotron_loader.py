@@ -326,7 +326,7 @@ def test_missing_or_invalid_catalogs_are_rejected(tiny_config, spec):
 def test_builder_rejects_missing_catalogs_and_old_selection(tiny_config):
     for args in (SimpleNamespace(), SimpleNamespace(crossmatch_desi=True)):
         with pytest.raises(ValueError, match="catalog_stream"):
-            build_astropt3_dataloader(args, tiny_config, MBS, SEQ_LEN, 0, 1)
+            build_astropt3_dataloader(args, tiny_config, MBS, SEQ_LEN, 0)
 
 
 @pytest.mark.parametrize("obsolete", [

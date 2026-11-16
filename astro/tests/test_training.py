@@ -51,8 +51,7 @@ def test_all_recipes_use_configured_catalog_loader(recipe):
         assert "crossmatch_desi" not in data["dataset"]
         batches = run.loader.build_astropt3_dataloader(
             SimpleNamespace(**data["dataset"]), SimpleNamespace(**config["model"]["model_config"]),
-            tokens["micro_batch_size"], tokens["sequence_length"], 0, parallelism["dp"],
-            world_size=parallelism["dp"] * parallelism["tp"],
+            tokens["micro_batch_size"], tokens["sequence_length"], 0,
             batch_accumulation_per_replica=tokens["batch_accumulation_per_replica"],
         )
         assert isinstance(batches.dataset.catalog_stream, catalog_stream.CatalogStream)
@@ -288,7 +287,6 @@ def test_spawned_worker_includes_hsc(monkeypatch, tmp_path, default_recipe, fact
         micro_batch_size=1,
         sequence_length=512,
         dp_rank=0,
-        dp_size=1,
         num_workers=1,
         multiprocessing_context="spawn",
     )
@@ -1040,7 +1038,7 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path
 
         def get_dataloader(trainer):
             return {"stage": run.loader.build_astropt3_dataloader(
-                trainer.dataset_args, trainer.model_config, 1, 512, 0, 1,
+                trainer.dataset_args, trainer.model_config, 1, 512, 0,
                 num_workers=0, multiprocessing_context=None,
             )}
 
