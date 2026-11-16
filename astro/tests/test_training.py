@@ -66,6 +66,12 @@ def test_training_rejects_retired_selection(tmp_path, default_recipe, crossmatch
         run.prepare_config(default_recipe, tmp_path / "run")
 
 
+def test_training_rejects_tensor_parallel_recipes(tmp_path, default_recipe):
+    default_recipe["parallelism"]["tp"] = 2
+    with pytest.raises(ValueError, match="TP=PP=CP=EP=1"):
+        run.prepare_config(default_recipe, tmp_path / "run")
+
+
 def test_training_config_keeps_batch_shape_and_checkpoint_schedule(tmp_path, default_recipe):
     baseline = default_recipe
     before = copy.deepcopy(baseline)
@@ -73,7 +79,8 @@ def test_training_config_keeps_batch_shape_and_checkpoint_schedule(tmp_path, def
         baseline, tmp_path / "new-run", tmp_path / "old-checkpoints"
     )
     assert baseline == before
-    assert config["tokens"]["train_steps"] == 30_000
+    assert config["tokens"]["train_steps"] == 10_000
+    assert config["parallelism"]["dp"] == 1 and baseline["parallelism"]["dp"] == 32
     assert config["tokens"]["micro_batch_size"] == 16
     assert config["tokens"]["sequence_length"] == 4096
     assert config["optimizer"] == baseline["optimizer"]
@@ -99,8 +106,8 @@ def test_training_config_keeps_batch_shape_and_checkpoint_schedule(tmp_path, def
     ids = [token for modality in hf.modalities for token in modality["token_ids"]]
     assert len(ids) == len(set(ids))
     dataset = config["data_stages"][0]["data"]["dataset"]
-    assert dataset["echo_factor"] == 4
-    assert config["data_stages"][0]["data"]["num_loading_workers"] == 4
+    assert dataset["echo_factor"] == 1
+    assert config["data_stages"][0]["data"]["num_loading_workers"] == 8
     assert dataset["catalog_stream"]["min_catalogs"] == 3
     catalogs = {cat["name"]: cat["repo"] for cat in dataset["catalog_stream"]["catalogs"]}
     assert set(catalogs) == {"legacy", "sdss", "desi", "hsc"}
@@ -135,7 +142,7 @@ def test_echo_config_has_one_saved_source_of_truth(tmp_path, default_recipe, con
     baseline = default_recipe
     dataset = baseline["data_stages"][0]["data"]["dataset"]
     if configured is None:
-        dataset.pop("echo_factor")
+        dataset.pop("echo_factor", None)
     else:
         dataset["echo_factor"] = configured
     before = copy.deepcopy(baseline)
@@ -164,7 +171,7 @@ def test_wandb_config_keeps_training_settings_without_local_provenance(tmp_path,
     payload = run.wandb_config(config, 1)
     assert config == before
     assert set(payload) == {"training", "stream", "max_steps", "echo_factor", "echo_order", "throughput_policy"}
-    assert payload["echo_factor"] == 4
+    assert payload["echo_factor"] == 1
     configured = run.prepare_config(baseline, tmp_path / "configured", echo_factor=3)
     assert run.wandb_config(configured, 1)["echo_factor"] == 3
     assert configured["data_stages"][0]["data"]["dataset"]["echo_factor"] == 3
@@ -175,7 +182,7 @@ def test_wandb_config_keeps_training_settings_without_local_provenance(tmp_path,
         key: value for key, value in config["model"].items() if key != "init_method"
     }
     assert payload["training"]["optimizer"] == config["optimizer"]
-    assert payload["training"]["tokens"]["train_steps"] == 30_000
+    assert payload["training"]["tokens"]["train_steps"] == 10_000
     assert payload["training"]["seed"] == config["general"]["seed"]
     assert payload["training"]["checkpoints"]["checkpoint_interval"] == 1000
     assert payload["stream"]["min_catalogs"] == 3
@@ -979,7 +986,7 @@ def test_python_cli_rejects_bad_echo_before_creating_output(monkeypatch, tmp_pat
 def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path, default_recipe, custom_config):
     source_record = make_record(1, image_only_fraction=0.0)
     source_record.update(spectrum_sdss=sdss_spectrum(), hsc_image=hsc_image())
-    config_args = []
+    default_recipe["data_stages"][0]["data"]["dataset"]["echo_factor"] = 4  # a configured echo recipe
     if custom_config:
         modalities = default_recipe["model"]["model_config"]["modalities"][:2]
         for index, name in enumerate(("legacy_patches", "desi_flux")):
@@ -987,9 +994,9 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(monkeypatch, tmp_path
         default_recipe["model"]["model_config"]["modalities"] = modalities
         default_recipe["tokens"]["train_steps"] = 123
         default_recipe["data_stages"][0]["data"]["num_loading_workers"] = 0
-        config_file = tmp_path / "custom.yaml"
-        config_file.write_text(yaml.safe_dump(default_recipe))
-        config_args = ["--config-file", str(config_file)]
+    config_file = tmp_path / "custom.yaml"
+    config_file.write_text(yaml.safe_dump(default_recipe))
+    config_args = ["--config-file", str(config_file)]
     names = [modality["name"] for modality in default_recipe["model"]["model_config"]["modalities"]]
     resume = tmp_path / "checkpoints"
     write_resume(resume, default_recipe["model"]["model_config"], echo_factor=3, step=2)
@@ -1110,6 +1117,7 @@ def test_python_cli_forwards_echo_and_checks_accumulation_before_outputs(monkeyp
 
     def prepare(baseline, output, resume, echo_factor):
         assert echo_factor == expected
+        baseline["data_stages"][0]["data"]["dataset"]["echo_factor"] = 4  # a configured echo recipe
         baseline["tokens"]["batch_accumulation_per_replica"] = 2
         return original(baseline, output, resume, echo_factor)
 

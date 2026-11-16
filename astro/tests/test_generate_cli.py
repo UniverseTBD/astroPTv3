@@ -15,7 +15,7 @@ import generate as cli  # pyright: ignore[reportMissingImports] -- scripts added
 
 @pytest.fixture
 def recipe():
-    path = Path(__file__).resolve().parents[1] / "configs/nanotron/astropt3-70m-four-modal.yaml"
+    path = Path(__file__).resolve().parents[1] / "configs/nanotron/astropt3-70m.yaml"
     return yaml.safe_load(path.read_text())
 
 

@@ -1,7 +1,7 @@
 """Train YAML-configured MMU modalities on one GPU.
 
---config-file selects a complete Nanotron YAML; the default is the four-modality,
-echo-4 recipe. --output must be a new directory. --max-steps bounds a startup
+--config-file selects a complete Nanotron YAML; the default is the 70M recipe.
+Ladder recipes run at DP=1 here (same per-GPU workload, smaller global batch). --output must be a new directory. --max-steps bounds a startup
 check without changing the configured schedule. --resume-from restores model,
 optimizer, scheduler and RNG, not a data cursor; use the same model recipe.
 --echo-factor overrides the checkpoint setting on resume, then the YAML default.
@@ -29,7 +29,7 @@ from astropt3.data.catalog_stream import CatalogStream
 from astropt3.data.echo import validate_echo_factor
 
 REPO = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG = REPO / "astro/configs/nanotron/astropt3-70m-four-modal.yaml"
+DEFAULT_CONFIG = REPO / "astro/configs/nanotron/astropt3-70m.yaml"
 
 
 def validate_resume(resume_from: Path, model_config: dict) -> int:
@@ -57,9 +57,10 @@ def prepare_config(
     config = copy.deepcopy(baseline)
     if len(config["data_stages"]) != 1:
         raise ValueError("this runner requires exactly one data stage")
-    for key in ("dp", "tp", "pp", "context_parallel_size", "expert_parallel_size"):
+    for key in ("tp", "pp", "context_parallel_size", "expert_parallel_size"):
         if config["parallelism"].get(key, 1) != 1:
-            raise ValueError("this runner requires single-GPU parallelism; use nanotron/run_train.py otherwise")
+            raise ValueError("this runner requires TP=PP=CP=EP=1; use nanotron/run_train.py otherwise")
+    config["parallelism"]["dp"] = 1  # one GPU: the recipe's per-GPU workload, without its DP replicas
     target = config["tokens"]["train_steps"]
     if type(target) is not int or target < 1:
         raise ValueError("train_steps must be a positive integer")

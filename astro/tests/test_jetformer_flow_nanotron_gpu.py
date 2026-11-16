@@ -26,7 +26,7 @@ def _trainer(tmp_path, resume=None):
     from nanotron.trainer import DistributedTrainer
 
     config = yaml.safe_load((ASTRO_DIR / "tests/fixtures/astropt3-test-tiny.yaml").read_text())
-    pilot = yaml.safe_load((ASTRO_DIR / "configs/nanotron/astropt3-70m-four-modal.yaml").read_text())
+    pilot = yaml.safe_load((ASTRO_DIR / "configs/nanotron/astropt3-70m.yaml").read_text())
     config["model"]["model_config"].update(
         modalities=pilot["model"]["model_config"]["modalities"],
         jetformer_flow_steps=2,

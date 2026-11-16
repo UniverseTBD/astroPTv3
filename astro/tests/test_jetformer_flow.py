@@ -233,37 +233,18 @@ def test_flow_width_follows_trunk_rule(recipe):
     assert (config["jetformer_flow_steps"], config["jetformer_flow_depth"], config["jetformer_flow_heads"]) == (8, 4, 8)
 
 
-def test_410m_four_modal_recipe_differs_from_70m_only_in_backbone_and_names():
-    name = "astropt3-410m-four-modal"
-    baseline = load_recipe("astropt3-70m-four-modal.yaml")
-    recipe = load_recipe(f"{name}.yaml")
-    model = recipe["model"]["model_config"]
-    assert model.pop("jetformer_flow_hidden") == 256
-    baseline["model"]["model_config"].pop("jetformer_flow_hidden")
-    backbone = {
-        "hidden_size": 1024, "num_hidden_layers": 27, "num_attention_heads": 16,
-        "num_key_value_heads": 4, "intermediate_size": 4096,
-    }
-    for field, value in backbone.items():
-        assert model[field] == value
-        model[field] = baseline["model"]["model_config"][field]
-    schedule = recipe["optimizer"]["learning_rate_scheduler"]
-    assert (schedule["learning_rate"], schedule["min_decay_lr"]) == (3e-4, 3e-5)
-    base = baseline["optimizer"]["learning_rate_scheduler"]
-    schedule["learning_rate"], schedule["min_decay_lr"] = base["learning_rate"], base["min_decay_lr"]
-    assert recipe["parallelism"]["recompute_layer"] is True  # larger trunks recompute layers to fit one GPU
-    recipe["parallelism"]["recompute_layer"] = baseline["parallelism"]["recompute_layer"]
-    assert recipe["general"].pop("run") == name
-    assert recipe["checkpoints"].pop("checkpoints_path").endswith(name)
-    baseline["general"].pop("run")
-    baseline["checkpoints"].pop("checkpoints_path")
-    # only the header comment differs; compare parsed YAML
-    assert recipe == baseline
+@pytest.mark.parametrize("recipe", sorted(RECIPES.glob("*.yaml")), ids=lambda p: p.stem)
+def test_every_recipe_trains_the_same_modalities_and_catalogs(recipe):
+    baseline = load_recipe("astropt3-70m.yaml")
+    config = load_recipe(recipe.name)
+    assert config["model"]["model_config"]["modalities"] == baseline["model"]["model_config"]["modalities"]
+    stream = config["data_stages"][0]["data"]["dataset"]["catalog_stream"]
+    assert stream == baseline["data_stages"][0]["data"]["dataset"]["catalog_stream"]
 
 
 @pytest.mark.parametrize("name,flow", [
-    ("astropt3-70m-four-modal", 27_483_136),
-    ("astropt3-410m-four-modal", 105_289_728),
+    ("astropt3-70m", 27_483_136),
+    ("astropt3-410m", 105_289_728),
 ])
 def test_recipe_flow_parameter_counts(name, flow):
     config = load_recipe(f"{name}.yaml")["model"]["model_config"]

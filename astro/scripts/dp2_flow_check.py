@@ -30,7 +30,7 @@ STEPS = 3
 
 def main():
     config = yaml.safe_load((ASTRO_DIR / "tests/fixtures/astropt3-test-tiny.yaml").read_text())
-    recipe = yaml.safe_load((ASTRO_DIR / "configs/nanotron/astropt3-70m-four-modal.yaml").read_text())
+    recipe = yaml.safe_load((ASTRO_DIR / "configs/nanotron/astropt3-70m.yaml").read_text())
     config["model"]["model_config"].update(modalities=recipe["model"]["model_config"]["modalities"])
     config["data_stages"] = recipe["data_stages"]  # parsed only: streams are never opened
     config["parallelism"]["dp"] = 2

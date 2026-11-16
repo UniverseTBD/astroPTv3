@@ -57,16 +57,15 @@ errors fail immediately.
 
 ## 3. Configs
 
-Full nanotron run configs live in `astro/configs/nanotron/`. The convenience
-launcher's default is **`astropt3-70m-four-modal.yaml`**, with four modalities
-and echo factor **4**. Its model, catalog list, join policy, worker count, and
-30k-update schedule are explicit YAML, not injected by the script (see §9).
-
-Every supplied recipe uses `data_stages[].data.dataset.catalog_stream` and
-`model.model_config.modalities`. The size-ladder recipes retain their DESI +
-LegacySurvey selection, with DESI as anchor and echo factor 1. Both launchers
-use the same configured loader; N-modal training does not require LegacySurvey.
-See §9 for catalog/modality mappings.
+Full nanotron run configs live in `astro/configs/nanotron/`: the Pythia ladder
+`astropt3-{70m,160m,410m,1b,1p4b,2p8b,6p9b,12b}.yaml` plus single-GPU smoke
+recipes `astropt3-{1m,10m}.yaml`. Every ladder rung trains the same four
+modalities from the same catalog streams; rungs differ in model size, cluster
+topology, batch and LR. The convenience launcher's default is
+**`astropt3-70m.yaml`**, run at DP=1 (TP=1 rungs only); pass an echo factor to
+`run_train.bash` to echo (the ladder YAMLs use 1, as echoing requires DP=1).
+Model, catalog list, join policy, worker count and schedule are explicit YAML,
+not injected by the script (see §9).
 
 `catalog_stream` is required. Remove `crossmatch_desi` (even `false`) from old
 recipes and supply explicit catalogs. Matching and footprint selection follow
@@ -222,8 +221,8 @@ trackers are disabled and the overrides recorded. Explicit local
 initialization/resume is honoured, and an unresolvable resume fails rather than
 starting from random weights. Supported: one AstroPT streaming stage, PP=CP=EP=1.
 `--bandwidth-cap` and `--cache-state` only record context; nothing is throttled
-or flushed. On one GPU, `astropt3-70m-dp1.yaml` runs the 70M recipe's per-GPU
-workload (DP=1; same model, batch shape and loader workers).
+or flushed. On one GPU, a TP=1 recipe runs its per-GPU workload at DP=1 (same
+model, batch shape and loader workers; recorded as an override).
 
 Outputs: `baseline.yaml`/`effective.yaml`/`resolved.yaml`, `run.json` (window
 and overrides), `rankN.json` (status, topology, host, GPU/CPU/RAM, software,
@@ -266,7 +265,7 @@ checks without changing the configured learning-rate schedule.
 
 ### Catalogs and modalities
 
-Copy the [default YAML](../configs/nanotron/astropt3-70m-four-modal.yaml).
+Copy the [default YAML](../configs/nanotron/astropt3-70m.yaml).
 `model.model_config.modalities` and
 `data_stages[0].data.dataset.catalog_stream.catalogs` are independent lists;
 modality `record_keys` match catalog outputs. A catalog supplies `record_key`

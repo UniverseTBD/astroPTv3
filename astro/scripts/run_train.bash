@@ -27,7 +27,7 @@ fi
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 WORKSPACE=$(dirname -- "$REPO_ROOT")
 PYTHON="${ASTROPT3_ENV:-$REPO_ROOT/.venv-astropt3}/bin/python"
-CONFIG_FILE=${CONFIG_FILE:-"$REPO_ROOT/astro/configs/nanotron/astropt3-70m-four-modal.yaml"}
+CONFIG_FILE=${CONFIG_FILE:-"$REPO_ROOT/astro/configs/nanotron/astropt3-70m.yaml"}
 if [[ ! -x "$PYTHON" || ! -f "$CONFIG_FILE" ]]; then
     echo "Requires $PYTHON and config $CONFIG_FILE" >&2
     exit 1

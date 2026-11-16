@@ -1,9 +1,8 @@
-# Default single-GPU training recipe: four modalities, four shuffled exposures.
-# Match the independent model list and catalog outputs via record_keys.
-# Memory/batch settings describe this recipe, not a guarantee for every machine.
+# ~1M (0.95M body) single-GPU smoke twin of astropt3-70m.yaml: hidden 128 (GQA 4:1, head dim 32),
+# Pythia-14M LR (= 70M LR); flow width follows the rule, so flows (2.2M) outweigh the body.
 general:
   project: astropt3
-  run: astropt3-70m-four-modal
+  run: astropt3-1m
   seed: 42
   step: null
   consumed_train_samples: null
@@ -23,7 +22,7 @@ model:
     is_astropt3_config: true
     # JetFormer flow; width = min(hidden_size // 4, 512) (docs/jetformer-flow.md)
     jetformer_flow_steps: 8
-    jetformer_flow_hidden: 128
+    jetformer_flow_hidden: 32
     jetformer_flow_depth: 4
     jetformer_flow_heads: 8
     modalities:
@@ -68,11 +67,11 @@ model:
         pos_input_size: 1
         max_positions: 144
     spiral: true
-    hidden_size: 512
-    num_hidden_layers: 23
-    num_attention_heads: 8
-    num_key_value_heads: 2
-    intermediate_size: 1536
+    hidden_size: 128
+    num_hidden_layers: 5
+    num_attention_heads: 4
+    num_key_value_heads: 1
+    intermediate_size: 384
     max_position_embeddings: 4096
     rope_theta: 100000.0
     no_rope_layer: 4
@@ -171,7 +170,7 @@ tokens:
   limit_val_batches: 0
   limit_test_batches: 0
 checkpoints:
-  checkpoints_path: ../astroPTv3_checkpoints/astropt3-70m-four-modal
+  checkpoints_path: ../astroPTv3_checkpoints/astropt3-1m
   resume_checkpoint_path: null
   checkpoint_schedule: pythia
   checkpoint_interval: 1000

@@ -35,7 +35,9 @@ def prepare_config(baseline: dict, output: Path, world_size: int,
     parallel = baseline["parallelism"]
     if any(parallel.get(key, 1) != 1 for key in ("pp", "context_parallel_size", "expert_parallel_size")):
         raise ValueError("AstroPT benchmarking requires PP=CP=EP=1")
-    if parallel.get("dp", 1) * parallel.get("tp", 1) != world_size:
+    # One GPU benchmarks a TP=1 recipe's per-GPU workload at DP=1.
+    single_gpu = world_size == 1 and parallel.get("tp", 1) == 1
+    if not single_gpu and parallel.get("dp", 1) * parallel.get("tp", 1) != world_size:
         raise ValueError("launch WORLD_SIZE must equal YAML dp * tp")
     if not baseline["model"]["model_config"].get("is_astropt3_config"):
         raise ValueError("benchmark requires an AstroPT3 model")
@@ -63,6 +65,7 @@ def prepare_config(baseline: dict, output: Path, world_size: int,
         "tokens.limit_val_batches": 0,
         "tokens.limit_test_batches": 0,
         "general.benchmark_csv_path": None,
+        **({"parallelism.dp": 1} if single_gpu else {}),
     }
     for dotted, value in overrides.items():
         keys = dotted.split(".")

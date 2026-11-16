@@ -30,10 +30,11 @@ are hosted in the
 
 ## Astronomy pilot
 
-The [default 70M recipe](configs/nanotron/astropt3-70m-four-modal.yaml) streams
+The [default 70M recipe](configs/nanotron/astropt3-70m.yaml) streams
 [Multimodal Universe](https://huggingface.co/collections/UniverseTBD/multimodal-universe-hats)
-LegacySurvey North images, DESI and SDSS spectra, and HSC Wide images, with
-**echo factor 4**. All training recipes use YAML-configured catalog streams and
+LegacySurvey North images, DESI and SDSS spectra, and HSC Wide images; every
+rung of the Pythia ladder (`astropt3-{70m…12b}.yaml`) trains the same four
+modalities. All training recipes use YAML-configured catalog streams and
 modality lists; N-modal training is the normal path. New physical survey
 calibrations still require code.
 
