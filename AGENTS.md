@@ -15,7 +15,7 @@ pretraining fork (`Smith42/nanotron`, branch `astropt3`).
 **Before working in `astro/`, read [`astro/AGENTS.md`](astro/AGENTS.md)** —
 it carries the commands, hard constraints, and the architecture contract
 for the project. The lab book — charter/roadmap (MMU Streaming × AstroPT),
-phase history, and experiment log — is
+fixed decisions, and experiment log — is
 [`astro/EXPERIMENTS.md`](astro/EXPERIMENTS.md);
 the project README is [`astro/README.md`](astro/README.md).
 

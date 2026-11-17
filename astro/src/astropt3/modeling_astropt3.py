@@ -12,7 +12,7 @@ Sequence contract (built by data/packing.py):
   block-diagonal (doc) masking (torch >= 2.6).
 - Loss: predictions read one position LEFT of each modality token
   (``<|begin_m|>`` predicts patch 0 — astroPT's ``starts-1`` alignment).
-  ADR 0013 averages modalities within each family, then combines present
+  The loss averages modalities within each family, then combines present
   image:spectrum:scalar families at 1:1:0.1. No loss on special or pad
   tokens unless ``special_token_ce_weight > 0``.
 - The jetformer tokeniser (JetFormer/GIVT-style) is the sole regression

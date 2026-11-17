@@ -143,7 +143,7 @@ so the fork stays thin. gpu-marked tests (`tests/test_nanotron_gpu.py`)
 cover HF↔nanotron forward/loss parity,
 exact weight-conversion round-trips, TP=2 replicated gradients (including
 the noise curriculum), and a 50-step smoke run with checkpoint conversion —
-see the lab book (EXPERIMENTS.md) Part I Phase 3 notes for the venv recipe.
+see `docs/training.md` §1 for the GPU venv recipe.
 
 **Checkpointing & eval**: `checkpoints.checkpoint_schedule: pythia` saves
 at steps 1,2,4,…,512 plus every `checkpoint_interval` (canonical schedule

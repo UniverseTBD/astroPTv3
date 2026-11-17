@@ -13,7 +13,7 @@
   - `astro/EXPERIMENTS.md` Part I Phase 5 — the 70M / 160M 20k-step raster shakeout runs
     whose saved configs must round-trip to `spiral=False`
   - [ADR 0001](0001-jetformer-inverse-variance-loss.md),
-    [ADR 0002](0002-ivar-weighted-huber-loss.md),
+    ADR 0002,
     [ADR 0003](0003-checkpoint-samples-in-eval-sidecar.md) — house-format
     precedents
 
@@ -294,7 +294,7 @@ to whichever PR implements it):
   `astro/src/astropt3/data/nanotron_loader.py:162` — remaining call sites
   threaded in Step 3.
 - [ADR 0001](0001-jetformer-inverse-variance-loss.md),
-  [ADR 0002](0002-ivar-weighted-huber-loss.md),
+  ADR 0002,
   [ADR 0003](0003-checkpoint-samples-in-eval-sidecar.md) — house-format
   precedents (Question / Context / Decision drivers / Options A–D /
   Decision / Consequences / Open issues / References).

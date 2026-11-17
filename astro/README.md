@@ -63,7 +63,7 @@ astronomical sources are packed into training sequences without splitting an
 object. The nanotron fork (`../nanotron`) runs pretraining; the transformers
 implementation in `src/astropt3/` supports checkpoint conversion, generation,
 and probing. See [architecture](docs/architecture.md) for the model contract
-and [the lab book](EXPERIMENTS.md) (charter/roadmap, phase history,
+and [the lab book](EXPERIMENTS.md) (charter/roadmap, fixed decisions,
 experiment log) for the size ladder.
 
 ## Set up and verify

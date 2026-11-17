@@ -18,8 +18,8 @@
   git history if a derivation needs
   checking.
 - **References:** [ADR 0006](0006-stream-mmu-upstream.md), [ADR
-  0008](0008-scalar-modalities.md), [ADR 0011](0011-skim-crossmatch-scans.md),
-  [ADR 0013](0013-legacy-centred-mmu-expansion.md), PR #31.
+  0008](0008-scalar-modalities.md), ADR 0011,
+  ADR 0013, PR #31.
 - **Owner decision recorded here (dated 2026-08-06):** retain the 96×96
   central image crop; full-frame and foveated tokenisation are out of scope
   for this programme (§1).

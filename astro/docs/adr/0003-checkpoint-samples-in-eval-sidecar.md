@@ -161,4 +161,4 @@ sidecar's own wandb run (Option C).**
   co-launch.
 - `astro/src/astropt3/checkpoint_schedule.py` — the thinning predicate.
 - [ADR 0001](0001-jetformer-inverse-variance-loss.md), 
-  [ADR 0002](0002-ivar-weighted-huber-loss.md) — house format precedents.
+  ADR 0002 — house format precedents.

@@ -3,7 +3,7 @@
 Existing special-token ids are FROZEN: released checkpoints depend on them.
 Layout: 0 <|pad|>, 1 <|bos|>, then 3 consecutive ids per modality in the
 order modalities are added: <|begin_m|>, <|m|> (placeholder), <|end_m|>.
-ADR 0013 allocates complete unused blocks in ids 17-63 first, then appends
+New modalities take complete unused blocks in ids 17-63 first, then append
 blocks above 63 and requires the config to carry the enlarged vocabulary.
 
 Patchification is pinned to the verified MMU schemas:

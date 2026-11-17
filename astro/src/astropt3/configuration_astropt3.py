@@ -16,7 +16,7 @@ from .tokenization import assign_modality_token_ids, required_vocab_size
 #   mean wavelength, normalized, projected by an affine PositionEmbedder
 # - Z / ebv / photometry: ADR 0008 scalar modalities — one-token spans over
 #   the catalog scalars the records already carry, GMM-headed like every
-#   other modality. The ADR 0013 family loss collectively caps all present
+#   other modality. The family loss collectively caps all present
 #   scalar modalities at weight 0.1.
 DEFAULT_MODALITIES = [
     {

@@ -10,7 +10,7 @@
   - `astro/src/astropt3/data/packing.py` — `ObjectSequencer.build` (already modality-optional)
   - `astro/src/astropt3/data/nanotron_loader.py` — `PackedMicroBatches` / `build_astropt3_dataloader`
   - `astro/src/astropt3/modeling_astropt3.py` — the per-token-mean Huber loss + `loss_weight`
-  - [ADR 0001](0001-jetformer-inverse-variance-loss.md), [ADR 0002](0002-ivar-weighted-huber-loss.md), [ADR 0003](0003-checkpoint-samples-in-eval-sidecar.md) — house format precedents
+  - [ADR 0001](0001-jetformer-inverse-variance-loss.md), ADR 0002, [ADR 0003](0003-checkpoint-samples-in-eval-sidecar.md) — house format precedents
 
 ## Question
 

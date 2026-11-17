@@ -15,7 +15,7 @@ Covers the plan's Phase 3 gates:
 Environment: nanotron (editable ../nanotron) + flash-attn + astropt3 on a
 CUDA machine — the ``[train]`` extra. flash-attn has no prebuilt wheel for
 every torch/cuda combo; a torch 2.8 + cu12 venv with the matching
-Dao-AILab release wheel works on A100 (see PLAN Phase 3 notes). Run:
+Dao-AILab release wheel works on A100 (see docs/training.md §1). Run:
 
     pytest -m gpu tests/test_nanotron_gpu.py -v
 """

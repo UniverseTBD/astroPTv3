@@ -31,7 +31,7 @@ class ModalityConfig:
             "continuous" for a projected float position (e.g. wavelength).
         pos_input_size: dimensionality of the continuous position vector.
         max_positions: number of learned positions when pos_type == "index".
-        family: fixed ADR 0013 objective family: image, spectrum, or scalar.
+        family: objective family: image, spectrum, or scalar.
         source: source survey/product name used for provenance and dispatch.
         record_keys: record field(s) carrying this modality.
         token_ids: frozen (begin, placeholder, end) special-token block.
