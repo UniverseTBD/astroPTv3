@@ -29,8 +29,7 @@ uv run pytest -m network tests/test_lsdb_stream.py   # live hub stream check
 ```
 
 These two (pytest, count_params) are the phase verification gates and must
-pass before any phase is declared done; ADR 0015 retired the `train_smoke`
-gate together with the local-corpus path it exercised. `@pytest.mark.gpu`
+pass before any phase is declared done. `@pytest.mark.gpu`
 tests run wherever a GPU environment exists (`uv run pytest -m gpu` in
 the GPU venv); on any shared node, pin a device
 (`CUDA_VISIBLE_DEVICES`) and check `nvidia-smi` before claiming one.
@@ -43,17 +42,16 @@ stages is implicit and easy to break, so understand it before editing:
 1. **Records** are MMU-schema dicts (`image.flux` float32 (3,152,152);
    `spectrum` with 7781-bin `flux/lambda/ivar/mask`); both modalities are
    optional per record (image-only is the common case). Offline fixtures
-   live in `tests/legacy_fixture.py` (ADR 0015 deleted `data/synthetic.py`
-   with the rest of the local-corpus path). Real records are **streamed
+   live in `tests/legacy_fixture.py`. Real records are **streamed
    live from the HF hub inside each DataLoader worker** by
    `data/catalog_stream.py` via merged LSDB main (commit pinned in
    `uv.lock`): `InfiniteStream` for one catalog, `CrossMatchStream` for several.
-   Explicit YAML `catalog_stream` lists define the sources and join policy;
-   the legacy selector and custom crossmatcher are removed. Generation uses
+   Explicit YAML `catalog_stream` lists define the sources and join policy.
+   Generation uses
    this same stream. Upstream owns footprint and boundary-match semantics;
    AstroPT retains decoding, calibration, quality gates and bounded retries.
    `min_catalogs` selects sky coverage, not a per-record modality count;
-   the old `min_surveys` and `count_fraction_threshold` settings are rejected.
+   unknown settings are rejected.
    Each worker owns a dask `LocalCluster`
    (threads only, `partitions_per_chunk=4`) so the next draw's fetch
    overlaps the current one's decode; rows decode through
@@ -157,7 +155,7 @@ may be revisited (ADR 0015; `docs/training.md` §5). Evaluation never runs
 in the trainer: convert a checkpoint with the fork's
 `tools/astropt3/convert_nanotron_to_hf.py`, then score the HF artifact
 with `astropt3.eval` (`val_loss`, `linear_probe`, `scalar_head`,
-`samples`); ADR 0015 removed the automated `run_probe_sweep` sidecar.
+`samples`).
 
 A behavior to remember when touching data or fixtures: per-patch
 standardization turns flat/noise-only patches into irreducible N(0,1)

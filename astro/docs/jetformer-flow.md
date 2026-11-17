@@ -5,8 +5,7 @@ the cross-patch pilot (see [lineage](jetformer-flow-lineage.md)). Each patch
 modality gets `jetformer_flow_steps` affine couplings. Each coupling is
 conditioned by `jetformer_flow_depth` pre-norm Transformer blocks of width
 `jetformer_flow_hidden`, with full attention over one object's one modality
-span (never across packed objects; `flow_object_ids`). It replaced the
-per-token patch-MLP flow (`TinyFlow1D`), which was removed.
+span (never across packed objects; `flow_object_ids`).
 
 ## Width rule
 

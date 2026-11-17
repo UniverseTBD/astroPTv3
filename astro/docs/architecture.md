@@ -1,14 +1,12 @@
 # AstroPTv3 architecture
 
 *Background for anyone picking up the project. The operational counterpart is
-[`training.md`](training.md); the historical phase plan is
-[`../EXPERIMENTS.md`](../EXPERIMENTS.md) Part I.*
+[`training.md`](training.md).*
 
 Training uses live LSDB access to YAML-configured catalogs and modality lists.
-The default recipe combines LegacySurvey North and HSC images with DESI and SDSS
-spectra; the size ladder retains its two-survey recipes on the same N-modal path.
-[ADR 0015](adr/0015-lsdb-infinite-stream-training.md) records the historical
-image-only cutover. This document focuses on the survey-to-model contract.
+Every recipe combines LegacySurvey North, HSC and galaxies-with-hats images with
+DESI and SDSS spectra and nine galaxies-with-hats scalars. This document focuses
+on the survey-to-model contract.
 
 ## What this is
 
@@ -203,17 +201,15 @@ Pythia-style, adapted to a smaller corpus:
 - **Checkpointing**: `checkpoint_schedule: pythia` saves at steps
   1, 2, 4, …, 512 and then every `checkpoint_interval` (1000) — the log2-
   spaced early checkpoints are what make learning-dynamics studies possible.
-  Checkpoints hold model/optimizer/scheduler/RNG weight state only (ADR
-  0015): the cursorless LSDB stream restarts fresh on resume.
-- **Evaluation (deferred, ADR 0015)**: `astropt3.eval` retains pure
+  Checkpoints hold model/optimizer/scheduler/RNG weight state only: the
+  cursorless LSDB stream restarts fresh on resume.
+- **Evaluation (deferred)**: `astropt3.eval` provides pure
   model-side functions over provided records/objects/batches (`evaluate`,
   `embed_objects`, `ridge_r2`, `scalar_head_metrics`, sampling/rendering).
   Source-backed evaluation and checkpoint sweeps are not currently wired.
 
 ## Roadmap context
 
-Earlier phases established the model and training fork; the live LSDB
-cutover is explicitly experimental and does not yet satisfy the former
-synthetic smoke gate. Current work is on the 70M multimodal pilot, ahead of
-full size-ladder scale-up. See [`../EXPERIMENTS.md`](../EXPERIMENTS.md) Part I for the historical
-phase log and [`../EXPERIMENTS.md`](../EXPERIMENTS.md) for loader measurements.
+Current work is on the 70M multimodal pilot, ahead of full size-ladder
+scale-up. See [`../EXPERIMENTS.md`](../EXPERIMENTS.md) for experiment results and
+loader measurements.

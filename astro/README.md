@@ -90,15 +90,11 @@ bash astro/scripts/run_train.bash GPU_INDEX
 ```
 
 See [training.md](docs/training.md) for custom recipes, echo overrides, resource
-limits, and resume instructions. The former synthetic-dependent `train_smoke` gate and
-source-backed evaluation sweep are not currently available under the
-experimental LSDB cutover; do not interpret the checks above as a completed
-training-phase verification. Pure model-side evaluation and sample rendering
-remain in `src/astropt3/eval/` and `scripts/generate.py`.
+limits, and resume instructions. There is no source-backed evaluation sweep;
+model-side evaluation and sample rendering are in `src/astropt3/eval/` and
+`scripts/generate.py`.
 
 For a bounded, YAML-based training benchmark with standard JSON results, see
 [throughput benchmarking](docs/training.md#8-standard-throughput-benchmark).
 The [loader experiment log](EXPERIMENTS.md) records measured throughput and
-coverage limits. [ADR 0015](docs/adr/0015-lsdb-infinite-stream-training.md)
-documents the initial LSDB cutover; its original image-only source decision
-is historical, not a description of every subsequent pilot config.
+coverage limits.

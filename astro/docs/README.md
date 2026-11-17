@@ -1,73 +1,30 @@
-# AstroPTv3 labbook
+# AstroPTv3 docs
 
-This directory is the project labbook: durable notes recording what was
-planned, run, and learned on each part of AstroPTv3. The authoritative
-phase history (formerly the plan) with all fixed decisions is
-[`../EXPERIMENTS.md`](../EXPERIMENTS.md) Part I; the
-agent-facing rules are in [`../../AGENTS.md`](../../AGENTS.md). Code-level
-architecture and the operational run guide live here as **reference** docs;
-everything else is a **workstream** entry.
-
-Convention: filenames are `lowercase_snake_case.md`. New workstream entries
-are appended to the relevant section below with a one-line status so the
-index stays auditable.
+Reference docs for the current code. Experiment results are in the lab book,
+[`../EXPERIMENTS.md`](../EXPERIMENTS.md); agent rules are in
+[`../AGENTS.md`](../AGENTS.md). Docs describe the current code only; git
+history is the change record.
 
 ---
 
-## Reference (stable background)
+## Reference
 
 | Doc | What it covers |
 |-----|----------------|
 | [`architecture.md`](architecture.md) | Model design: SmolLM3 body + per-modality regression heads, tokenization, packing, two-implementation contract (HF release + nanotron training). Read first when touching the model. |
 | [`training.md`](training.md) | Operational guide: environments, data, launching, checkpoint/resume, eval, and the traps already hit. The counterpart to `architecture.md`. |
+| [`jetformer-flow.md`](jetformer-flow.md) | The per-modality `JetFormerFlow` + `GMMHead` (exact patch-space likelihood `mean(NLL_GMM(z) − logdet)`); [lineage](jetformer-flow-lineage.md). |
+
+Physical image normalization is in `data/band_registry.py`; see `architecture.md`.
 
 ---
 
-## Workstreams (plan → run → diagnosis, in order)
-
-### JetFormer tokeniser (additive `tokeniser: jetformer` path)
-
-Per-modality `JetFormerFlow` ([`jetformer-flow.md`](jetformer-flow.md);
-[lineage](jetformer-flow-lineage.md)) + `GMMHead`, exact patch-space likelihood
-`mean(NLL_GMM(z) − logdet)`; standardization skipped so the record→token
-map stays invertible. Tracked as `astro-phase5`; gates in
-`tests/test_nanotron_gpu.py`.
-
-The plan/run-guide/diagnosis entries were deleted 2026-09-28 once their
-conclusions lived in the ADRs and the lab book: the noise/convergence
-diagnosis is [`../EXPERIMENTS.md`](../EXPERIMENTS.md) §12; the first 70M
-run and the low-LR follow-up are recorded in the lab book's phase notes.
-Recover the deleted files from git history if a derivation is needed.
-
-### Physical image normalization (port of galactiktok `feat/norm`)
-
-Replace the data-driven Platonic-Universe asinh stretch with galactiktok's
-physical, band-registry-keyed normalization for the image modality.
-Spectra unchanged. Additive; gated on `uv run pytest` + the
-`train_smoke --assert-decrease` smoke gate.
-
-Implemented — see `data/band_registry.py` and `architecture.md`; the
-plan entry was deleted 2026-09-28 (git history has it). Source of truth
-was `../galactiktok` branch `feat/norm`.
-
----
-
-## MMU corpus expansion
+## MMU corpus evidence
 
 | Entry | Kind | Status |
 | --- | --- | --- |
 | [`evidence/adr0013-anchor-scout-2026-08-04/README.md`](evidence/adr0013-anchor-scout-2026-08-04/README.md) | Evidence | Pinned North/South scout; both capped inconclusive, owner selected North first and retained South. |
 | [`evidence/adr0013-source-spokes-2026-08-05/README.md`](evidence/adr0013-source-spokes-2026-08-05/README.md) | Evidence | Bounded schema-v2 index, live stream, transform, and transferred-byte smoke for all four North spokes. |
-
-The five-spoke North graph and its match-index/source-graph run configs
-(`*-north-5spoke-*.yaml`, `bench-north-5spoke-b0.yaml`) are retired: ADR 0015
-is a hard cutover to `lsdb.streams.InfiniteStream` over a single uncrossmatched
-catalog, which has no source graph, no match index, and no five-spoke
-composition to run against. See
-[`adr/0015-lsdb-infinite-stream-training.md`](adr/0015-lsdb-infinite-stream-training.md).
-The expansion plan, its test plan, the crossmatch research and the per-run
-handoff notes were deleted 2026-08-06 once ADRs 0011–0014 carried their
-conclusions — recover them from git history if a derivation is needed.
 
 ---
 

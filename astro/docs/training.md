@@ -2,10 +2,8 @@
 
 *The operational guide: environments, live survey data, launching, and
 checkpoint/resume. Background on the model is in
-[`architecture.md`](architecture.md). The initial experimental LSDB cutover
-is recorded in [ADR 0015](adr/0015-lsdb-infinite-stream-training.md);
-all current recipes use YAML-configured catalog streams. The old contract's
-`train_smoke` gate remains absent on this branch.*
+[`architecture.md`](architecture.md). Every recipe uses YAML-configured
+catalog streams.*
 
 ## 1. Environments
 
@@ -68,14 +66,9 @@ only). Every ladder rung echoes each draw 4 times.
 Model, catalog list, join policy, worker count and schedule are explicit YAML,
 not injected by the script (see §9).
 
-`catalog_stream` is required. Remove `crossmatch_desi` (even `false`) from old
-recipes and supply explicit catalogs. Matching and footprint selection follow
-merged LSDB main, pinned by `uv.lock`; the local crossmatcher and legacy
-loader are removed. Rename `min_surveys` to `min_catalogs` and remove
-`count_fraction_threshold` from older YAMLs; both old settings are rejected. Coverage and
-boundary matches can differ from old runs. Calibration and quality gates remain.
-The retired knobs (`data_root`, `match_index`, synthetic fractions,
-`object_id_log`) are not supported.
+`catalog_stream` is required and lists the catalogs explicitly; unknown
+settings are rejected. Matching and footprint selection follow LSDB, pinned by
+`uv.lock`; AstroPT applies calibration and quality gates.
 
 Governing knobs, top to bottom:
 
@@ -101,9 +94,7 @@ checkpoints:
   resume_checkpoint_path: null # set to the checkpoints dir to resume
 ```
 
-Use the actual run YAML for batch sizes and parallelism; the historical
-recipe and size-ladder rationale live in
-[`../EXPERIMENTS.md`](../EXPERIMENTS.md) Part I.
+Use the actual run YAML for batch sizes and parallelism.
 
 ## 4. Launching
 
@@ -118,8 +109,7 @@ bash astro/scripts/run_train.bash GPU_INDEX 2 --config-file my-recipe.yaml
 This launches `astro/scripts/train.py`. Set `ASTROPT3_ENV` to the GPU venv;
 the local launcher defaults to `.venv-astropt3` in the repository. It uses the
 installed LSDB/HATS versions, which must match `astro/uv.lock` and support the
-multi-catalog/min_catalogs API. It no longer injects a sibling LSDB checkout;
-older GPU environments need their dependencies updated before launching.
+multi-catalog/min_catalogs API; train.py checks this before creating outputs.
 
 Multi-GPU on one node uses the same YAML-configured loader:
 
@@ -140,9 +130,8 @@ The launcher sources `$ASTROPT3_ENV` (default `../astroPTv3_gpuenv`) and
 rendezvous on the first node. **Always dry-run first**, checking
 tokens/s/GPU, MFU, and memory, before committing a real run.
 
-Do not set `HF_DATASETS_OFFLINE=1` — training streams from the Hub. The
-source-backed evaluation sidecar (`run_probe_sweep.py`) and `EVAL_GPU`
-co-launch hook are removed; §6 describes the remaining model-side tools.
+Do not set `HF_DATASETS_OFFLINE=1` — training streams from the Hub. §6
+describes the model-side evaluation tools.
 
 ## 5. Checkpoints and resume
 
@@ -162,9 +151,9 @@ LSDB stream is cursorless: resume opens a fresh stream and records may be
 revisited immediately. There is no exact-sequence continuation, no replay
 audit, and no worker-count constraint on resume.
 
-For an older run, use a matching model recipe with explicit `catalog_stream` in
-the new launch YAML. Do not rewrite saved checkpoints; the runner reads their
-old YAML only for the echo factor, not to select catalogs for the resumed run.
+Resume needs a recipe whose modalities match the checkpoint's. The runner
+reads the checkpoint's saved YAML only for the echo factor; catalogs come from
+the launch YAML.
 
 Watch the logs: `lm_loss`, per-modality `images_loss` and (when DESI is
 included) `spectra_loss`, `tokens_per_sec_per_gpu`, `model_tflops_per_gpu`,
@@ -194,8 +183,6 @@ selects positions in that ordering. Catalogs are never inferred from the model.
    `astro/`. Plain `uv run pytest` also selects network-marked tests, which
    may fail when the Hub is unavailable.
 2. `uv run python scripts/count_params.py` for current size totals.
-3. The former synthetic-dependent `train_smoke` gate is suspended; these
-   checks do **not** complete that phase gate.
 
 For a bounded live check with Hub access:
 `uv run pytest -m network tests/test_lsdb_stream.py`.
@@ -223,8 +210,7 @@ initialization/resume is honoured, and an unresolvable resume fails rather than
 starting from random weights. Supported: one AstroPT streaming stage, PP=CP=EP=1.
 `--bandwidth-cap` and `--cache-state` only record context; nothing is throttled
 or flushed. On one GPU, a TP=1 recipe runs its per-GPU workload at DP=1 (same
-model, batch shape and loader workers; recorded as an override). The old DP1
-benchmark preset is retired.
+model, batch shape and loader workers; recorded as an override).
 
 Outputs: `baseline.yaml`/`effective.yaml`/`resolved.yaml`, `run.json` (window
 and overrides), `rankN.json` (status, topology, host, GPU/CPU/RAM, software,
