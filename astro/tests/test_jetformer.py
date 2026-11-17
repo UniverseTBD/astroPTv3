@@ -105,7 +105,7 @@ def test_noise_curriculum_perturbs_train_only(tiny_config, jet_batch):
     out_a = model(**jet_batch)
     out_b = model(**jet_batch)
     assert torch.isfinite(out_a.loss) and torch.isfinite(out_b.loss)
-    assert not torch.allclose(out_a.loss, out_b.loss)
+    assert not torch.allclose(out_a.modality_losses["images"], out_b.modality_losses["images"])
 
     # Eval mode: noise off regardless of frac -> deterministic.
     model.eval()
@@ -147,5 +147,5 @@ def test_smoke_training_learns():
         opt.step()
         losses.append(out.loss.item())
     # Likelihood loss (NLL - logdet) can cross zero, so assert an absolute
-    # drop rather than the affine gate's ratio check.
-    assert losses[-1] < losses[0] - 10.0, f"{losses[0]:.4f} -> {losses[-1]:.4f}"
+    # drop rather than a ratio; patch losses are nats per dimension.
+    assert losses[-1] < losses[0] - 2.0, f"{losses[0]:.4f} -> {losses[-1]:.4f}"

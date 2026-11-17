@@ -330,8 +330,9 @@ def test_50step_live_run_and_checkpoint_conversion(nt, tmp_path_factory):
     stdout = run_train(config, workdir, "test-tiny")
     losses = losses_from(stdout)
     assert len(losses) >= 40, f"expected ~50 logged losses, got {len(losses)}"
-    # Likelihood loss can cross zero, so a ratio is not a learning criterion.
-    assert losses[-1] < losses[0] - 10.0, f"nanotron smoke did not learn: {losses[0]:.4f} -> {losses[-1]:.4f}"
+    # Likelihood loss can cross zero, so a ratio is not a learning criterion;
+    # patch losses are nats per dimension, so the drop is O(1), not O(10).
+    assert losses[-1] < losses[0] - 1.0, f"nanotron smoke did not learn: {losses[0]:.4f} -> {losses[-1]:.4f}"
 
     checkpoint = workdir / "checkpoints" / "50"
     assert (checkpoint / "model_config.json").exists()

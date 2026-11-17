@@ -67,22 +67,23 @@ def test_doc_mask_blocks_cross_object_attention(tiny_model, tiny_config, sequenc
     assert torch.equal(h0[0, start_b:], h1[0, start_b:])  # B bit-identical
 
 
-def test_family_loss_matches_adr_0013(tiny_model, sequencer, collator, full_record):
-    batch = collator([sequencer.build(full_record)])
+def test_family_loss_pools_tokens_and_normalizes_patch_dims(tiny_model, sequencer, collator, full_record):
+    """Families pool their tokens; patch NLLs are per dimension; families 1:1:0.1."""
+    without_z = {k: v for k, v in full_record.items() if k != "Z"}
+    objects = [sequencer.build(full_record), sequencer.build({**without_z, "object_id": "other"})]
+    batch = collator(objects)
     with torch.no_grad():
         out = tiny_model(**batch)
-    scalar_mean = torch.stack(
-        [out.modality_losses[name] for name in ("Z", "ebv", "photometry")]
-    ).mean()
-    assert torch.allclose(out.family_losses["image"], out.modality_losses["images"])
-    assert torch.allclose(out.family_losses["spectrum"], out.modality_losses["spectra"])
-    assert torch.allclose(out.family_losses["scalar"], scalar_mean)
-    expected = (
-        out.family_losses["image"]
-        + out.family_losses["spectrum"]
-        + 0.1 * out.family_losses["scalar"]
-    ) / 2.1
-    assert torch.allclose(out.loss, expected, atol=1e-6)
+    masks, losses = batch["modality_masks"], out.modality_losses
+    n = {name: int(masks[name].sum()) for name in masks}
+    assert (n["Z"], n["ebv"], n["photometry"]) == (1, 2, 2)
+    # a modality counts by its tokens, not one vote each
+    scalar = (n["Z"] * losses["Z"] + n["ebv"] * losses["ebv"] + n["photometry"] * losses["photometry"]) / 5
+    torch.testing.assert_close(out.family_losses["scalar"], scalar)
+    torch.testing.assert_close(out.family_losses["image"], losses["images"] / 192)
+    torch.testing.assert_close(out.family_losses["spectrum"], losses["spectra"] / 256)
+    expected = (out.family_losses["image"] + out.family_losses["spectrum"] + 0.1 * out.family_losses["scalar"]) / 2.1
+    torch.testing.assert_close(out.loss, expected)
 
 
 def test_loss_matches_manual_computation(tiny_model, sequencer, collator, full_record):
@@ -108,6 +109,7 @@ def test_loss_matches_manual_computation(tiny_model, sequencer, collator, full_r
             )
             logits_pi, mu, log_sigma = tiny_model.decoders[m](hidden)
             nll = gmm_nll(z, logits_pi, mu, log_sigma)
-            manual.append((nll - logdet).mean())
+            # pooled per family, per dimension: one patch modality per family here
+            manual.append((nll - logdet).mean() / tiny_model.modality_input_sizes[m])
     expected = torch.stack(manual).mean()
     assert torch.allclose(out.loss, expected, atol=1e-6)

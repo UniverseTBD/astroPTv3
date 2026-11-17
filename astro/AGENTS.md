@@ -113,8 +113,10 @@ stages is implicit and easy to break, so understand it before editing:
    embedded and predicted by a per-modality `GMMHead`, with loss the exact
    patch-space likelihood `mean(NLL_GMM(z) - logdet)` at positions one left
    of each modality token (`<|begin_m|>` predicts patch 0 — astroPT's
-   `starts-1` alignment), via `left_shift_mask`; the loss can go negative;
-   weighted mean over modalities present. A noise curriculum
+   `starts-1` alignment), via `left_shift_mask`; the loss can go negative.
+   Each family's loss is one mean over all its tokens (patch-token NLL
+   divided by `input_size`, i.e. nats per dimension; scalar tokens as-is),
+   and present families combine at image:spectrum:scalar 1:1:0.1. A noise curriculum
    (`jetformer_noise_max` -> `_min`, driven via `set_jet_noise_frac`)
    perturbs only the embedded z copy in training mode. Scalar modalities
    (`Z`, `ebv`, `photometry`) bypass the flow and go straight to a

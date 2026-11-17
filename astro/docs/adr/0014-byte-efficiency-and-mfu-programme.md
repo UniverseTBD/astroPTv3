@@ -1179,3 +1179,36 @@ implementations carry it, with a GPU parity and conversion test.
 catalogue when the first lacks it (DESI/SDSS photometry and HSC `a_*` for
 objects without a Legacy match), a South anchor for the rest of Galaxy10,
 Gaia and APOGEE.
+
+**A10 — family losses pool tokens and normalize patch dimensions
+(2026-11-17).** Within a family, the loss was a plain mean over the
+modalities present in the batch, and each patch token's NLL is a sum over its
+`input_size` dimensions. Measured on the step-512 checkpoint of the first run
+with A9's modalities (4 live packed batches of 4 × 4,096 tokens; each
+modality's projection onto the total gradient of the shared transformer,
+pieces reproducing the total to 4e-7):
+
+| modality | tokens/batch | share of shared-body update |
+| --- | ---: | ---: |
+| `galaxies` (768 dims) | 832 | 0.40 |
+| `sdss_spectra` (2 of 4 batches) | 16 | 0.40 |
+| `spectra` | 1,914 | 0.33 |
+| `hsc_images` | 6,336 | 0.04 |
+| `images` | 4,320 | 0.03 |
+| 42 scalars | 444 | 0.00 |
+
+Survey imagery, about 65% of the tokens, drove about 7% of the shared update,
+matching `hsc_images` plateauing for 9,500 steps in the earlier 70M run. A
+16-token modality took half its family's vote. Dividing *every* modality's
+loss by `input_size` was measured too and over-corrects: the scalar family
+jumps to 0.68 of the update.
+
+The loss is now: each family's loss is one mean over all its tokens; image
+and spectrum token NLLs are divided by `input_size` first (nats per
+dimension), scalar tokens are not; present families combine at 1:1:0.1.
+`modality_losses` stay raw per-token means so curves remain comparable;
+`family_losses` and the total change scale and are not comparable with runs
+before this amendment. The combined shares under the new rule are not yet
+measured; repeat the measurement on an early checkpoint of the first run
+that uses it.
+

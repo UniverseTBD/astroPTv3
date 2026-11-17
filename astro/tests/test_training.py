@@ -602,7 +602,10 @@ def test_echo_runs_independent_model_optimizer_updates(echo_batch, tiny_config, 
         result = model(**run.loader.regroup_micro_batch(moved, config.modality_registry().names()))
         assert torch.isfinite(result.loss)
         assert set(result.modality_losses) == ({"hsc_images"} if hsc_only else set(config.modality_registry().names()))
-        torch.testing.assert_close(result.loss, torch.stack(list(result.modality_losses.values())).mean())
+        weights = {"image": 1.0, "spectrum": 1.0, "scalar": 0.1}
+        families = result.family_losses
+        torch.testing.assert_close(result.loss, sum(weights[f] * families[f] for f in families)
+                                   / sum(weights[f] for f in families))
         result.loss.backward()
         for module in (model.flows["hsc_images"], model.decoders["hsc_images"]):
             assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in module.parameters())

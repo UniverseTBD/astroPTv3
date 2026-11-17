@@ -15,7 +15,7 @@ from test_nanotron_gpu import REL_TOL, build_nt_model, make_nt, regroup
 
 pytestmark = pytest.mark.gpu
 ASTRO_DIR = Path(__file__).resolve().parents[1]
-SEQ_LEN = 128  # fits two objects carrying every recipe modality
+SEQ_LEN = 512  # fits two objects carrying every recipe modality (48 spans)
 
 
 @pytest.fixture(scope="module")
@@ -30,6 +30,7 @@ def _trainer(tmp_path, resume=None):
     pilot = yaml.safe_load((ASTRO_DIR / "configs/nanotron/astropt3-70m.yaml").read_text())
     config["model"]["model_config"].update(
         modalities=pilot["model"]["model_config"]["modalities"],
+        vocab_size=pilot["model"]["model_config"]["vocab_size"],
         jetformer_flow_steps=2,
         jetformer_flow_hidden=32,
         jetformer_flow_depth=1,
