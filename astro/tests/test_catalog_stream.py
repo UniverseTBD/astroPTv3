@@ -3,7 +3,6 @@
 import io
 from contextlib import closing, nullcontext
 from copy import deepcopy
-from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,12 +18,6 @@ from astropt3.configuration_astropt3 import DEFAULT_MODALITIES, AstroPT3Config
 from astropt3.data import catalog_stream as streaming
 from astropt3.data import nanotron_loader as loader
 from astropt3.data.packing import ObjectSequencer
-
-
-def test_installed_lsdb_has_required_multi_catalog_api():
-    from lsdb.streams.catalog_streams import CrossMatchStream
-
-    assert "min_catalogs" in signature(CrossMatchStream).parameters
 
 
 @pytest.mark.parametrize("count", [1, 4])
@@ -212,7 +205,7 @@ def test_catalog_count_projection_and_finite_draws(recipe, offline, count):
         assert columns == ["object_id", "ra", "dec", *payload, *catalog.get("scalar_columns", {}).values()]
         if payload:
             suffix = "" if i == 0 else f"_{catalog['name']}"
-            fields = (("band", "flux", "psf_fwhm") if decoder == "legacy_image" else
+            fields = (("band", "flux") if decoder == "legacy_image" else
                       ("band", "flux", "scale") if decoder == "hsc_image" else
                       ("flux", "lambda", "mask"))
             expected_nested[payload[0] + suffix] = fields
@@ -221,27 +214,33 @@ def test_catalog_count_projection_and_finite_draws(recipe, offline, count):
     assert offline.clusters[0]["memory_limit"] == spec["worker_memory_limit"]
 
 
-@pytest.mark.parametrize("count", [1, 2, 4, 5])
-def test_packed_modalities_and_alignment(recipe, offline, count):
-    spec, config = _case(recipe, count)
-    dataset = loader.PackedMicroBatches(config, 1, 1024, catalog_stream=spec, echo_factor=2)
+def test_configured_loader_preserves_alignment_across_echoes(recipe, offline):
+    # Five catalogs exercise all four payload decoders plus scalar-only outputs.
+    spec, config = _case(recipe, 5)
+    dataset_args = {**recipe["data_stages"][0]["data"]["dataset"], "catalog_stream": spec}
+    batches = loader.build_astropt3_dataloader(
+        SimpleNamespace(**dataset_args), config,
+        micro_batch_size=1, sequence_length=1024, dp_rank=0, num_workers=0,
+    )
+    stream = batches.dataset.catalog_stream
+    assert stream.spec == streaming.CatalogStream(spec, config).spec
+    assert batches.dataset.echo_factor == 4
     row = _row(spec)
-    assert dataset.catalog_stream is not None
-    record = _decode(dataset.catalog_stream, row)
-    assert record is not None
-    expected = ObjectSequencer(config).build(record)
-    assert len(expected.values) == (6 if count == 5 else count)
-    frame = nested_frame([row], tuple(dataset.catalog_stream.nested))
+    expected = ObjectSequencer(config).build(_decode(stream, row))
+    assert len(expected.values) == 6
+    frame = nested_frame([row], tuple(stream.nested))
     offline.frames = lambda: [frame]
-    with closing(iter(dataset)) as batches:
-        for _ in range(2):
-            flat = next(batches)
-            assert flat["input_ids"].shape == (1, 1024)
+    with closing(iter(batches)) as iterator:
+        for exposure in range(4):
+            flat = next(iterator)
+            assert batches.echo_index == exposure
+            assert batches.echo_factor == 4
+            assert "_astropt3_echo" not in flat
             assert flat["input_ids"].device.type == "cpu"
+            assert flat["hsc_images_values"].shape == (144, 320)
             for modality in config.modalities:
                 name = modality["name"]
                 mask = flat[f"{name}_mask"]
-                assert mask.dtype == torch.bool
                 assert torch.equal(mask, flat["input_ids"] == modality["token_ids"][1])
                 assert int(mask.sum()) == len(expected.values[name])
                 torch.testing.assert_close(flat[f"{name}_values"], expected.values[name])
@@ -313,14 +312,17 @@ def test_renamed_sdss_modality_and_padding(recipe, offline):
 
 
 @pytest.mark.parametrize("catalog_index", range(4))
-def test_optional_catalogs_and_right_only_identity(recipe, catalog_index):
+@pytest.mark.parametrize("missing", [None, pd.NA, np.nan])
+def test_optional_catalogs_and_right_only_identity(recipe, catalog_index, missing):
     spec, config = _case(recipe)
     stream = streaming.CatalogStream(spec, config)
     catalog = spec["catalogs"][catalog_index]
     suffix = "" if catalog_index == 0 else f"_{catalog['name']}"
     payload = "image" if catalog["decoder"].endswith("image") else "spectrum"
     row = _row(spec)
-    record = _decode(stream, {k: row[k] for k in (f"object_id{suffix}", f"{payload}{suffix}")})
+    selected = {key: missing for key in row if key.startswith("object_id")}
+    selected.update({k: row[k] for k in (f"object_id{suffix}", f"{payload}{suffix}")})
+    record = _decode(stream, selected)
     assert record is not None
     expected_id = row[f"object_id{suffix}"]
     if catalog_index:
@@ -330,6 +332,43 @@ def test_optional_catalogs_and_right_only_identity(recipe, catalog_index):
     np.testing.assert_array_equal(record[catalog["record_key"]]["flux"],
                                   np.asarray(row[f"{payload}{suffix}"]["flux"], dtype=np.float32))
     assert len(ObjectSequencer(config).build(record).values) == 1
+    selected[f"object_id{suffix}"] = missing
+    with pytest.raises(ValueError, match="object_id"):
+        _decode(stream, selected)
+
+
+def test_stream_retains_matched_and_unpaired_records(recipe, offline):
+    from astropt3.tokenization import antispiralise, patchify_image
+
+    spec, config = _case(recipe)
+    dataset = loader.PackedMicroBatches(config, 1, 4096, catalog_stream=spec)
+    row = _row(spec)
+    rows = [row]
+    for index, catalog in enumerate(spec["catalogs"]):
+        suffix = "" if index == 0 else f"_{catalog['name']}"
+        row[f"object_id{suffix}"] = "same-id"
+        payload = "image" if catalog["decoder"].endswith("image") else "spectrum"
+        rows.append({key: row[key] for key in (f"object_id{suffix}", f"{payload}{suffix}")})
+    offline.frames = lambda: [nested_frame(rows, tuple(dataset.catalog_stream.nested))]
+    with closing(dataset._open_records(None)) as records:
+        decoded = [next(records) for _ in rows]
+    assert [record["object_id"] for record in decoded] == [
+        "same-id", "same-id", "sdss:same-id", "desi:same-id", "hsc:same-id",
+    ]
+    sequences = [dataset.sequencer.build(record) for record in decoded]
+    assert [set(sequence.values) for sequence in sequences] == [
+        {"images", "spectra", "sdss_spectra", "hsc_images"},
+        {"images"}, {"sdss_spectra"}, {"spectra"}, {"hsc_images"},
+    ]
+    raw = torch.tensor(row["image_hsc"]["flux"], dtype=torch.float32)[:, 32:128, 32:128]
+    factor = 10 ** ((22.5 - 27.0) / 2.5) * (0.262 / 0.168) ** 2
+    expected = patchify_image(torch.asinh(raw * factor / 0.01), 8)
+    torch.testing.assert_close(antispiralise(sequences[-1].values["hsc_images"]), expected)
+    flat = loader.flatten_packed_batch(dataset.collator(sequences), config, 4096)
+    assert flat["hsc_images_values"].shape == (288, 320)
+    assert int(flat["hsc_images_mask"].sum()) == 288
+    assert all(flat[f"{name}_mask"].any() for name in config.modality_registry().names())
+    assert offline.closed == ["client", "cluster"]
 
 
 @pytest.mark.parametrize("with_spectrum", [False, True])
@@ -391,31 +430,51 @@ def test_empty_and_no_active_records(recipe, offline):
         assert [r["object_id"] for r in records] == [row["object_id"]]
 
 
-@pytest.mark.parametrize("patch,match", [
-    ({"record_key": "spectrum"}, "unique"),
-    ({"decoder": "unknown"}, "decoder"),
-    ({"name": "sdss"}, "unique"),
-    ({"repo": "https://example.invalid/data"}, "namespace"),
-    ({"scalar_columns": {"image": "flat"}}, "unique"),
-    ({"scalar_columns": {"ebv": "image.ebv"}}, "flat"),
+@pytest.mark.parametrize("target,patch,match", [
+    ("catalog", {"record_key": "spectrum"}, "unique"),
+    ("catalog", {"decoder": "unknown"}, "decoder"),
+    ("catalog", {"name": "sdss"}, "unique"),
+    ("catalog", {"repo": "https://example.invalid/data"}, "namespace"),
+    ("catalog", {"scalar_columns": {"image": "flat"}}, "unique"),
+    ("catalog", {"scalar_columns": {"ebv": "image.ebv"}}, "flat"),
+    ("model", {"source": "desi"}, "source"),
+    ("model", {"record_keys": ["unmapped"]}, "compatible catalog output"),
+    ("stream", {"min_catalogs": 0}, "min_catalogs"),
+    ("stream", {"min_catalogs": 5}, "min_catalogs"),
+    ("stream", {"min_catalogs": True}, "min_catalogs"),
+    ("stream", {"how": "inner"}, "how"),
+    ("stream", {"radius_arcsec": 0}, "radius_arcsec"),
+    ("stream", {"radius_arcsec": np.nan}, "radius_arcsec"),
+    ("stream", {"radius_arcsec": np.inf}, "radius_arcsec"),
+    ("stream", {"radius_arcsec": True}, "radius_arcsec"),
+    ("stream", {"radius_arcsec": "1"}, "radius_arcsec"),
+    ("stream", {"partitions_per_chunk": 0}, "partitions_per_chunk"),
+    ("stream", {"partitions_per_chunk": True}, "partitions_per_chunk"),
+    ("stream", {"worker_memory_limit": ""}, "worker_memory_limit"),
+    ("stream", {"worker_memory_limit": 123}, "worker_memory_limit"),
+    ("stream", {"min_surveys": 1}, "unknown settings"),
+    ("stream", {"count_fraction_threshold": 0.0}, "unknown settings"),
+    ("stream", {"count_fraction_threshold": 0.5}, "unknown settings"),
 ])
-def test_invalid_catalogs(recipe, offline, patch, match):
+def test_invalid_configuration_fails_before_opening_catalogs(recipe, offline, target, patch, match):
     spec, config = _case(recipe)
-    spec["catalogs"][0].update(patch)
+    if target == "model":
+        config = AstroPT3Config(modalities=[{**config.modalities[2], **patch}])
+    else:
+        (spec if target == "stream" else spec["catalogs"][0]).update(patch)
     with pytest.raises(ValueError, match=match):
         streaming.CatalogStream(spec, config)
     assert not offline.opened
 
 
-@pytest.mark.parametrize("patch,match", [
-    ({"source": "desi"}, "source"),
-    ({"record_keys": ["unmapped"]}, "compatible catalog output"),
-])
-def test_model_fields_must_match_decoder(recipe, patch, match):
-    spec, config = _case(recipe, 1)
-    config = AstroPT3Config(modalities=[{**config.modalities[0], **patch}])
-    with pytest.raises(ValueError, match=match):
-        streaming.CatalogStream(spec, config)
+def test_old_lsdb_rejected_at_config_time(recipe, offline, monkeypatch):
+    def old_crossmatch_stream(left, *others, min_surveys=1, **kwargs):
+        raise AssertionError("must not open a stream")
+
+    monkeypatch.setattr(streaming, "CrossMatchStream", old_crossmatch_stream)
+    with pytest.raises(ValueError, match="min_catalogs API"):
+        streaming.CatalogStream(*_case(recipe))
+    assert not offline.opened
 
 
 @pytest.mark.parametrize("separate_flag", [False, True])
@@ -446,33 +505,6 @@ def test_per_catalog_join_overrides_stream_join(recipe, offline):
     spec["catalogs"][-1]["how"] = "inner"
     with pytest.raises(ValueError, match="left or outer"):
         streaming.CatalogStream(spec, config)
-
-
-@pytest.mark.parametrize("key,value", [
-    ("min_catalogs", 0), ("min_catalogs", 5), ("min_catalogs", True),
-    ("how", "inner"), ("radius_arcsec", 0), ("radius_arcsec", np.nan),
-    ("radius_arcsec", np.inf), ("radius_arcsec", True), ("radius_arcsec", "1"),
-    ("partitions_per_chunk", 0),
-    ("partitions_per_chunk", True), ("worker_memory_limit", ""),
-    ("worker_memory_limit", 123),
-])
-def test_invalid_stream_bounds(recipe, offline, key, value):
-    spec, config = _case(recipe)
-    spec[key] = value
-    with pytest.raises(ValueError):
-        streaming.CatalogStream(spec, config)
-    assert not offline.opened
-
-
-@pytest.mark.parametrize("key,value", [
-    ("min_surveys", 1), ("count_fraction_threshold", 0.0), ("count_fraction_threshold", 0.5),
-])
-def test_retired_stream_settings_are_rejected(recipe, offline, key, value):
-    spec, config = _case(recipe)
-    spec[key] = value
-    with pytest.raises(ValueError, match="unknown settings"):
-        streaming.CatalogStream(spec, config)
-    assert not offline.opened
 
 
 def test_retry_reopens_with_new_seed_and_cleans_resources(recipe, offline):

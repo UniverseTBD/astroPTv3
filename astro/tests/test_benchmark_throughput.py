@@ -46,9 +46,10 @@ def test_overrides_preserve_workload_schedules_and_explicit_initialization(basel
 
 @pytest.mark.parametrize("world,warmup,steps,match", [
     (2, 1, 2, "WORLD_SIZE"), (1, 0, 2, "warmup-steps"),
-    (1, 1, 0, "steps"), (1, 1, 10000, "horizon"),
+    (1, 1, 0, "steps"), (1, 1, None, "horizon"),
 ])
 def test_invalid_launch_is_rejected(baseline, tmp_path, world, warmup, steps, match):
+    steps = baseline["tokens"]["train_steps"] if steps is None else steps
     with pytest.raises(ValueError, match=match):
         bench.prepare_config(baseline, tmp_path, world, warmup, steps)
 

@@ -6,9 +6,9 @@ Covers the plan's Phase 3 gates:
   synthetic batch (bf16 tolerance: nanotron rotates at absolute row positions
   while HF restarts per object — RoPE is relative so the scores agree, but
   float trajectories differ; plus flash-attn vs sdpa);
-- replicated-module gradient check across TP=2 (scripts/tp2_grad_check.py
-  under torchrun; skipped with fewer than 2 visible GPUs);
-- 50-step nanotron run on synthetic data (loss decreases) whose final
+- replicated-module gradients with curriculum noise across TP=2
+  (scripts/tp2_grad_check.py; skipped with fewer than 2 visible GPUs);
+- network-marked 50-step nanotron run on live catalogs whose final
   checkpoint converts, loads via ``AutoModel.from_pretrained`` and reproduces
   the val loss.
 
@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import asdict
 from itertools import count, islice
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,9 +52,12 @@ LOSS_RE = re.compile(r"lm_loss: ([0-9.eE+-]+)")
 
 
 def run_train(config: dict, workdir: Path, name: str, timeout: int = 5400) -> str:
-    """torchrun a nanotron config to completion; shared with test_jetformer_gpu.py."""
+    """Run a bounded Nanotron training job with an ephemeral rendezvous port."""
     config_path = workdir / f"{name}.yaml"
-    config_path.write_text(yaml.safe_dump(config))
+    try:
+        config_path.write_text(yaml.safe_dump(config))
+    except OSError as error:
+        raise RuntimeError(f"cannot write {config_path}") from error
     result = subprocess.run(
         [
             sys.executable,
@@ -115,11 +119,7 @@ def _dist_env(port: int = 29123) -> dict:
 
 
 def make_nt():
-    """Late imports so CPU-only collection of this module stays possible.
-
-    Shared with test_jetformer_gpu.py (both wrap it in a session fixture; the
-    ParallelContext is process-global so building it twice is harmless).
-    """
+    """Late imports so CPU-only collection of this module stays possible."""
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA device")
     pytest.importorskip("nanotron")
@@ -176,6 +176,29 @@ def tiny_nt_config(nt, **overrides):
     )
 
 
+def smoke_config(nt, workdir):
+    """Shrink the current recipe without maintaining a second training YAML."""
+    config = _load_yaml(ASTRO_DIR / "configs/nanotron/astropt3-70m.yaml")
+    config["general"]["run"] = "test-tiny"
+    model = config["model"]["model_config"]
+    model.update(asdict(tiny_nt_config(
+        nt, modalities=model["modalities"], use_cache=False,
+        _fused_rms_norm=False, _fused_rotary_emb=False,
+    )))
+    stage = config["data_stages"][0]
+    stage["name"] = "lsdb-experimental"
+    stage["data"]["num_loading_workers"] = 0
+    stage["data"]["dataset"]["echo_factor"] = 1
+    config["optimizer"]["zero_stage"] = 0
+    config["optimizer"]["learning_rate_scheduler"].update(lr_warmup_steps=10, lr_decay_steps=40)
+    config["tokens"].update(train_steps=50, micro_batch_size=4, sequence_length=SEQ_LEN)
+    config["checkpoints"].update(
+        checkpoints_path=str(workdir / "checkpoints"), checkpoint_interval=50,
+        checkpoint_schedule=None,
+    )
+    return config
+
+
 def build_nt_model(nt, nt_config):
     parallel_config = nt.convert_weights.make_parallel_config()
     model = nt.build_model(
@@ -218,8 +241,9 @@ def matched_models(nt):
     import astropt3  # noqa: F401 -- registers Auto classes
     from astropt3 import AstroPT3Model
 
-    nt_config = tiny_nt_config(nt)
+    nt_config = tiny_nt_config(nt, jetformer_flow_hidden=32)
     hf_config = nt.to_hf.get_hf_config(nt_config)
+    assert hf_config.jetformer_flow_hidden == 32
     torch.manual_seed(0)
     hf_model = AstroPT3Model(hf_config)
     nt_model = build_nt_model(nt, nt_config)
@@ -227,6 +251,7 @@ def matched_models(nt):
     torch.nn.Module.cuda(hf_model)
     torch.nn.Module.to(hf_model, dtype=torch.bfloat16)
     hf_model.eval()
+    nt_model.eval()
     return hf_model, nt_model, nt_config, hf_config
 
 
@@ -266,12 +291,15 @@ def test_conversion_roundtrip_exact(nt, matched_models):
     torch.nn.Module.cuda(hf_back)
     torch.nn.Module.to(hf_back, dtype=torch.bfloat16)
     nt.to_hf.convert_nt_to_hf(nt_model, hf_back, nt_config)
-    original = hf_model.state_dict()
-    for key, value in hf_back.state_dict().items():
+    original, back = hf_model.state_dict(), hf_back.state_dict()
+    assert set(back) == set(original)
+    for key, value in back.items():
         assert torch.equal(value, original[key]), f"roundtrip drift in {key}"
+    assert any(key.startswith("flows.") for key in back), "no flow params converted"
+    assert any("decoders." in key and ".proj." in key for key in back), "no GMM heads converted"
 
 
-def test_tp2_replicated_module_gradients(nt):
+def test_tp2_replicated_module_gradients_with_noise(nt):
     if torch.cuda.device_count() < 2:
         pytest.skip("TP=2 check needs 2 visible GPUs")
     result = subprocess.run(
@@ -280,7 +308,8 @@ def test_tp2_replicated_module_gradients(nt):
             "-m",
             "torch.distributed.run",
             "--nproc_per_node=2",
-            "--master_port=29511",
+            "--rdzv-backend=c10d",
+            "--rdzv-endpoint=localhost:0",
             str(ASTRO_DIR / "scripts" / "tp2_grad_check.py"),
         ],
         cwd=REPO_ROOT,
@@ -293,41 +322,15 @@ def test_tp2_replicated_module_gradients(nt):
     assert "TP2 GRAD CHECK PASS" in result.stdout
 
 
-def test_50step_synthetic_run_and_checkpoint_conversion(nt, tmp_path_factory):
-    """torchrun 50 steps on synthetic data; convert; reload; reproduce loss."""
+@pytest.mark.network
+def test_50step_live_run_and_checkpoint_conversion(nt, tmp_path_factory):
+    """Train on live catalogs; convert; reload; reproduce a held-out batch loss."""
     workdir = tmp_path_factory.mktemp("nanotron_smoke")
-    config = _load_yaml(
-        ASTRO_DIR / "tests" / "fixtures" / "astropt3-test-tiny.yaml"
-    )
-    config["checkpoints"]["checkpoints_path"] = str(workdir / "checkpoints")
-    config_path = workdir / "test-tiny.yaml"
-    try:
-        config_path.write_text(yaml.safe_dump(config))
-    except OSError as error:
-        raise RuntimeError(f"cannot write {config_path}") from error
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "torch.distributed.run",
-            "--nproc_per_node=1",
-            "--master_port=29512",
-            str(NANOTRON_DIR / "run_train.py"),
-            "--config-file",
-            str(config_path),
-        ],
-        cwd=REPO_ROOT,
-        env={**os.environ, "CUDA_DEVICE_MAX_CONNECTIONS": "1"},
-        capture_output=True,
-        text=True,
-        timeout=1800,
-    )
-    assert result.returncode == 0, f"stdout:\n{result.stdout[-4000:]}\nstderr:\n{result.stderr[-4000:]}"
-
-    losses = [float(m) for m in re.findall(r"lm_loss: ([0-9.]+)", result.stdout)]
+    stdout = run_train(smoke_config(nt, workdir), workdir, "test-tiny")
+    losses = losses_from(stdout)
     assert len(losses) >= 40, f"expected ~50 logged losses, got {len(losses)}"
-    assert losses[-1] < 0.8 * losses[0], f"nanotron smoke did not learn: {losses[0]:.4f} -> {losses[-1]:.4f}"
+    # Likelihood loss can cross zero, so a ratio is not a learning criterion.
+    assert losses[-1] < losses[0] - 10.0, f"nanotron smoke did not learn: {losses[0]:.4f} -> {losses[-1]:.4f}"
 
     checkpoint = workdir / "checkpoints" / "50"
     assert (checkpoint / "model_config.json").exists()
@@ -340,7 +343,8 @@ def test_50step_synthetic_run_and_checkpoint_conversion(nt, tmp_path_factory):
             "-m",
             "torch.distributed.run",
             "--nproc_per_node=1",
-            "--master_port=29513",
+            "--rdzv-backend=c10d",
+            "--rdzv-endpoint=localhost:0",
             str(TOOLS_DIR / "convert_nanotron_to_hf.py"),
             f"--checkpoint_path={checkpoint}",
             f"--save_path={save_path}",
@@ -370,7 +374,8 @@ def test_50step_synthetic_run_and_checkpoint_conversion(nt, tmp_path_factory):
     nt.serialize.load_weights(
         model=nt_model, parallel_context=nt.parallel_context, root_folder=checkpoint
     )
-    flat = micro_batch(hf_model.config, skip=7)  # not the first training batch
+    nt_model.eval()
+    flat = micro_batch(hf_model.config, skip=7)  # fixed synthetic evaluation batch
     names = hf_model.config.modality_registry().names()
     with torch.no_grad():
         nt_loss = nt_model(**flat)["loss"].item()

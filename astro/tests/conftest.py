@@ -6,6 +6,7 @@ import torch
 from legacy_fixture import make_record
 
 from astropt3.config_io import load_model_config
+from astropt3.configuration_astropt3 import DEFAULT_MODALITIES, AstroPT3Config
 from astropt3.data.packing import ObjectSequencer, PackedCollator
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs" / "model"
@@ -19,7 +20,8 @@ os.environ.setdefault("WANDB_MODE", "disabled")
 @pytest.fixture(scope="session")
 def tiny_config():
     config, _ = load_model_config(CONFIG_DIR / "test-tiny.yaml")
-    return config
+    # Scalar regression coverage is independent of the four-survey YAML recipes.
+    return AstroPT3Config(**{**config.to_dict(), "modalities": DEFAULT_MODALITIES})
 
 
 @pytest.fixture(scope="session")

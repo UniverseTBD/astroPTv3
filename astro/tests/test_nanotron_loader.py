@@ -18,7 +18,7 @@ from astropt3.data.nanotron_loader import (
     PackedMicroBatches,
     build_astropt3_dataloader,
     consumer_seed,
-    decode_legacy_row,
+    decode_legacy_image,
 )
 from astropt3.data.nanotron_loader import (
     regroup_micro_batch as regroup,
@@ -150,26 +150,17 @@ def test_seeds_differ_across_rank_worker_and_retry():
     assert base == consumer_seed(42, 0, 0, 0)
 
 
-def test_decoder_recovers_record_fields():
-    record = decode_legacy_row(legacy_row(3))
-    assert record["image"]["flux"].shape == (3, 152, 152)
-    assert record["image"]["flux"].dtype == np.float32
-    assert record["image"]["band"] == ["des-g", "des-r", "des-z"]
-    for key in ("ebv", "flux_g", "flux_r", "flux_z", "fiberflux_g", "psfdepth_z", "z_spec"):
-        assert isinstance(record[key], float), key
-    for band in ("des-g", "des-r", "des-z"):
-        assert isinstance(record[f"psf_fwhm_{band}"], float)
+def test_decoder_recovers_image():
+    image = decode_legacy_image(legacy_row(3)["image"])
+    assert set(image) == {"flux", "band"}
+    assert image["flux"].shape == (3, 152, 152)
+    assert image["flux"].dtype == np.float32
+    assert image["band"] == ["des-g", "des-r", "des-z"]
 
 
-def test_decoder_rejects_bad_shape_and_id():
-    row = legacy_row(0)
-    row["image"] = {"band": ["des-g"], "flux": [[0.0]]}
+def test_decoder_rejects_bad_shape():
     with pytest.raises(ValueError, match="flux has shape"):
-        decode_legacy_row(row)
-    row = legacy_row(0)
-    del row["object_id"]
-    with pytest.raises(ValueError, match="object_id"):
-        decode_legacy_row(row)
+        decode_legacy_image({"band": ["des-g"], "flux": [[0.0]]})
 
 
 @pytest.mark.parametrize("dataframe", [False, True])
@@ -198,10 +189,8 @@ class _AmbiguousBoolMapping:
 
 
 def test_decoder_never_bool_checks_nested_image_scalar():
-    row = legacy_row(3)
-    row["image"] = _AmbiguousBoolMapping(row["image"])
-    record = decode_legacy_row(row)
-    assert record["image"]["flux"].shape == (3, 152, 152)
+    image = decode_legacy_image(_AmbiguousBoolMapping(legacy_row(3)["image"]))
+    assert image["flux"].shape == (3, 152, 152)
 
 
 @pytest.mark.parametrize("error", [

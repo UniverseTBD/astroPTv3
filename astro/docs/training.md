@@ -223,7 +223,8 @@ initialization/resume is honoured, and an unresolvable resume fails rather than
 starting from random weights. Supported: one AstroPT streaming stage, PP=CP=EP=1.
 `--bandwidth-cap` and `--cache-state` only record context; nothing is throttled
 or flushed. On one GPU, a TP=1 recipe runs its per-GPU workload at DP=1 (same
-model, batch shape and loader workers; recorded as an override).
+model, batch shape and loader workers; recorded as an override). The old DP1
+benchmark preset is retired.
 
 Outputs: `baseline.yaml`/`effective.yaml`/`resolved.yaml`, `run.json` (window
 and overrides), `rankN.json` (status, topology, host, GPU/CPU/RAM, software,

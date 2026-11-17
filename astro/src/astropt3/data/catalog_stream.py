@@ -19,11 +19,12 @@ from lsdb.streams.catalog_streams import CrossMatchStream, InfiniteStream, _rest
 
 from . import nanotron_loader as loader
 from . import telemetry
+from .packing import has_modality
 from .scalar_registry import _transforms
 
 # Decoder names describe verified payload contracts, not arbitrary calibrations.
 _PROFILES = {
-    "legacy_image": ("image", ("band", "flux", "psf_fwhm"), "image"),
+    "legacy_image": ("image", ("band", "flux"), "image"),
     "hsc_image": ("image", ("band", "flux", "scale"), "image"),
     "desi_spectrum": ("spectrum", ("flux", "lambda", "mask"), "spectrum"),
     "sdss_spectrum": ("spectrum", ("flux", "lambda", "mask"), "spectrum"),
@@ -132,6 +133,9 @@ class CatalogStream:
         if not isinstance(self.spec["worker_memory_limit"], str) or not self.spec["worker_memory_limit"]:
             raise ValueError("worker_memory_limit must be a Dask memory-limit string")
         self.columns = list(dict.fromkeys(self.columns))
+        # Fail at config time, before train.py creates outputs or a W&B run.
+        if len(self.catalogs) > 1 and "min_catalogs" not in inspect.signature(CrossMatchStream).parameters:
+            raise ValueError("configured catalog streams require LSDB's multi-catalog/min_catalogs API")
 
     def decode_row(self, mapped):
         row = loader._row_from_map_rows(mapped, self.nested)
@@ -163,8 +167,7 @@ class CatalogStream:
             if value is None:
                 continue
             if decoder == "legacy_image":
-                decoded = loader.decode_legacy_row({"object_id": record["object_id"], "image": value})
-                result = decoded["image"]
+                result = loader.decode_legacy_image(value)
             elif decoder == "hsc_image":
                 flux = loader._stack_nested(value.get("flux")).astype(np.float32, copy=False)
                 bands = [str(band) for band in value.get("band", ())]
@@ -196,17 +199,12 @@ class CatalogStream:
                    for i, cat in enumerate(self.catalogs)):
                 return {"record": None}
             raise ValueError("crossmatched row has no supported data or object_id")
-        for name in self.registry.names():
-            modality = self.registry.get_config(name)
-            if (all(key in record for key in modality.record_keys)
-                    and (name != "Z" or record.get("ZWARN") == 0)):
-                return {"record": record}
+        if any(has_modality(self.registry.get_config(name), record) for name in self.registry.names()):
+            return {"record": record}
         return {"record": None}
 
     def draws(self, *, seed, rank, worker_id):
         """Yield (epoch, finite records) with bounded transport retries, no cursor."""
-        if len(self.catalogs) > 1 and "min_catalogs" not in inspect.signature(CrossMatchStream).parameters:
-            raise RuntimeError("configured catalog streams require LSDB's multi-catalog/min_catalogs API")
         telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in self.catalogs})
         failures = generation = draw = 0
         while True:
