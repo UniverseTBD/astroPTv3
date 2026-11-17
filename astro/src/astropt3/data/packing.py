@@ -66,6 +66,12 @@ IMAGE_CROP = 96
 SPAN_ORDER_VERSION = "adr0008_uniform_v1"
 
 
+def has_modality(modality, record: dict) -> bool:
+    """Whether a record carries a modality; ``Z`` also needs ``ZWARN`` 0 or absent."""
+    return (all(key in record for key in modality.record_keys)
+            and (modality.name != "Z" or not record.get("ZWARN")))
+
+
 def span_order(names, object_id: str, epoch: int = 0) -> list[str]:
     """The ADR 0008 span order for one object: uniform, seeded, resume-exact.
 
@@ -209,7 +215,7 @@ class ObjectSequencer:
                 ) from error
         if not all(math.isfinite(value) for value in values):
             return None
-        if name == "Z" and bool(record.get("ZWARN") or False):
+        if not has_modality(mod, record):
             return None
         return values
 

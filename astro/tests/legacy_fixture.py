@@ -177,9 +177,8 @@ def legacy_row(index: int) -> dict:
     HATS/``InfiniteStream`` pandas row (nested ``image`` dict, one scalar
     column per catalog field, derived keys absent).
 
-    ADR 0015 interim check: this is what
-    ``nanotron_loader.decode_legacy_row`` must decode back to the
-    ``make_record`` image-side contract.
+    ``nanotron_loader.decode_legacy_image`` must decode its ``image`` back
+    to the ``make_record`` image contract.
     """
     record = make_record(index, image_only_fraction=1.0)
     return {

@@ -415,6 +415,16 @@ def test_invalid_configuration_fails_before_opening_catalogs(recipe, offline, ta
     assert not offline.opened
 
 
+def test_old_lsdb_rejected_at_config_time(recipe, offline, monkeypatch):
+    def old_crossmatch_stream(left, *others, min_surveys=1, **kwargs):
+        raise AssertionError("must not open a stream")
+
+    monkeypatch.setattr(streaming, "CrossMatchStream", old_crossmatch_stream)
+    with pytest.raises(ValueError, match="min_catalogs API"):
+        streaming.CatalogStream(*_case(recipe))
+    assert not offline.opened
+
+
 @pytest.mark.parametrize("separate_flag", [False, True])
 def test_redshift_requires_quality_from_same_catalog(separate_flag):
     catalogs = [{"name": "redshifts", "repo": "offline/redshifts", "decoder": "scalars",

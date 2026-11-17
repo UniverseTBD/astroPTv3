@@ -23,6 +23,7 @@ from typing import Any, cast
 import yaml
 
 from astropt3.data.catalog_stream import CatalogStream
+from astropt3.data.packing import has_modality
 
 
 def _draw_live_records(config, catalog_stream: dict, rows: list[int], stream_seed: int) -> list[dict]:
@@ -34,11 +35,7 @@ def _draw_live_records(config, catalog_stream: dict, rows: list[int], stream_see
         _, records = next(draws)
         records = list(records)
     modalities = config.modality_registry().modalities.values()
-    records.sort(key=lambda record: sum(
-        all(key in record for key in modality.record_keys)
-        and (modality.name != "Z" or record.get("ZWARN") == 0)
-        for modality in modalities
-    ), reverse=True)
+    records.sort(key=lambda record: sum(has_modality(m, record) for m in modalities), reverse=True)
     if max(rows) >= len(records):
         raise ValueError(f"drew {len(records)} usable rows, but --rows asked for index {max(rows)}")
     return [records[index] for index in rows]

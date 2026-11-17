@@ -148,37 +148,16 @@ def _row_from_map_rows(mapped: Mapping, nested: dict[str, tuple[str, ...]]) -> d
     return row
 
 
-def decode_legacy_row(row: Mapping) -> dict:
-    """Decode a LegacySurvey payload, not a separate source-selection mode."""
-    image = _as_mapping(row.get("image"))
+def decode_legacy_image(value: Any) -> dict:
+    """Decode one LegacySurvey image payload to the ``ObjectSequencer`` contract."""
+    image = _as_mapping(value)
     bands = [str(band) for band in image.get("band", ())]
     flux = _stack_nested(image.get("flux")).astype(np.float32, copy=False)
     if flux.shape != IMAGE_SHAPE:
         raise ValueError(f"image flux has shape {flux.shape}, expected {IMAGE_SHAPE}")
     if len(bands) != IMAGE_SHAPE[0]:
         raise ValueError(f"image has {len(bands)} bands, expected {IMAGE_SHAPE[0]}")
-
-    object_id = row.get("object_id")
-    if object_id is None:
-        raise ValueError("LegacySurvey row has no object_id")
-    record = {
-        "object_id": str(object_id),
-        "image": {"flux": flux, "band": bands},
-    }
-    for key, value in row.items():
-        if key in {"object_id", "image"}:
-            continue
-        number = _finite_scalar(value)
-        if number is not None:
-            record[str(key)] = number
-
-    fwhm = image.get("psf_fwhm")
-    if fwhm is not None and len(fwhm) == len(bands):
-        for band, value in zip(bands, fwhm, strict=True):
-            number = _finite_scalar(value)
-            if number is not None and 0 < number < 5:
-                record[f"psf_fwhm_{band}"] = number
-    return record
+    return {"flux": flux, "band": bands}
 
 
 def _decode_spectrum(value: Any) -> dict:
