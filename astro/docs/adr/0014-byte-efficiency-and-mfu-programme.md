@@ -1123,17 +1123,17 @@ information, not copying. If either head looks too good, compare it against
 the other source as the baseline first.
 
 *Measured cost (23,043 live records, 70M recipe, seed 0).* "Before" is the
-same records with the previous 9 scalars. Each scalar span is 3 tokens.
+same records with the previous 9 scalars and no Galaxy10 image. Each scalar span is 3 tokens.
 
 | | mean | p50 | p95 | p99 | max | next-fit packing at 4096 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | before | 145.9 | 147 | 444 | 590 | 629 | 0.969 |
-| after | 158.8 | 159 | 474 | 643 | 710 | 0.966 |
+| after | 159.0 | 159 | 474 | 647 | 908 | 0.966 |
 
-Tokens per record rise 8.8%; every object still fits in one row. Record
+Tokens per record rise 8.9%; every object still fits in one row (the 908-token maximum is a Galaxy10 object carrying two 256-patch RGB images). Record
 shares for the new spans: HSC scalars 40–41%, Legacy scalars 35%, PROVABGS
 10%, photo-z sSFR 6.1%, MPA-JHU fibre 2.0%, `sdss_vdisp` 1.9%, NSA 1.1–1.2%,
-Galaxy Zoo follow-ups 0.1–0.6%, ALFALFA under 0.05%. The rare heads will see
+Galaxy Zoo follow-ups 0.1–0.6%, Galaxy10 0.1%, ALFALFA under 0.05%. The rare heads will see
 few targets per step; read their losses with that in mind.
 
 *Galaxy10 (`UniverseTBD/mmu_gz10`).* 17,736 objects, ten classes
