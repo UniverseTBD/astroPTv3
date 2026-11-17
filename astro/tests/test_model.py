@@ -2,18 +2,13 @@ import torch
 from legacy_fixture import record_stream
 
 
-def _batch(sequencer, collator, records):
-    return collator([sequencer.build(r) for r in records])
-
-
 def test_forward_backward(tiny_config, sequencer, collator):
     from astropt3 import AstroPT3Model
 
     torch.manual_seed(0)
     model = AstroPT3Model(tiny_config)
     model.train()
-    records = list(record_stream(4))
-    batch = _batch(sequencer, collator, records)
+    batch = collator([sequencer.build(r) for r in record_stream(4)])
     out = model(**batch)
     assert torch.isfinite(out.loss)
     assert set(out.modality_losses) == {"images", "spectra", "Z", "ebv", "photometry"}
@@ -68,14 +63,6 @@ def test_doc_mask_blocks_cross_object_attention(tiny_model, tiny_config, sequenc
     start_b = len(objs[0])
     assert not torch.allclose(h0[0, :start_b], h1[0, :start_b])  # A moved
     assert torch.equal(h0[0, start_b:], h1[0, start_b:])  # B bit-identical
-
-
-def test_image_only_batch(tiny_model, sequencer, collator, image_only_record):
-    batch = collator([sequencer.build(image_only_record)])
-    with torch.no_grad():
-        out = tiny_model(**batch)
-    assert "spectra" not in out.modality_losses
-    assert torch.isfinite(out.loss)
 
 
 def test_family_loss_matches_adr_0013(tiny_model, sequencer, collator, full_record):

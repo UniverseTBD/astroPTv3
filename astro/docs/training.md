@@ -222,8 +222,10 @@ trackers are disabled and the overrides recorded. Explicit local
 initialization/resume is honoured, and an unresolvable resume fails rather than
 starting from random weights. Supported: one AstroPT streaming stage, PP=CP=EP=1.
 `--bandwidth-cap` and `--cache-state` only record context; nothing is throttled
-or flushed. On one GPU, `astropt3-70m-dp1.yaml` runs the 70M recipe's per-GPU
-workload (DP=1; same model, batch shape and loader workers).
+or flushed. On one GPU, use `astropt3-70m-four-modal.yaml`, the current training
+recipe (echo factor 4, four loader workers, `min_catalogs: 3`). The old DP1
+benchmark preset is retired; its non-echo, eight-worker workload is not directly
+comparable to this recipe.
 
 Outputs: `baseline.yaml`/`effective.yaml`/`resolved.yaml`, `run.json` (window
 and overrides), `rankN.json` (status, topology, host, GPU/CPU/RAM, software,

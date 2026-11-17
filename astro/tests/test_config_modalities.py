@@ -7,9 +7,7 @@ import yaml
 
 ASTRO_DIR = Path(__file__).resolve().parents[1]
 REFERENCE = ASTRO_DIR / "configs/nanotron/astropt3-70m-four-modal.yaml"
-CONFIGS = sorted((ASTRO_DIR / "configs").rglob("*.yaml")) + [
-    ASTRO_DIR / "tests/fixtures/astropt3-test-tiny.yaml"
-]
+CONFIGS = sorted((ASTRO_DIR / "configs").rglob("*.yaml"))
 
 
 @pytest.mark.parametrize("path", CONFIGS, ids=lambda path: str(path.relative_to(ASTRO_DIR)))

@@ -30,7 +30,7 @@ index stays auditable.
 Per-modality `TinyFlow1D` + `GMMHead`, exact patch-space likelihood
 `mean(NLL_GMM(z) − logdet)`; standardization skipped so the record→token
 map stays invertible. Tracked as `astro-phase5`; gates in
-`tests/test_jetformer_gpu.py`.
+`tests/test_nanotron_gpu.py`.
 
 The plan/run-guide/diagnosis entries were deleted 2026-09-28 once their
 conclusions lived in the ADRs and the lab book: the noise/convergence

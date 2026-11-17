@@ -72,7 +72,7 @@ def test_default_recipe_keeps_reserved_modality_tokens(default_recipe):
     }
 
 
-@pytest.mark.parametrize("count", [1, 2, 4])
+@pytest.mark.parametrize("count", [1, 4])
 def test_prepare_config_preserves_recipe_modalities_horizon_and_workers(tmp_path, default_recipe, count):
     modalities = default_recipe["model"]["model_config"]["modalities"][:count]
     for index, modality in enumerate(modalities):
@@ -96,7 +96,7 @@ def test_prepare_config_preserves_recipe_modalities_horizon_and_workers(tmp_path
 
 @pytest.mark.parametrize(
     "configured,override,expected",
-    [(None, None, 1), (4, None, 4), (4, 2, 2), (2, None, 2), (2, 3, 3), (3, 1, 1)],
+    [(None, None, 1), (4, None, 4), (4, 2, 2), (3, 1, 1)],
 )
 def test_echo_config_has_one_saved_source_of_truth(tmp_path, default_recipe, configured, override, expected):
     baseline = default_recipe

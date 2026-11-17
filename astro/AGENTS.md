@@ -140,8 +140,8 @@ the `astropt3_streaming` dataset type in `run_train.py`, and
 `tp_mode: ALL_REDUCE` are asserted (modality modules are TP-replicated via
 nanotron's tied-parameter mechanism). `nanotron_loader.py` must stay
 importable without nanotron; keep all modality/packing logic in `astro/`
-so the fork stays thin. gpu-marked tests (`tests/test_nanotron_gpu.py`,
-`tests/test_jetformer_gpu.py`) cover HF↔nanotron forward/loss parity,
+so the fork stays thin. gpu-marked tests (`tests/test_nanotron_gpu.py`)
+cover HF↔nanotron forward/loss parity,
 exact weight-conversion round-trips, TP=2 replicated gradients (including
 the noise curriculum), and a 50-step smoke run with checkpoint conversion —
 see the lab book (EXPERIMENTS.md) Part I Phase 3 notes for the venv recipe.
