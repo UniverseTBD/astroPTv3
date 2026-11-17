@@ -18,6 +18,7 @@ dependencies = [
     "lsdb",
     "hats",
     "huggingface-hub",
+    "pillow>=12.3.0",
 ]
 
 [project.optional-dependencies]
@@ -37,20 +38,8 @@ dev = [
 
 [tool.uv.sources]
 nanotron = { path = "../nanotron", editable = true }
-# Tracks lsdb PR astronomy-commons/lsdb#1584 ("Filtering cross-match
-# stream", open, unmerged as of 2026-09-28), branch selective-x-match,
-# which adds streams.CrossMatchStream: an InfiniteStream/CatalogStream
-# subclass that does the left-join crossmatch(es) per drawn partition,
-# optionally skipping a right catalog for a pixel via precomputed skymap
-# count fractions. Tracking the branch (not a pinned commit) is
-# deliberate while the PR is WIP -- re-run `uv lock -P lsdb` to pick up
-# upstream fixes; re-pin to a release once it merges and ships.
-lsdb = { git = "https://github.com/astronomy-commons/lsdb", branch = "selective-x-match" }
-# hats from git main for astronomy-commons/hats#764 (merged 2026-10-13,
-# not in a release yet; PyPI's 0.11.0 lacks it). Without it,
-# nested-pandas >= 0.7.1 reads hub partitions as local files, at ~4x the
-# range requests. Re-pin to a release once one newer than 0.11.0 ships.
-hats = { git = "https://github.com/astronomy-commons/hats", branch = "main" }
+# Merged multi-catalog stream API (min_catalogs); keep training resolution immutable.
+lsdb = { git = "https://github.com/astronomy-commons/lsdb", rev = "8aa1e63f90d3b80e79e997dfa473535a425bad44" }
 
 [build-system]
 requires = ["hatchling"]

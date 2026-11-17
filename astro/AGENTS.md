@@ -29,8 +29,7 @@ uv run pytest -m network tests/test_lsdb_stream.py   # live hub stream check
 ```
 
 These two (pytest, count_params) are the phase verification gates and must
-pass before any phase is declared done; ADR 0015 retired the `train_smoke`
-gate together with the local-corpus path it exercised. `@pytest.mark.gpu`
+pass before any phase is declared done. `@pytest.mark.gpu`
 tests run wherever a GPU environment exists (`uv run pytest -m gpu` in
 the GPU venv); on any shared node, pin a device
 (`CUDA_VISIBLE_DEVICES`) and check `nvidia-smi` before claiming one.
@@ -43,18 +42,17 @@ stages is implicit and easy to break, so understand it before editing:
 1. **Records** are MMU-schema dicts (`image.flux` float32 (3,152,152);
    `spectrum` with 7781-bin `flux/lambda/ivar/mask`); both modalities are
    optional per record (image-only is the common case). Offline fixtures
-   live in `tests/legacy_fixture.py` (ADR 0015 deleted `data/synthetic.py`
-   with the rest of the local-corpus path). Real records are **streamed
+   live in `tests/legacy_fixture.py`. Real records are **streamed
    live from the HF hub inside each DataLoader worker** by
-   `data/nanotron_loader.py` via LSDB (ADR 0015): a plain
-   `lsdb.streams.InfiniteStream` over LegacySurvey, or — with
-   `crossmatch_desi: true` — a `CrossMatchStream` (lsdb PR #1584, tracked
-   as a git dependency on `selective-x-match`) with DESI on the left and
-   LegacySurvey joined right through `OuterKdTreeCrossmatch`
-   (`data/outer_crossmatch.py`), which also recovers the unmatched Legacy
-   images a plain join would drop. `count_fraction_threshold` is pinned to
-   0.0: 0.5 saved 31% Legacy bytes but cost ~20% tokens/s and image
-   coverage (EXPERIMENTS.md §9). Each worker owns a dask `LocalCluster`
+   `data/catalog_stream.py` via merged LSDB main (commit pinned in
+   `uv.lock`): `InfiniteStream` for one catalog, `CrossMatchStream` for several.
+   Explicit YAML `catalog_stream` lists define the sources and join policy.
+   Generation uses
+   this same stream. Upstream owns footprint and boundary-match semantics;
+   AstroPT retains decoding, calibration, quality gates and bounded retries.
+   `min_catalogs` selects sky coverage, not a per-record modality count;
+   unknown settings are rejected.
+   Each worker owns a dask `LocalCluster`
    (threads only, `partitions_per_chunk=4`) so the next draw's fetch
    overlaps the current one's decode; rows decode through
    `NestedFrame.map_rows`, never `iterrows`. `num_loading_workers` counts
@@ -64,8 +62,8 @@ stages is implicit and easy to break, so understand it before editing:
    revisit records (ADR 0015; `docs/training.md` §5). Recognized
    transport/storage errors discard the iterator and reopen under bounded
    backoff; decode/validation and unknown errors fail immediately.
-   Provenance (lsdb/hats versions, catalog, columns) is logged at startup
-   and `uv.lock` pins the resolved LSDB commit.
+   Startup logs report reader identity and footprint counts; the local
+   benchmark report records catalog configuration and package versions.
 2. **`ObjectSequencer`** (`data/packing.py`) turns a record into an
    `ObjectSeq`: central 96×96 crop (`packing.IMAGE_CROP`; JWST cubes are
    already 96×96) + physical band-registry normalization
@@ -83,13 +81,12 @@ stages is implicit and easy to break, so understand it before editing:
    modality, spans serialized in a **uniform random order seeded on
    `crc32(object_id) ^ epoch`** (resume-exact, always on — every
    conditional among the present spans lands in training; ADR 0008,
-   generalizing 0005's bimodal 50/50 flip; pre-rule fixed-order
-   checkpoints are incompatible). Images → 144 patch-8 tokens
+   generalizing 0005's bimodal 50/50 flip). Images → 144 patch-8 tokens
    (192 floats); spectra → 31 patch-256 tokens with normalized per-patch
    mean wavelength as a continuous position; ADR 0008 adds one-token
    **scalar modalities** (`Z` gated on ZWARN==0, `ebv`, joint 3-band
-   `photometry`; `data/scalar_registry.py` fixed transforms, loss_weight
-   0.1) predicted by `GMMHead`s (`scalar_gmm_k`) directly — no flow, no
+   `photometry`; `data/scalar_registry.py` fixed transforms; the scalar family
+   is weighted 0.1) predicted by `GMMHead`s (`scalar_gmm_k`) directly — no flow, no
    logdet, plain `gmm_nll` on the raw normalized value. The
    linear probe builds scalar-free sequences (`include_scalars=False`)
    so R² stays a representation metric; `eval/scalar_head.py` is the
@@ -110,7 +107,9 @@ stages is implicit and easy to break, so understand it before editing:
    `SmolLM3Model(inputs_embeds=…)` → per-modality regression heads. The
    jetformer tokeniser (JetFormer/GIVT, ported from astroPT v2's
    sogol_branch) is the sole regression head: each patch modality's tokens
-   flow through a per-modality `TinyFlow1D` to a latent z that is both
+   flow through a per-modality `JetFormerFlow` (`flows.py`: affine couplings
+   with ViT conditioners attending across each object's modality span;
+   `docs/jetformer-flow.md`) to a latent z that is both
    embedded and predicted by a per-modality `GMMHead`, with loss the exact
    patch-space likelihood `mean(NLL_GMM(z) - logdet)` at positions one left
    of each modality token (`<|begin_m|>` predicts patch 0 — astroPT's
@@ -140,11 +139,11 @@ the `astropt3_streaming` dataset type in `run_train.py`, and
 `tp_mode: ALL_REDUCE` are asserted (modality modules are TP-replicated via
 nanotron's tied-parameter mechanism). `nanotron_loader.py` must stay
 importable without nanotron; keep all modality/packing logic in `astro/`
-so the fork stays thin. gpu-marked tests (`tests/test_nanotron_gpu.py`,
-`tests/test_jetformer_gpu.py`) cover HF↔nanotron forward/loss parity,
+so the fork stays thin. gpu-marked tests (`tests/test_nanotron_gpu.py`)
+cover HF↔nanotron forward/loss parity,
 exact weight-conversion round-trips, TP=2 replicated gradients (including
 the noise curriculum), and a 50-step smoke run with checkpoint conversion —
-see the lab book (EXPERIMENTS.md) Part I Phase 3 notes for the venv recipe.
+see `docs/training.md` §1 for the GPU venv recipe.
 
 **Checkpointing & eval**: `checkpoints.checkpoint_schedule: pythia` saves
 at steps 1,2,4,…,512 plus every `checkpoint_interval` (canonical schedule
@@ -156,12 +155,11 @@ may be revisited (ADR 0015; `docs/training.md` §5). Evaluation never runs
 in the trainer: convert a checkpoint with the fork's
 `tools/astropt3/convert_nanotron_to_hf.py`, then score the HF artifact
 with `astropt3.eval` (`val_loss`, `linear_probe`, `scalar_head`,
-`samples`); ADR 0015 removed the automated `run_probe_sweep` sidecar.
+`samples`).
 
 A behavior to remember when touching data or fixtures: per-patch
 standardization turns flat/noise-only patches into irreducible N(0,1)
 targets — synthetic fixtures must contain patch-scale structure or smoke
 training cannot learn. The fixtures' image flux is nMgy-scale (cores ~0.1,
 noise ~0.001) so the physical normalization's fixed 0.01 nMgy arcsinh knee
-lands in the same regime as on real LegacySurvey data; pre-physical-norm
-(PU-asinh) checkpoints are incompatible — retrain.
+lands in the same regime as on real LegacySurvey data.

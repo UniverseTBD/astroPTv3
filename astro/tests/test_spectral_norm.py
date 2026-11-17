@@ -104,7 +104,8 @@ def test_sequencer_uses_config_divisor(tiny_config):
     expected, _ = patchify_spectrum(
         spectral_normalize(flux, lam, divisor=3.16), lam, 256
     )
-    assert torch.allclose(seq.values["spectra"], expected)
+    n = len(flux)  # the tail padding is fill noise (packing.noise_fill), not data
+    assert torch.allclose(seq.values["spectra"].flatten()[:n], expected.flatten()[:n])
     default_seq = ObjectSequencer(tiny_config).build(record)
     assert not torch.allclose(seq.values["spectra"], default_seq.values["spectra"])
     assert _DIV_FACTOR == 10.0

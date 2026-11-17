@@ -2,10 +2,8 @@
 
 *The operational guide: environments, live survey data, launching, and
 checkpoint/resume. Background on the model is in
-[`architecture.md`](architecture.md). The initial experimental LSDB cutover
-is recorded in [ADR 0015](adr/0015-lsdb-infinite-stream-training.md);
-subsequent run configs can also use DESI×LegacySurvey crossmatching. The old
-contract's `train_smoke` gate remains absent on this branch.*
+[`architecture.md`](architecture.md). Every recipe uses YAML-configured
+catalog streams.*
 
 ## 1. Environments
 
@@ -31,12 +29,12 @@ Verify the env on a GPU box: `pytest -m gpu tests/test_nanotron_gpu.py`.
 There is **no prep step** and no local corpus. `data/nanotron_loader.py` opens
 Multimodal Universe HATS catalogs via LSDB inside each DataLoader worker,
 decodes rows into the shared record shape, then sequences and packs them for
-nanotron. Image-only configs read LegacySurvey North; crossmatch-enabled
-configs also include DESI EDR SV3 spectra. Depending on survey overlap,
-records can carry an image, a spectrum, or both. Recovered image-only rows
-come from LegacySurvey partitions visited by the join, **not** from every
-LegacySurvey partition. The active YAML and loader are the sources for the
-stream implementation; its fetch and prefetch settings are experimental.
+nanotron. The default recipe joins Legacy North, DESI, SDSS, and HSC; other
+YAMLs can select different supported modality/catalog combinations (§9).
+Depending on overlap, records carry different subsets of the configured
+modalities. Recovered unmatched records come from partitions visited by the
+join, **not** every survey partition. The active YAML and loader are the
+sources for the stream implementation; fetch/prefetch settings are experimental.
 
 Facts to know:
 
@@ -57,25 +55,20 @@ errors fail immediately.
 
 ## 3. Configs
 
-Full nanotron run configs live in `astro/configs/nanotron/`. For the imaging
-+ spectra pilot, the dataset block includes:
+Full nanotron run configs live in `astro/configs/nanotron/`: the Pythia ladder
+`astropt3-{70m,160m,410m,1b,1p4b,2p8b,6p9b,12b}.yaml` plus single-GPU smoke
+recipes `astropt3-{1m,10m}.yaml`. Every ladder rung trains the same
+modalities from the same catalog streams (four MMU surveys plus galaxies-with-hats
+RGB images and nine scalars); rungs differ in model size, cluster
+topology, batch and LR. The convenience launcher's default is
+**`astropt3-70m.yaml`**, run at DP=1 with at most 4 loader workers (TP=1 rungs
+only). Every ladder rung echoes each draw 4 times.
+Model, catalog list, join policy, worker count and schedule are explicit YAML,
+not injected by the script (see §9).
 
-```yaml
-data_stages:
-- data:
-    dataset:
-      is_astropt3_streaming: true
-      crossmatch_desi: true         # include DESI spectra where present
-      # ar_replicas: 1              # optional: distinct AR factorisations
-      # replica_placement: decorrelated
-    num_loading_workers: 8          # concurrent LSDB readers per DP rank
-    seed: 42
-```
-
-The catalog projections and stream policy live in
-`astropt3.data.nanotron_loader`. Without `crossmatch_desi: true`, the source
-is LegacySurvey-only. The retired knobs (`data_root`, `match_index`,
-synthetic fractions, `object_id_log`) are not supported.
+`catalog_stream` is required and lists the catalogs explicitly; unknown
+settings are rejected. Matching and footprint selection follow LSDB, pinned by
+`uv.lock`; AstroPT applies calibration and quality gates.
 
 Governing knobs, top to bottom:
 
@@ -101,13 +94,24 @@ checkpoints:
   resume_checkpoint_path: null # set to the checkpoints dir to resume
 ```
 
-Use the actual run YAML for batch sizes and parallelism; the historical
-recipe and size-ladder rationale live in
-[`../EXPERIMENTS.md`](../EXPERIMENTS.md) Part I.
+Use the actual run YAML for batch sizes and parallelism.
 
 ## 4. Launching
 
-Single node (from the repo root):
+Single GPU (from the repo root; choose an available device):
+
+```bash
+bash astro/scripts/run_train.bash GPU_INDEX       # default recipe, echo 4
+bash astro/scripts/run_train.bash GPU_INDEX 1     # disable echoing
+bash astro/scripts/run_train.bash GPU_INDEX 2 --config-file my-recipe.yaml
+```
+
+This launches `astro/scripts/train.py`. Set `ASTROPT3_ENV` to the GPU venv;
+the local launcher defaults to `.venv-astropt3` in the repository. It uses the
+installed LSDB/HATS versions, which must match `astro/uv.lock` and support the
+multi-catalog/min_catalogs API; train.py checks this before creating outputs.
+
+Multi-GPU on one node uses the same YAML-configured loader:
 
 ```bash
 CUDA_DEVICE_MAX_CONNECTIONS=1 \
@@ -126,14 +130,13 @@ The launcher sources `$ASTROPT3_ENV` (default `../astroPTv3_gpuenv`) and
 rendezvous on the first node. **Always dry-run first**, checking
 tokens/s/GPU, MFU, and memory, before committing a real run.
 
-Do not set `HF_DATASETS_OFFLINE=1` — training streams from the Hub. The
-source-backed evaluation sidecar (`run_probe_sweep.py`) and `EVAL_GPU`
-co-launch hook are removed; §6 describes the remaining model-side tools.
+Do not set `HF_DATASETS_OFFLINE=1` — training streams from the Hub. §6
+describes the model-side evaluation tools.
 
 ## 5. Checkpoints and resume
 
 Checkpoint dirs `{1,2,4,...,512,1000,...}` hold model weights (bf16),
-optimizer + LR-scheduler state, RNG states, `model_config.json`;
+optimizer + LR-scheduler state, RNG states, `model_config.json`, `config.yaml`;
 `latest.txt` is written last, so any step dir it covers is complete.
 
 Resume:
@@ -148,6 +151,10 @@ LSDB stream is cursorless: resume opens a fresh stream and records may be
 revisited immediately. There is no exact-sequence continuation, no replay
 audit, and no worker-count constraint on resume.
 
+Resume needs a recipe whose modalities match the checkpoint's. The runner
+reads the checkpoint's saved YAML only for the echo factor; catalogs come from
+the launch YAML.
+
 Watch the logs: `lm_loss`, per-modality `images_loss` and (when DESI is
 included) `spectra_loss`, `tokens_per_sec_per_gpu`, `model_tflops_per_gpu`,
 and memory lines. Exact-likelihood losses can be negative.
@@ -159,7 +166,16 @@ Source-backed validation/probe checkpoint sweeps are deferred.
 batches), `embed_objects` + `ridge_r2` (probe on supplied objects),
 `scalar_head_metrics`, and sampling/rendering. `scripts/generate.py` remains
 a separate live-sample CLI; it is **not** a fixed validation suite or an
-automated checkpoint sweep.
+automated checkpoint sweep. Generation uses the same configured stream:
+
+```bash
+python astro/scripts/generate.py --checkpoint <hf_dir> \
+    --config-file astro/configs/nanotron/<recipe>.yaml
+```
+
+The checkpoint's modalities must have compatible outputs in that recipe. One
+configured draw supplies templates, ordered by active modality count; `--rows`
+selects positions in that ordering. Catalogs are never inferred from the model.
 
 ## 7. Verification gates
 
@@ -167,8 +183,6 @@ automated checkpoint sweep.
    `astro/`. Plain `uv run pytest` also selects network-marked tests, which
    may fail when the Hub is unavailable.
 2. `uv run python scripts/count_params.py` for current size totals.
-3. The former synthetic-dependent `train_smoke` gate is suspended; these
-   checks do **not** complete that phase gate.
 
 For a bounded live check with Hub access:
 `uv run pytest -m network tests/test_lsdb_stream.py`.
@@ -195,8 +209,8 @@ trackers are disabled and the overrides recorded. Explicit local
 initialization/resume is honoured, and an unresolvable resume fails rather than
 starting from random weights. Supported: one AstroPT streaming stage, PP=CP=EP=1.
 `--bandwidth-cap` and `--cache-state` only record context; nothing is throttled
-or flushed. On one GPU, `astropt3-70m-dp1.yaml` runs the 70M recipe's per-GPU
-workload (DP=1; same model, batch shape and loader workers).
+or flushed. On one GPU, a TP=1 recipe runs its per-GPU workload at DP=1 (same
+model, batch shape and loader workers; recorded as an override).
 
 Outputs: `baseline.yaml`/`effective.yaml`/`resolved.yaml`, `run.json` (window
 and overrides), `rankN.json` (status, topology, host, GPU/CPU/RAM, software,
@@ -228,3 +242,66 @@ GPU's rated dense BF16 peak. Peaks come from an exact-name table
 GPU, a MIG slice or a non-BF16 run reports MFU as `null`, never zero.
 `rankN.json` also records each up physical NIC's negotiated link speed. The
 terminal shows the fastest per host; it is not internet or HF-route bandwidth.
+
+## 9. YAML-driven N-modality training and shuffled echoing
+
+Use the launch commands in §4. The local runner requires one GPU and one data
+stage; YAML owns the training settings.
+Each launch creates a new output directory. The Python CLI, `astro/scripts/train.py`,
+accepts `--output`, `--resume-from CHECKPOINT_ROOT`, and `--max-steps` for startup
+checks without changing the configured learning-rate schedule.
+
+### Catalogs and modalities
+
+Copy the [default YAML](../configs/nanotron/astropt3-70m.yaml).
+`model.model_config.modalities` and
+`data_stages[0].data.dataset.catalog_stream.catalogs` are independent lists;
+modality `record_keys` match catalog outputs. A catalog supplies `record_key`
+and/or `scalar_columns` (**record key → flat catalog column**). Keep existing
+token IDs frozen; new names need non-colliding IDs and sufficient `vocab_size`.
+
+Decoders are `legacy_image`, `hsc_image`, `desi_spectrum`, `sdss_spectrum`, and
+`scalars`; new calibrations require code. Scalars need registered transforms;
+DESI `Z` needs valid `ZWARN` from the same catalog. Missing modalities are
+omitted; rows with none are dropped. The first catalog anchors the join;
+right-only rows stay separate, not joined to one another. Adjust `min_catalogs`
+to `1..number of catalogs`: this selects sky covered by that many catalogs,
+not a minimum number of matched modalities per record. Size workers/memory
+for the machine.
+
+### Echoing, accounting, and resume
+
+`data_stages[].data.dataset.echo_factor` counts **total uses**, including the
+original: a positive integer, **4** in the ladder recipes, **1** when omitted. Precedence:
+CLI > checkpoint factor on resume > recipe/default. It is saved in checkpoint YAML.
+
+- **Factor 1:** normal streaming packing, including across draw boundaries.
+- **Factor N > 1:** each worker packs and caches one finite LSDB/HEALPix draw,
+  including its padded tail, then shuffles exactly N references to each batch.
+  Every exposure is a separate optimizer update, including single-modality
+  batches. With gradient accumulation (2.8B–12B), exposures of one batch can share
+  an optimizer update, and the logged per-step `echo_index` is the step's last
+  micro-batch's; fresh/replayed totals stay exact. Under DP each rank echoes
+  its own draws with a rank-seeded shuffle; telemetry records echo counters per
+  rank (`steps.rankN.jsonl`).
+- Later exposures reshuffle whole modality spans with private RNG; orders can
+  repeat. Targets, positions, patch order, model noise, and schedules stay unchanged.
+- The cache adds **one packed draw per worker**, on top of normal prefetch, and
+  increases startup latency. Echoes do not fetch data; prefetch can still fetch
+  ahead. Stopping mid-draw can leave uneven exposure counts.
+- Remove obsolete `ar_replicas` / `replica_placement` keys from older YAMLs.
+
+Telemetry reports processed and `fresh_*` / `replayed_*` counts and zero-based
+`echo_index`. **Fresh means first use of a delivered batch, not unique objects,
+reads, or bytes.** Rates share a wall-time denominator, excluding ten warmup
+updates after start/resume but including loading/checkpoint stalls. W&B receives
+only metrics/config: paths, provenance, code, data, and machine metadata stay local.
+
+Resume with the matching `--config-file`, not the default. Model settings and
+modalities are validated; weights/optimizer/scheduler/RNG restore, but **no data
+cursor or pending echoes are saved**. Ordinary Nanotron launches use their
+supplied YAML.
+
+[Data echoing](https://arxiv.org/abs/1907.05550) motivates reuse, not a guaranteed
+AstroPT speedup or quality gain. Factor 4 is policy, not a measured optimum.
+Compare wall-time-to-held-out-quality and fresh-data budgets, not just updates/s.

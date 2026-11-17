@@ -12,7 +12,7 @@
   - [ADR 0001](0001-jetformer-inverse-variance-loss.md) — rejected
     ivar-*weighting* of the jetformer loss; this ADR is a data-side
     change of variables, which ADR 0001's rationale explicitly permits
-  - [ADR 0002](0002-ivar-weighted-huber-loss.md) — Proposed-PARKED; its
+  - ADR 0002 — Proposed-PARKED; its
     spectra note ("ivar is already in the record") stays valid and
     composes with this ADR if spectra ever move to the Huber head
   - `astro/docs/README.md` ADR section — the "future ADR" note this

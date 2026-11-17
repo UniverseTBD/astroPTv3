@@ -32,7 +32,6 @@ def test_special_token_ids_frozen():
     ids = set(special_token_map().values())
     assert len(ids) == 17 and max(ids) < VOCAB_SIZE
     config = AstroPT3Config()
-    assert config.loss_aggregation == "legacy_modality_mean"
     assert all(
         {"family", "source", "record_keys", "token_ids"} <= set(modality)
         for modality in config.modalities

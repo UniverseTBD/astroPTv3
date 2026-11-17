@@ -53,6 +53,39 @@ def test_spectrum_only_object(sequencer, spectrum_only_record):
     assert obj.masks["Z"].sum() == 1 and obj.values["Z"].shape == (1, 1)
 
 
+def test_masked_padded_and_no_data_values_are_noise_not_exact_zeros(sequencer, full_record):
+    # exact constants are point masses the likelihood can exploit without bound
+    import copy
+
+    from astropt3.data.spectral import spectral_normalize
+
+    record = copy.deepcopy(full_record)
+    spec, image = record["spectrum"], record["image"]
+    spec["mask"] = spec["mask"].copy()
+    spec["mask"][1000:1600] = True
+    image["flux"] = image["flux"].copy()
+    image["flux"][:, 60:90, 60:90] = 0.0  # no-data block inside the 96x96 crop
+    obj = sequencer.build(record)
+
+    flat = obj.values["spectra"].flatten()
+    n = len(spec["flux"])
+    flux = torch.as_tensor(spec["flux"])
+    expected = spectral_normalize(flux, torch.as_tensor(spec["lambda"]))
+    keep = ~torch.as_tensor(spec["mask"])
+    assert torch.equal(flat[:n][keep], expected[keep])  # real bins untouched
+    filled = torch.cat([flat[:n][~keep], flat[n:]])  # masked bins + tail padding
+    assert len(flat) > n and torch.isfinite(filled).all()
+    assert (filled != 0).all() and len(filled.unique()) == len(filled)
+    assert filled.std() > 0.005
+    images = obj.values["images"]
+    assert (images != 0).all() and torch.isfinite(images).all()
+
+    again = sequencer.build(record)
+    assert torch.equal(again.values["spectra"], obj.values["spectra"])  # deterministic
+    other_epoch = sequencer.build(record, epoch=1)
+    assert not torch.equal(other_epoch.values["spectra"].flatten()[n:], flat[n:])
+
+
 def test_collator_packs_whole_objects(sequencer, collator):
     objs = [sequencer.build(r) for r in record_stream(6)]
     batch = collator(objs)

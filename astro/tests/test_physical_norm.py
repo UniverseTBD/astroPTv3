@@ -28,6 +28,25 @@ def test_registry_constants():
         assert math.isfinite(cf) and cf > 0, band
 
 
+@pytest.mark.parametrize("band", BAND_REGISTRY)
+def test_zero_point_conversion_preserves_ab_magnitude(band):
+    zp, _, _ = BAND_REGISTRY[band]
+    # A 22.5 AB-mag source is one nanomaggy, regardless of the native zero point.
+    native_flux = 10 ** ((zp - 22.5) / 2.5)
+    zpscale, _ = rescale_factors(band)
+    assert native_flux * zpscale == pytest.approx(1.0)
+
+
+def test_hsc_native_dn_normalization_and_inverse():
+    bands = [f"hsc-{band}" for band in "grizy"]
+    flux = torch.ones(5, 2, 2, dtype=torch.float64)
+    nmgy = 10 ** ((22.5 - 27.0) / 2.5) * (0.262 / 0.168) ** 2
+    expected = torch.full_like(flux, math.asinh(nmgy / _DIV_FACTOR))
+    actual = physical_normalize(flux, bands)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(physical_inverse(actual, bands), flux)
+
+
 def test_normalize_des_is_arcsinh_over_divisor():
     torch.manual_seed(0)
     flux = torch.randn(3, 8, 8) * 0.05  # nMgy-scale, below the ~398 nMgy clamp

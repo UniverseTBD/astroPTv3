@@ -30,22 +30,21 @@ are hosted in the
 
 ## Astronomy pilot
 
-The current pilot draws from two [Multimodal Universe](https://huggingface.co/collections/UniverseTBD/multimodal-universe-hats)
-HATS catalogs:
+The [default 70M recipe](configs/nanotron/astropt3-70m.yaml) streams
+[Multimodal Universe](https://huggingface.co/collections/UniverseTBD/multimodal-universe-hats)
+LegacySurvey North images, DESI and SDSS spectra, HSC Wide images, and
+[galaxies-with-hats](https://huggingface.co/datasets/Smith42/galaxies-with-hats)
+RGB images with nine scalars (redshift, photo-z stellar mass, SFR, sSFR and five
+Galaxy Zoo vote fractions); every rung of the Pythia ladder
+(`astropt3-{70m…12b}.yaml`) trains the same modalities. All training recipes use YAML-configured catalog streams and
+modality lists; N-modal training is the normal path. New physical survey
+calibrations still require code.
 
-- **LegacySurvey North:** three-band (g/r/z) optical image cutouts, with
-  associated image-side measurements.
-- **DESI EDR SV3:** optical spectra sampled on a wavelength grid, with
-  associated spectroscopic measurements.
-
-The live LSDB path can supply image+spectrum matches and spectrum-only
-sources, plus image-only sources recovered from LegacySurvey partitions
-visited by the crossmatch. **This is not a complete pass over all LegacySurvey
-images.** Available modalities vary by source and by model config; the model
-learns from whichever spans a record actually carries. The ingestion design
-is still experimental, so consult the [training guide](docs/training.md) and
-active [run configs](configs/nanotron/) rather than treating any one stream
-implementation as permanent.
+It outer-joins regions covered by at least three surveys, anchored on Legacy.
+Unmatched right-side records remain separate objects. **This is not a complete
+survey pass.** Models learn from whichever configured modalities a record
+carries. See the [training guide](docs/training.md) for the experimental stream
+and echoing constraints.
 
 ## From measurements to predictions
 
@@ -64,7 +63,7 @@ astronomical sources are packed into training sequences without splitting an
 object. The nanotron fork (`../nanotron`) runs pretraining; the transformers
 implementation in `src/astropt3/` supports checkpoint conversion, generation,
 and probing. See [architecture](docs/architecture.md) for the model contract
-and [the lab book](EXPERIMENTS.md) (charter/roadmap, phase history,
+and [the lab book](EXPERIMENTS.md) (charter/roadmap, fixed decisions,
 experiment log) for the size ladder.
 
 ## Set up and verify
@@ -83,17 +82,19 @@ Live data checks need Hub access:
 uv run pytest -m network tests/test_lsdb_stream.py
 ```
 
-Training needs nanotron, flash-attn, GPUs, and access to the live catalogs;
-see [training.md](docs/training.md) for the environment, launch, and resume
-instructions. The former synthetic-dependent `train_smoke` gate and
-source-backed evaluation sweep are not currently available under the
-experimental LSDB cutover; do not interpret the checks above as a completed
-training-phase verification. Pure model-side evaluation and sample rendering
-remain in `src/astropt3/eval/` and `scripts/generate.py`.
+Training needs nanotron, flash-attn, a GPU, and live catalog access. From the
+repository root:
+
+```bash
+bash astro/scripts/run_train.bash GPU_INDEX
+```
+
+See [training.md](docs/training.md) for custom recipes, echo overrides, resource
+limits, and resume instructions. There is no source-backed evaluation sweep;
+model-side evaluation and sample rendering are in `src/astropt3/eval/` and
+`scripts/generate.py`.
 
 For a bounded, YAML-based training benchmark with standard JSON results, see
 [throughput benchmarking](docs/training.md#8-standard-throughput-benchmark).
 The [loader experiment log](EXPERIMENTS.md) records measured throughput and
-coverage limits. [ADR 0015](docs/adr/0015-lsdb-infinite-stream-training.md)
-documents the initial LSDB cutover; its original image-only source decision
-is historical, not a description of every subsequent pilot config.
+coverage limits.

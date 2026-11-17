@@ -15,7 +15,7 @@ pretraining fork (`Smith42/nanotron`, branch `astropt3`).
 **Before working in `astro/`, read [`astro/AGENTS.md`](astro/AGENTS.md)** —
 it carries the commands, hard constraints, and the architecture contract
 for the project. The lab book — charter/roadmap (MMU Streaming × AstroPT),
-phase history, and experiment log — is
+fixed decisions, and experiment log — is
 [`astro/EXPERIMENTS.md`](astro/EXPERIMENTS.md);
 the project README is [`astro/README.md`](astro/README.md).
 
@@ -25,3 +25,10 @@ the fast gate and must pass with no GPUs present; GPU-marked tests and
 real training runs execute wherever a suitable GPU environment exists,
 and multi-day runs belong on the training cluster by preference.
 Dependencies are managed only through uv in `astro/pyproject.toml`.
+
+Change policy: breaking changes are allowed. Do not add compatibility shims,
+deprecation paths, migration notes, or support for old checkpoints and YAMLs;
+when something changes, update every caller and recipe and retrain.
+Documentation describes the current code only — no "removed", "retired" or
+"formerly" notes. Git history is the change record; the lab book records
+experiments and results, not code changes.

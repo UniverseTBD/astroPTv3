@@ -3,6 +3,8 @@
 
 Models are instantiated on the meta device so even 12B costs no memory.
 Exits non-zero if any named size is more than 10% off its nominal count.
+JetFormer flows are excluded from that comparison: they are a separately sized
+tokeniser (docs/jetformer-flow.md), reported in their own column.
 """
 
 import argparse
@@ -17,12 +19,13 @@ from astropt3 import AstroPT3Model
 from astropt3.config_io import load_model_config
 
 
-def count_params(config) -> tuple[int, int]:
+def count_params(config) -> tuple[int, int, int]:
     with torch.device("meta"):
         model = AstroPT3Model(config)
     total = sum(p.numel() for p in model.parameters())
     body = sum(p.numel() for p in model.model.parameters())
-    return total, body
+    flows = sum(p.numel() for p in model.flows.parameters())
+    return total - flows, body, flows
 
 
 def main() -> int:
@@ -36,10 +39,10 @@ def main() -> int:
     args = parser.parse_args()
 
     failures = []
-    print(f"{'config':<16} {'total':>15} {'body':>15} {'extras':>12} {'nominal':>15} {'off':>7}")
+    print(f"{'config':<16} {'total':>15} {'body':>15} {'extras':>12} {'flows':>12} {'nominal':>15} {'off':>7}")
     for path in sorted(args.config_dir.glob("*.yaml")):
         config, meta = load_model_config(path)
-        total, body = count_params(config)
+        total, body, flows = count_params(config)
         nominal = meta.get("nominal_params")
         if nominal:
             off = (total - nominal) / nominal
@@ -50,7 +53,7 @@ def main() -> int:
             offs = "-"
         print(
             f"{meta.get('name', path.stem):<16} {total:>15,} {body:>15,} "
-            f"{total - body:>12,} {nominal or 0:>15,} {offs:>7}"
+            f"{total - body:>12,} {flows:>12,} {nominal or 0:>15,} {offs:>7}"
         )
 
     if failures:

@@ -4,7 +4,7 @@
   2026-08-04). The decision — stream MMU's own catalogs at train time instead
   of pre-resharding them locally — stood and was in production through two
   revisions that reshaped *what* is streamed without reopening that choice:
-  [ADR 0011](0011-skim-crossmatch-scans.md) (row-group streaming, a
+  ADR 0011 (row-group streaming, a
   precomputed ids-only cell-keyed match index, the crossmatch-scan demux)
   and its 2026-08-04 amendment (**crossmatch-only**: the match index defines
   the corpus, one scan, no weights). **Retired 2026-09-01:**
@@ -452,7 +452,7 @@ Still open (do not block this ADR):
   single-source corpus, but the mechanism returns with the second survey.
 
 Out of scope, deferred to the corpus-expansion work (`mmu-corpus-expansion`
-branch; see [ADR 0013](0013-legacy-centred-mmu-expansion.md), and
+branch; see ADR 0013, and
 `docs/mmu_crossmatch_research.md` (deleted 2026-08-06; in git history)): Legacy South DR10 × DESI,
 HSC PDR3 × SDSS, Gaia DR3 × APOGEE, and JWST. Each needs its own gate — a
 band registry that is source-aware, an SDSS spectrum normalizer, epoch

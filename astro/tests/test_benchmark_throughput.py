@@ -16,7 +16,7 @@ import benchmark_throughput as bench  # pyright: ignore[reportMissingImports]
 @pytest.fixture
 def baseline(monkeypatch):
     monkeypatch.delenv("NANOTRON_BENCHMARK", raising=False)
-    return yaml.safe_load((bench.REPO / "astro/configs/nanotron/astropt3-70m-dp1.yaml").read_text())
+    return yaml.safe_load((bench.REPO / "astro/configs/nanotron/astropt3-70m.yaml").read_text())
 
 
 def test_overrides_preserve_workload_schedules_and_explicit_initialization(baseline, tmp_path):
@@ -27,8 +27,11 @@ def test_overrides_preserve_workload_schedules_and_explicit_initialization(basel
     before = copy.deepcopy(baseline)
     effective, overrides = bench.prepare_config(baseline, tmp_path / "result", 1, 2, 3)
     assert baseline == before
-    for key in ("model", "optimizer", "data_stages", "parallelism", "logging"):
+    for key in ("model", "optimizer", "data_stages", "logging"):
         assert effective[key] == baseline[key]
+    # one GPU runs the recipe's per-GPU workload at DP=1
+    assert effective["parallelism"] == {**baseline["parallelism"], "dp": 1}
+    assert overrides["parallelism.dp"] == 1
     assert effective["tokens"]["train_steps"] == 10000
     assert effective["checkpoints"]["resume_checkpoint_path"] == str(tmp_path)
     assert effective["checkpoints"]["load_optimizer"] is False
@@ -43,9 +46,10 @@ def test_overrides_preserve_workload_schedules_and_explicit_initialization(basel
 
 @pytest.mark.parametrize("world,warmup,steps,match", [
     (2, 1, 2, "WORLD_SIZE"), (1, 0, 2, "warmup-steps"),
-    (1, 1, 0, "steps"), (1, 1, 10000, "horizon"),
+    (1, 1, 0, "steps"), (1, 1, None, "horizon"),
 ])
 def test_invalid_launch_is_rejected(baseline, tmp_path, world, warmup, steps, match):
+    steps = baseline["tokens"]["train_steps"] if steps is None else steps
     with pytest.raises(ValueError, match=match):
         bench.prepare_config(baseline, tmp_path, world, warmup, steps)
 
@@ -177,3 +181,29 @@ def test_flop_capture_undoes_world_size_and_records_model_costs(monkeypatch):
         "dtype": "torch.bfloat16", "backbone_flops_per_token": 1e12,
         "modality_forward_flops_per_token": {"images": 123.0},
     }
+
+
+def test_capture_reports_actual_catalog_policy(monkeypatch):
+    spec = {"catalogs": [{"name": "sdss", "repo": "offline/sdss"}], "min_catalogs": 1}
+    dataset = SimpleNamespace(
+        catalog_stream=SimpleNamespace(spec=spec),
+        config=SimpleNamespace(modalities=[{"name": "custom_mode"}]),
+    )
+    fake_torch = SimpleNamespace(
+        __version__="test", version=SimpleNamespace(cuda=None),
+        cuda=SimpleNamespace(current_device=lambda: 0, get_device_properties=lambda _: SimpleNamespace(
+            name="offline device", total_memory=1234,
+        )),
+    )
+    trainer = SimpleNamespace(
+        config=SimpleNamespace(model=SimpleNamespace(init_method=object())),
+        init_checkpoint_path=None,
+    )
+    monkeypatch.setattr(bench, "capture_flop_estimate", lambda _: {})
+    monkeypatch.setattr(bench, "nic_link_speeds", dict)
+    monkeypatch.setattr(bench, "revision", lambda _: {})
+    context = bench.capture_context(fake_torch, trainer, SimpleNamespace(dataset=dataset, num_workers=0))
+    report = context["loader"]
+    assert report["modalities"] == dataset.config.modalities
+    assert report["catalog_stream"] == spec
+    assert not {"legacy_catalog", "legacy_columns", "desi_catalog", "desi_columns"} & report.keys()

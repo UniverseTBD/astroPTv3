@@ -1,14 +1,12 @@
 # AstroPTv3 architecture
 
 *Background for anyone picking up the project. The operational counterpart is
-[`training.md`](training.md); the historical phase plan is
-[`../EXPERIMENTS.md`](../EXPERIMENTS.md) Part I.*
+[`training.md`](training.md).*
 
-The pilot currently uses live LSDB access to LegacySurvey North images and
-DESI EDR SV3 spectra. [ADR 0015](adr/0015-lsdb-infinite-stream-training.md)
-records the initial experimental, image-only LSDB cutover; subsequent pilot
-configs also use crossmatched spectra. Stream internals are still evolving, so
-this document focuses on the survey-to-model contract.
+Training uses live LSDB access to YAML-configured catalogs and modality lists.
+Every recipe combines LegacySurvey North, HSC and galaxies-with-hats images with
+DESI and SDSS spectra and nine galaxies-with-hats scalars. This document focuses
+on the survey-to-model contract.
 
 ## What this is
 
@@ -25,24 +23,22 @@ the whole family. The recipe combines two lineages:
   query attention (GQA), RoPE with NoPE every 4th layer, RMSNorm, SwiGLU,
   and document-masked packed sequences.
 
-The **Multimodal Universe** pilot draws on LegacySurvey North three-band
-image cutouts and DESI EDR SV3 spectra. Crossmatch-enabled runs may yield
-paired image+spectrum sources, spectrum-only sources, and image-only sources
-recovered from LegacySurvey partitions visited by the join. This does not
-cover every LegacySurvey image outside the visited footprint. Each source
-contributes the modalities it carries; the configured 70M–12B family is
-intended to study how astronomical modeling changes with scale, not a claim
-that every size has already been trained.
+The **Multimodal Universe** catalogs supply partially overlapping sources.
+Each record contributes whichever configured modalities it carries; unmatched
+right-side records remain separate objects. A join does not guarantee a complete
+survey pass. The 70M–12B family studies how modeling changes with scale, not a
+claim that every size has already been trained.
 
 ## From a survey source to a token sequence
 
 Every training example ("object") is one astronomical source. The path from
-survey data to model input:
+survey data to model input (using LegacySurvey and DESI as examples):
 
 1. **Record**: an MMU-schema dict. `image.flux` is float32 `(3, 152, 152)`
    (g/r/z bands); `spectrum` (when present) has 7781-bin `flux`, `lambda`,
-   and `mask`. `data/nanotron_loader.py` decodes live LSDB/HATS catalog rows
-   into this shared record contract; absent modalities stay absent.
+   and `mask`. `data/catalog_stream.py` decodes live LSDB/HATS catalog rows
+   into configured record keys; `data/nanotron_loader.py` packs them for training.
+   Absent modalities stay absent.
 
 2. **Physical normalization** (`data/band_registry.py`, ported from
    galactiktok `feat/norm`): image flux is normalized physically, keyed on
@@ -58,19 +54,14 @@ survey data to model input:
    constant, 3600–9824 Å × 0.8 Å, so the map inverts with no side info) →
    `arcsinh(f_ν/10)` (knee = 10 nMgy, the fiber sky-noise scale). Exactly
    invertible (`spectral_inverse`); unknown grids raise.
-
-   > **Migration note:** checkpoints trained before this change (on the
-   > percentile-calibrated Platonic-Universe asinh stretch) are
-   > **incompatible** — the normalization target is different. The config
-   > field `image_norm_divisor` is back-filled on load, but the weights were
-   > trained on a different target: declare incompatible, retrain. The same
-   > applies to physnorm checkpoints trained before the switch to knee-unit
-   > tokens (dropping the trailing `·divisor`) and the 96×96 central crop
-   > (361 → 144 image tokens): incompatible, retrain. Likewise all
-   > spectra-bearing checkpoints trained before the physical spectra
-   > normalization (ADR 0007, raw-DESI-flux tokens): the config field
-   > `spectra_norm_divisor` back-fills, but the record→token map changed —
-   > incompatible, retrain.
+   **Noise fill** (`packing.noise_fill`): after normalization, masked
+   spectral bins, the last spectral patch's tail padding and exact-zero
+   (no-data) image pixels are replaced with N(0, σ) noise at the channel's
+   own pixel-noise level (floor 0.01), seeded on `(object_id, modality,
+   epoch)`. Exact constants are point masses the continuous likelihood can
+   drive to −∞; on the 70M run they took ~95% of the gradient norm by
+   step 10k. Filled entries carry no signal, so invertibility on real data
+   is unchanged.
 
 3. **Patchify** (`tokenization.py`):
    - images → central 96×96 crop (`packing.IMAGE_CROP`; JWST cubes are
@@ -118,8 +109,9 @@ reference):
 - **Encoders** are a single per-modality `nn.Linear` (data space -> embedding
   space). Image positions go through an `nn.Embedding` (index type), spectra
   positions through a small affine layer (continuous type). Each patch
-  modality also has a per-modality normalizing flow (`TinyFlow1D`) that maps
-  its raw patch value to a latent z — z is both what gets embedded and what
+  modality also has a per-modality normalizing flow (`JetFormerFlow`, ViT
+  conditioners over each object's modality span; `docs/jetformer-flow.md`)
+  that maps its raw patch values to latents z — z is both what gets embedded and what
   the `GMMHead` decoder predicts; scalar modalities (`Z`, `ebv`, `photometry`)
   skip the flow and feed a `GMMHead` directly on the raw normalized value.
 - **Body**: the stock SmolLM3 decoder stack, consuming `inputs_embeds`.
@@ -129,10 +121,9 @@ reference):
   (may be negative) computed at positions **one to the left** of each
   modality token — `<|begin_m|>` predicts patch 0, patch *i* predicts patch
   *i+1* (AstroPT's `starts−1` alignment, implemented via `left_shift_mask`).
-  ADR 0013 configs average present modalities within image/spectrum/scalar,
-  then combine present family means at 1:1:0.1. Historical configs retain the
-  former per-modality `loss_weight` mean. Special tokens and pads carry no
-  loss.
+  The loss averages present modalities within image/spectrum/scalar, then
+  combines present family means at 1:1:0.1. Special tokens and
+  pads carry no loss.
 - **Init**: stock SmolLM3 `_init_weights`, normal(0, 0.02).
 
 ### Size family (Pythia-mirrored nominal sizes, no vocab head)
@@ -188,11 +179,11 @@ flat because nanotron's device mover only transfers top-level tensors).
   rank* (different objects → different patch counts), which is why
   `general.ignore_sanity_checks: true` is required — nanotron's DP
   input-difference check all-gathers tensors assuming equal shapes.
-- **Live survey source**: `data/nanotron_loader.py` uses LSDB inside torch
-  DataLoader workers, decodes catalog rows to the shared record contract, and
-  packs them before nanotron sees a batch. Crossmatch-enabled configs include
-  DESI spectra; other configs can consume LegacySurvey images alone. Seeds
-  separate consumers, but there is no cross-rank ownership or exact record
+- **Live survey source**: `data/catalog_stream.py` delegates matching and
+  iteration to LSDB PR #1584, then decodes configured survey payloads.
+  `data/nanotron_loader.py` packs those records inside torch DataLoader workers.
+  Generation uses the same stream; all callers require explicit catalog lists.
+  Seeds separate consumers, but there is no cross-rank ownership or exact record
   coverage guarantee. Stream details belong to the active run config and
   [training guide](training.md), not the model contract.
 
@@ -210,17 +201,15 @@ Pythia-style, adapted to a smaller corpus:
 - **Checkpointing**: `checkpoint_schedule: pythia` saves at steps
   1, 2, 4, …, 512 and then every `checkpoint_interval` (1000) — the log2-
   spaced early checkpoints are what make learning-dynamics studies possible.
-  Checkpoints hold model/optimizer/scheduler/RNG weight state only (ADR
-  0015): the cursorless LSDB stream restarts fresh on resume.
-- **Evaluation (deferred, ADR 0015)**: `astropt3.eval` retains pure
+  Checkpoints hold model/optimizer/scheduler/RNG weight state only: the
+  cursorless LSDB stream restarts fresh on resume.
+- **Evaluation (deferred)**: `astropt3.eval` provides pure
   model-side functions over provided records/objects/batches (`evaluate`,
   `embed_objects`, `ridge_r2`, `scalar_head_metrics`, sampling/rendering).
   Source-backed evaluation and checkpoint sweeps are not currently wired.
 
 ## Roadmap context
 
-Earlier phases established the model and training fork; the live LSDB
-cutover is explicitly experimental and does not yet satisfy the former
-synthetic smoke gate. Current work is on the 70M multimodal pilot, ahead of
-full size-ladder scale-up. See [`../EXPERIMENTS.md`](../EXPERIMENTS.md) Part I for the historical
-phase log and [`../EXPERIMENTS.md`](../EXPERIMENTS.md) for loader measurements.
+Current work is on the 70M multimodal pilot, ahead of full size-ladder
+scale-up. See [`../EXPERIMENTS.md`](../EXPERIMENTS.md) for experiment results and
+loader measurements.

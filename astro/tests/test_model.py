@@ -1,9 +1,7 @@
 import torch
 from legacy_fixture import record_stream
 
-
-def _batch(sequencer, collator, records):
-    return collator([sequencer.build(r) for r in records])
+from astropt3.flows import flow_object_ids
 
 
 def test_forward_backward(tiny_config, sequencer, collator):
@@ -12,8 +10,7 @@ def test_forward_backward(tiny_config, sequencer, collator):
     torch.manual_seed(0)
     model = AstroPT3Model(tiny_config)
     model.train()
-    records = list(record_stream(4))
-    batch = _batch(sequencer, collator, records)
+    batch = collator([sequencer.build(r) for r in record_stream(4)])
     out = model(**batch)
     assert torch.isfinite(out.loss)
     assert set(out.modality_losses) == {"images", "spectra", "Z", "ebv", "photometry"}
@@ -70,14 +67,6 @@ def test_doc_mask_blocks_cross_object_attention(tiny_model, tiny_config, sequenc
     assert torch.equal(h0[0, start_b:], h1[0, start_b:])  # B bit-identical
 
 
-def test_image_only_batch(tiny_model, sequencer, collator, image_only_record):
-    batch = collator([sequencer.build(image_only_record)])
-    with torch.no_grad():
-        out = tiny_model(**batch)
-    assert "spectra" not in out.modality_losses
-    assert torch.isfinite(out.loss)
-
-
 def test_family_loss_matches_adr_0013(tiny_model, sequencer, collator, full_record):
     batch = collator([sequencer.build(full_record)])
     with torch.no_grad():
@@ -93,26 +82,6 @@ def test_family_loss_matches_adr_0013(tiny_model, sequencer, collator, full_reco
         + out.family_losses["spectrum"]
         + 0.1 * out.family_losses["scalar"]
     ) / 2.1
-    assert torch.allclose(out.loss, expected, atol=1e-6)
-
-
-def test_legacy_loss_mode_stays_checkpoint_compatible(
-    tiny_model, tiny_config, sequencer, collator, full_record
-):
-    from astropt3 import AstroPT3Config, AstroPT3Model
-
-    config = AstroPT3Config(
-        **{**tiny_config.to_dict(), "loss_aggregation": "legacy_modality_mean"}
-    )
-    model = AstroPT3Model(config).eval()
-    model.load_state_dict(tiny_model.state_dict())
-    batch = collator([sequencer.build(full_record)])
-    with torch.no_grad():
-        out = model(**batch)
-    weights = {"images": 1.0, "spectra": 1.0, "Z": 0.1, "ebv": 0.1, "photometry": 0.1}
-    expected = torch.stack(
-        [weights[name] * loss for name, loss in out.modality_losses.items()]
-    ).sum() / len(out.modality_losses)
     assert torch.allclose(out.loss, expected, atol=1e-6)
 
 
@@ -133,7 +102,10 @@ def test_loss_matches_manual_computation(tiny_model, sequencer, collator, full_r
         for m in ("images", "spectra"):
             mask = batch["modality_masks"][m]
             hidden = out.last_hidden_state[left_shift_mask(mask)]
-            z, logdet = tiny_model.flows[m](batch["modality_values"][m])
+            z, logdet = tiny_model.flows[m](
+                batch["modality_values"][m], batch["modality_positions"][m],
+                flow_object_ids(batch["position_ids"], mask),
+            )
             logits_pi, mu, log_sigma = tiny_model.decoders[m](hidden)
             nll = gmm_nll(z, logits_pi, mu, log_sigma)
             manual.append((nll - logdet).mean())

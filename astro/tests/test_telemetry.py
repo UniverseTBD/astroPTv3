@@ -7,6 +7,7 @@ import json
 
 import pytest
 import torch
+from legacy_fixture import TINY_CATALOG_STREAM
 
 from astropt3.data import telemetry
 from astropt3.data.nanotron_loader import PackedMicroBatches
@@ -104,7 +105,7 @@ def test_loader_wrapper_times_batches_and_proxies(tiny_config, tmp_path, monkeyp
     monkeypatch.setenv(telemetry.TELEMETRY_DIR_ENV, str(tmp_path))
     # ADR 0015: no dataset checkpoint state to reach through the wrapper —
     # only the plain DataLoader surface (dataset, num_workers, iteration).
-    dataset = PackedMicroBatches(tiny_config, MBS, SEQ_LEN)
+    dataset = PackedMicroBatches(tiny_config, MBS, SEQ_LEN, catalog_stream=TINY_CATALOG_STREAM)
     loader = torch.utils.data.DataLoader(dataset, batch_size=None)
     wrapped = telemetry.instrument(loader)
     assert isinstance(wrapped, telemetry.TelemetryLoader)

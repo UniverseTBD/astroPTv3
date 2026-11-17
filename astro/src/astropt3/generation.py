@@ -22,6 +22,7 @@ caching only if generation ever becomes a hot path.
 import torch
 
 from .data.packing import ObjectSeq, PackedCollator
+from .flows import flow_object_ids
 
 
 def sample_gmm(
@@ -70,13 +71,17 @@ def generate(
     ids = template.input_ids.to(device)
     masks = {m: mask.to(device) for m, mask in template.masks.items()}
     positions = {m: pos.to(device) for m, pos in template.positions.items()}
-    # data-space tokens so far, [n, count_m, D]; generated spans start empty
+    # latent (flowed) tokens so far, [n, count_m, D]; generated spans start empty
     values = {}
     for m in masks:
         v = template.values[m].to(device)
         if m in generate_modalities:
             values[m] = v.new_empty(n, 0, v.shape[-1])
         else:
+            if m not in model.scalar_names:
+                v, _ = model.flows[m](
+                    v, positions[m], torch.zeros(len(v), device=device, dtype=torch.long)
+                )
             values[m] = v.unsqueeze(0).expand(n, -1, -1)
 
     def prefix_kwargs(t):
@@ -105,7 +110,7 @@ def generate(
         m_t = next((m for m in masks if masks[m][t]), None)
         if m_t is None or m_t not in generate_modalities:
             continue
-        out = model(**prefix_kwargs(t), compute_loss=False)
+        out = model(**prefix_kwargs(t), compute_loss=False, values_are_latents=True)
         logits_pi, mu, log_sigma = model.decoders[m_t](out.last_hidden_state[:, -1])
         z = sample_gmm(
             logits_pi,
@@ -115,11 +120,20 @@ def generate(
             argmax=argmax,
             generator=generator,
         )
-        if m_t in model.scalar_names:
-            x = z  # scalar GMMs predict raw normalized values — no flow (ADR 0008)
-        else:
-            x, _ = model.flows[m_t](z, reverse=True)
-        values[m_t] = torch.cat([values[m_t], x.unsqueeze(1)], dim=1)
+        # Flows invert only after the entire latent span is sampled; scalar
+        # GMMs predict raw normalized values with no flow (ADR 0008).
+        values[m_t] = torch.cat([values[m_t], z.unsqueeze(1)], dim=1)
+
+    for m in generate_modalities - model.scalar_names:
+        length = values[m].shape[1]
+        pos = positions[m]
+        decoded, _ = model.flows[m](
+            values[m].reshape(n * length, -1),
+            pos.repeat(n) if pos.ndim == 1 else pos.repeat(n, 1),
+            torch.arange(n, device=device).repeat_interleave(length),
+            reverse=True,
+        )
+        values[m] = decoded.reshape(n, length, -1)
 
     return {m: values[m] for m in generate_modalities}
 
@@ -146,6 +160,10 @@ def reconstruct(model, template: ObjectSeq) -> dict:
     preds = {}
     for m, pred in out.predictions.items():
         if m not in model.scalar_names:
-            pred, _ = model.flows[m](pred, reverse=True)
+            pred, _ = model.flows[m](
+                pred, batch["modality_positions"][m],
+                flow_object_ids(batch["position_ids"], batch["modality_masks"][m]),
+                reverse=True,
+            )
         preds[m] = pred
     return preds

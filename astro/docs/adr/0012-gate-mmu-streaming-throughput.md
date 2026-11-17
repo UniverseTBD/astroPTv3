@@ -4,7 +4,7 @@
 - **Date:** 2026-07-22
 - **References:**
   - [ADR 0006](0006-stream-mmu-upstream.md)
-  - [ADR 0011](0011-skim-crossmatch-scans.md)
+  - ADR 0011
   - [ADR 0014](0014-byte-efficiency-and-mfu-programme.md) — the
     byte-economics measurements this gate asked for
   - `src/astropt3/data/streaming.py`

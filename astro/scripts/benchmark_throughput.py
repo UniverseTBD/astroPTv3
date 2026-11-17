@@ -35,7 +35,9 @@ def prepare_config(baseline: dict, output: Path, world_size: int,
     parallel = baseline["parallelism"]
     if any(parallel.get(key, 1) != 1 for key in ("pp", "context_parallel_size", "expert_parallel_size")):
         raise ValueError("AstroPT benchmarking requires PP=CP=EP=1")
-    if parallel.get("dp", 1) * parallel.get("tp", 1) != world_size:
+    # One GPU benchmarks a TP=1 recipe's per-GPU workload at DP=1.
+    single_gpu = world_size == 1 and parallel.get("tp", 1) == 1
+    if not single_gpu and parallel.get("dp", 1) * parallel.get("tp", 1) != world_size:
         raise ValueError("launch WORLD_SIZE must equal YAML dp * tp")
     if not baseline["model"]["model_config"].get("is_astropt3_config"):
         raise ValueError("benchmark requires an AstroPT3 model")
@@ -63,6 +65,7 @@ def prepare_config(baseline: dict, output: Path, world_size: int,
         "tokens.limit_val_batches": 0,
         "tokens.limit_test_batches": 0,
         "general.benchmark_csv_path": None,
+        **({"parallelism.dp": 1} if single_gpu else {}),
     }
     for dotted, value in overrides.items():
         keys = dotted.split(".")
@@ -152,8 +155,6 @@ def capture_flop_estimate(trainer) -> dict:
 def capture_context(torch, trainer, loader) -> dict:
     import psutil
 
-    from astropt3.data import nanotron_loader as data
-
     device = torch.cuda.get_device_properties(torch.cuda.current_device())
     cpuinfo = Path("/proc/cpuinfo")
     cpu_model = next((line.split(":", 1)[1].strip() for line in cpuinfo.read_text().splitlines()
@@ -177,12 +178,8 @@ def capture_context(torch, trainer, loader) -> dict:
         "code": {"astropt3": revision(REPO), "nanotron": revision(REPO / "nanotron")},
         "num_loading_workers": loader.num_workers,
         "loader": {
-            "legacy_catalog": data.LEGACY_CATALOG, "legacy_columns": dataset.columns,
-            "desi_catalog": data.DESI_CATALOG if dataset.desi_columns else None,
-            "desi_columns": dataset.desi_columns, "modalities": dataset.config.modalities,
-            "crossmatch_radius_arcsec": data._CROSSMATCH_RADIUS_ARCSEC,
-            "count_fraction_threshold": data._CROSSMATCH_COUNT_FRACTION_THRESHOLD,
-            "partitions_per_chunk": data._PARTITIONS_PER_CHUNK,
+            "catalog_stream": dataset.catalog_stream.spec,
+            "modalities": dataset.config.modalities,
         },
         "init_method": trainer.config.model.init_method.__class__.__name__,
         "resumed_from": str(trainer.init_checkpoint_path) if trainer.init_checkpoint_path else None,

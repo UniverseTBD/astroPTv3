@@ -8,7 +8,7 @@ identical inputs and identical replicated weights, every TP rank computes
 identical losses AND identical gradients for those modules without any
 communication. That is what this script asserts.
 
-Run (needs 2 GPUs; [train] env):
+Run (needs 2 GPUs and [train] env; uses offline test records):
     CUDA_DEVICE_MAX_CONNECTIONS=1 torchrun --nproc_per_node=2 \
         astro/scripts/tp2_grad_check.py
 
@@ -46,10 +46,11 @@ from nanotron.random import (
 from nanotron.trainer import mark_tied_parameters
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from astropt3.data.nanotron_loader import (
-    PackedMicroBatches,
-    hf_config_from_modalities,
-)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+from legacy_fixture import make_record
+
+from astropt3.data.nanotron_loader import flatten_packed_batch, hf_config_from_modalities
+from astropt3.data.packing import ObjectSequencer, PackedCollator
 
 MBS = 2
 SEQ_LEN = 896
@@ -159,9 +160,12 @@ def main():
         for other in gather_across_tp(param.detach(), tp_pg):
             assert torch.equal(param.detach(), other), f"init drift across TP in {name}"
 
-    # identical batch on every TP rank (same stream, rank/world untouched)
+    # Identical offline inputs isolate TP parity from catalog availability.
     hf_config = hf_config_from_modalities(config.modalities)
-    flat = next(iter(PackedMicroBatches(hf_config, MBS, SEQ_LEN)))
+    sequencer = ObjectSequencer(hf_config)
+    rows = [[sequencer.build(make_record(i, image_only_fraction=0.0))] for i in range(MBS)]
+    packed = PackedCollator(hf_config, seq_len=SEQ_LEN).collate_rows(rows)
+    flat = flatten_packed_batch(packed, hf_config, SEQ_LEN)
     flat = {k: v.cuda() for k, v in flat.items()}
 
     out = model(**flat)

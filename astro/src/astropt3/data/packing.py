@@ -12,8 +12,6 @@ parity rule — at two spans the shuffle IS that rule's 50/50 flip). Every
 conditional among the present spans lands in the training distribution;
 the seed changes each epoch, and being a pure function of (object_id,
 epoch) the order is exact under checkpoint resume (no ambient RNG state).
-Checkpoints trained before these rules (fixed images-first) are
-incompatible with sequences the rule builds — retrain.
 
 ADR 0008 scalar modalities (Z / ebv / photometry) are one-token spans over
 the record's catalog scalars, normalized by ``data/scalar_registry.py``;
@@ -44,6 +42,7 @@ from typing import Any
 import torch
 
 from ..configuration_astropt3 import AstroPT3Config
+from ..modalities import ModalityConfig
 from ..tokenization import (
     BOS_ID,
     PAD_ID,
@@ -52,13 +51,12 @@ from ..tokenization import (
     patchify_spectrum,
     spiralise,
 )
-from .band_registry import _DIV_FACTOR, physical_normalize
-from .scalar_registry import scalar_normalize
-from .spectral import _DIV_FACTOR as _SPECTRA_DIV_FACTOR
+from .band_registry import physical_normalize
+from .scalar_registry import MISSING_SENTINELS, scalar_normalize
 from .spectral import spectral_normalize
 
 # side of the central image crop applied before patchify, in pixels
-IMAGE_CROP = 96
+IMAGE_CROP = ModalityConfig.image_crop
 
 # ADR 0014 §5: bumped whenever :func:`span_order` changes, since a different
 # permutation rule changes the emitted sequences without changing record
@@ -66,19 +64,52 @@ IMAGE_CROP = 96
 SPAN_ORDER_VERSION = "adr0008_uniform_v1"
 
 
+def has_modality(modality, record: dict) -> bool:
+    """Whether a record carries a modality; ``Z`` also needs ``ZWARN`` 0 or absent."""
+    return (all(key in record for key in modality.record_keys)
+            and (modality.name != "Z" or not record.get("ZWARN")))
+
+
 def span_order(names, object_id: str, epoch: int = 0) -> list[str]:
     """The ADR 0008 span order for one object: uniform, seeded, resume-exact.
 
-    Split out of :meth:`ObjectSequencer.build` so callers can ask what order
-    an ``(object_id, epoch)`` pair WOULD produce without paying for
-    tokenisation — ADR 0014 §7a needs exactly that to pick distinct replica
-    orders without patchifying a candidate it then discards.
+    Shared by :meth:`ObjectSequencer.build` and batch echoing, which redraws
+    orders without re-tokenizing physical targets or changing model RNG state.
     """
     order = list(names)
     if len(order) > 1:
         seed = zlib.crc32(str(object_id).encode()) ^ epoch
         random.Random(seed).shuffle(order)
     return order
+
+
+# Normalized-unit floor for the fill noise; ~the 1st percentile of SDSS spectral
+# pixel noise (DESI and imaging are noisier).
+FILL_SIGMA_MIN = 0.01
+
+
+def noise_fill(values: torch.Tensor, fill: torch.Tensor, seed: int) -> torch.Tensor:
+    """Replace ``fill`` entries of ``values`` (C, ...) with N(0, sigma_c) noise.
+
+    Masked bins, tail padding and no-data pixels are exact constants: point
+    masses whose continuous likelihood the model can drive to -inf, which
+    eventually dominates the gradient. Noise at each channel's own pixel-noise
+    level (robust std of last-axis neighbour differences / sqrt 2, floored at
+    ``FILL_SIGMA_MIN``) bounds it. Filled entries carried no signal, so the map
+    stays invertible on real data. Seeded, so tokens remain a pure function of
+    the record (resume-exact, deterministic eval).
+    """
+    if not fill.any():
+        return values
+    diff = values[..., 1:] - values[..., :-1]
+    valid = ~(fill[..., 1:] | fill[..., :-1])
+    diff = torch.where(valid, diff, torch.nan).reshape(len(values), -1)
+    centred = diff - diff.nanmedian(dim=-1, keepdim=True).values
+    sigma = 1.4826 / 2**0.5 * centred.abs().nanmedian(dim=-1).values
+    sigma = torch.nan_to_num(sigma, nan=FILL_SIGMA_MIN).clamp(min=FILL_SIGMA_MIN)
+    gen = torch.Generator().manual_seed(seed)
+    noise = torch.randn(values.shape, generator=gen) * sigma.view(-1, *[1] * (values.ndim - 1))
+    return torch.where(fill, noise.to(values.dtype), values)
 
 
 @dataclass
@@ -90,9 +121,6 @@ class ObjectSeq:
     values: dict  # name -> [n_m, input_size]
     positions: dict  # name -> long [n_m] or float [n_m, pos_input_size]
     object_id: str = ""
-    # the span order this sequence was serialized in; ADR 0014 §7a compares
-    # it across replicas to refuse identical duplicates
-    order: tuple[str, ...] = ()
 
     def __len__(self) -> int:
         return len(self.input_ids)
@@ -113,33 +141,34 @@ class ObjectSequencer:
         # checkpoint self-describes the order it trained in, and the inverse
         # path keys off the same field — a caller-supplied override would
         # reopen the silent-scramble mismatch, so there deliberately isn't one
-        self.spiral = getattr(config, "spiral", True)
+        self.spiral = config.spiral
         # arcsinh knee of the physical image normalization; carried on the
         # config so checkpoints are self-describing and the inverse
         # (scripts/generate.py) uses the divisor the model trained with
-        self.image_norm_divisor = getattr(config, "image_norm_divisor", _DIV_FACTOR)
+        self.image_norm_divisor = config.image_norm_divisor
         # spectra counterpart (ADR 0007): arcsinh knee of the DESI f_ν
         # normalization, likewise carried on the config
-        self.spectra_norm_divisor = getattr(
-            config, "spectra_norm_divisor", _SPECTRA_DIV_FACTOR
-        )
+        self.spectra_norm_divisor = config.spectra_norm_divisor
 
-    def _image_tokens(self, name: str, record: dict):
+    def _image_tokens(self, name: str, record: dict, seed: int = 0):
         mod = self.registry.get_config(name)
         image = record[mod.record_keys[0]]
         flux = torch.as_tensor(image["flux"], dtype=torch.float32)
         # central crop: 152x152 survey cutouts -> 96x96 (144 patch-8 tokens);
         # JWST cubes are already 96x96 and pass through untouched
         h, w = flux.shape[-2:]
-        if h > IMAGE_CROP or w > IMAGE_CROP:
-            top = (h - IMAGE_CROP) // 2
-            left = (w - IMAGE_CROP) // 2
-            flux = flux[..., top : top + IMAGE_CROP, left : left + IMAGE_CROP]
+        crop = mod.image_crop  # 0 keeps the whole image
+        if crop and (h > crop or w > crop):
+            top = (h - crop) // 2
+            left = (w - crop) // 2
+            flux = flux[..., top : top + crop, left : left + crop]
         # may arrive as a list or an array after a parquet round-trip
         bands = [str(b) for b in image["band"]]
         flux = physical_normalize(
             flux, bands, divisor=self.image_norm_divisor
         )
+        # exact 0.0 in float survey flux is no-data (e.g. Legacy footprint edges)
+        flux = noise_fill(flux, flux == 0, seed)
         if mod.channel_tokenization == "per_band":
             return self._per_band_tokens(mod, flux, bands)
         patches = patchify_image(flux, mod.patch_size)
@@ -178,17 +207,22 @@ class ObjectSequencer:
         positions = torch.arange(len(patches), dtype=torch.long)
         return patches, positions
 
-    def _spectrum_tokens(self, name: str, record: dict):
+    def _spectrum_tokens(self, name: str, record: dict, seed: int = 0):
         mod = self.registry.get_config(name)
         spec = record[mod.record_keys[0]]
         flux = torch.as_tensor(spec["flux"], dtype=torch.float32)
         lam = torch.as_tensor(spec["lambda"], dtype=torch.float32)
         mask = torch.as_tensor(spec["mask"], dtype=torch.bool)
+        # zero first so masked garbage never reaches the normalization
         flux = torch.where(mask, torch.zeros_like(flux), flux)
         flux = spectral_normalize(
             flux, lam, divisor=self.spectra_norm_divisor, source=mod.source or ""
         )
         patches, lam_mean = patchify_spectrum(flux, lam, mod.patch_size)
+        # masked bins and the last patch's tail padding become noise, not exact zeros
+        fill = torch.ones(patches.numel(), dtype=torch.bool)
+        fill[: len(mask)] = mask
+        patches = noise_fill(patches.reshape(1, -1), fill.reshape(1, -1), seed).view_as(patches)
         positions = normalize_wavelength(lam_mean).unsqueeze(-1)
         return patches, positions
 
@@ -214,7 +248,9 @@ class ObjectSequencer:
                 ) from error
         if not all(math.isfinite(value) for value in values):
             return None
-        if name == "Z" and bool(record.get("ZWARN") or False):
+        if any(value == MISSING_SENTINELS.get(name) for value in values):
+            return None
+        if not has_modality(mod, record):
             return None
         return values
 
@@ -253,10 +289,12 @@ class ObjectSequencer:
                 continue
             if record.get(mod.record_keys[0]) is None:
                 continue
+            # fill-noise seed: per (object, modality, epoch), like the span order
+            seed = zlib.crc32(f"{record.get('object_id', '')}/{name}".encode()) ^ epoch
             if mod.family == "image":
-                parts[name] = self._image_tokens(name, record)
+                parts[name] = self._image_tokens(name, record, seed)
             elif mod.family == "spectrum":
-                parts[name] = self._spectrum_tokens(name, record)
+                parts[name] = self._spectrum_tokens(name, record, seed)
         if not parts:
             raise ValueError(
                 f"record {record.get('object_id')!r} has no known modality"
@@ -305,7 +343,6 @@ class ObjectSequencer:
             values=values,
             positions=positions,
             object_id=str(record.get("object_id", "")),
-            order=tuple(order),
         )
 
 
@@ -337,10 +374,8 @@ class PackedCollator:
     def collate_rows(self, rows: list[list[ObjectSeq]]) -> dict:
         """Collate rows the caller has already formed.
 
-        ADR 0014 §7b assigns replicas to rows itself (to keep a base object's
-        replicas out of the same packed row), so its rows are deliberately
-        NOT what greedy packing would produce — it hands them straight here
-        instead of round-tripping through the greedy path above.
+        The streaming loader fills the emptiest row first, unlike the
+        sequential greedy packing in __call__, so it supplies rows directly.
         """
         for row in rows:
             used = sum(len(obj) for obj in row)
