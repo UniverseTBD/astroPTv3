@@ -7,6 +7,7 @@ import torch
 from legacy_fixture import record_stream
 
 from astropt3.config_io import load_model_config
+from astropt3.configuration_astropt3 import DEFAULT_MODALITIES, AstroPT3Config
 from astropt3.data.packing import ObjectSequencer, PackedCollator
 from astropt3.modalities import GMMHead, TinyFlow1D, gmm_nll
 
@@ -16,7 +17,8 @@ CONFIG = Path(__file__).resolve().parents[1] / "configs" / "model" / "test-tiny.
 @pytest.fixture(scope="module")
 def jet_config():
     config, _ = load_model_config(CONFIG)
-    return config
+    # These loss/gradient checks also cover scalar heads, absent from the run YAMLs.
+    return AstroPT3Config(**{**config.to_dict(), "modalities": DEFAULT_MODALITIES})
 
 
 @pytest.fixture(scope="module")

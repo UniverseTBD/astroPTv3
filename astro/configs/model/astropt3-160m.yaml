@@ -10,3 +10,49 @@ max_position_embeddings: 4096
 rope_theta: 100000.0
 no_rope_layer_interval: 4
 spiral: true  # center-outward image patch order (ADR 0004)
+loss_aggregation: family
+modalities:
+  - name: images
+    family: image
+    source: legacy
+    record_keys: [image]
+    token_ids: [2, 3, 4]
+    input_size: 192
+    patch_size: 8
+    pos_type: index
+    pos_input_size: 1
+    max_positions: 361
+    loss_weight: 1.0
+  - name: spectra
+    family: spectrum
+    source: desi
+    record_keys: [spectrum]
+    token_ids: [5, 6, 7]
+    input_size: 256
+    patch_size: 256
+    pos_type: continuous
+    pos_input_size: 1
+    max_positions: 1024
+    loss_weight: 1.0
+  - name: sdss_spectra
+    family: spectrum
+    source: sdss
+    record_keys: [spectrum_sdss]
+    token_ids: [17, 18, 19]
+    input_size: 256
+    patch_size: 256
+    pos_type: continuous
+    pos_input_size: 1
+    max_positions: 1024
+    loss_weight: 1.0
+  - name: hsc_images
+    family: image
+    source: hsc
+    record_keys: [hsc_image]
+    token_ids: [20, 21, 22]
+    input_size: 320
+    patch_size: 8
+    pos_type: index
+    pos_input_size: 1
+    max_positions: 144
+    loss_weight: 1.0
