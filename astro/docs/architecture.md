@@ -111,13 +111,15 @@ reference):
   positions through a small affine layer (continuous type). Each patch
   modality also has a per-modality normalizing flow (`JetFormerFlow`, ViT
   conditioners over each object's modality span; `docs/jetformer-flow.md`)
-  that maps its raw patch values to latents z — z is both what gets embedded and what
-  the `GMMHead` decoder predicts; scalar modalities (`Z`, `ebv`, `photometry`)
+  that maps its raw patch values to latents z. The first `d_ar` coordinates
+  (default: all) are embedded and predicted by the `GMMHead`; remaining
+  coordinates have a fixed N(0, I) prior. Scalar modalities (`Z`, `ebv`, `photometry`)
   skip the flow and feed a `GMMHead` directly on the raw normalized value.
 - **Body**: the stock SmolLM3 decoder stack, consuming `inputs_embeds`.
   RoPE θ=100k, **NoPE every 4th layer** (`no_rope_layer: 4` /
   `no_rope_layer_interval: 4`), GQA, RMSNorm ε=1e-6, SwiGLU, bf16 training.
-- **Loss**: the exact patch-space likelihood `mean(NLL_GMM(z) - logdet)`
+- **Loss**: the exact patch-space likelihood
+  `mean(NLL_GMM(z[:d_ar]) + NLL_normal(z[d_ar:]) - logdet)`
   (may be negative) computed at positions **one to the left** of each
   modality token — `<|begin_m|>` predicts patch 0, patch *i* predicts patch
   *i+1* (AstroPT's `starts−1` alignment, implemented via `left_shift_mask`).

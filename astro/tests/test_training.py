@@ -316,7 +316,7 @@ def test_resume_normalizes_modalities_and_preserves_legacy_checkpoint(
 
 @pytest.mark.parametrize("field,value", [
     ("missing", None), ("name", "renamed"), ("token_ids", [53, 54, 55]),
-    ("source", "different-survey"), ("input_size", 384), ("pos_input_size", 2),
+    ("source", "different-survey"), ("input_size", 384), ("pos_input_size", 2), ("d_ar", 64),
 ])
 def test_resume_rejects_generic_modality_mismatches(tmp_path, default_recipe, field, value):
     model = default_recipe["model"]["model_config"]

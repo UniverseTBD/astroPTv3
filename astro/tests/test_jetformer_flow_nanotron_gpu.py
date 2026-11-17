@@ -23,7 +23,7 @@ def nt():
     return make_nt()
 
 
-def _trainer(tmp_path, resume=None):
+def _trainer(tmp_path, resume=None, split=False):
     from nanotron.trainer import DistributedTrainer
 
     config = yaml.safe_load((ASTRO_DIR / "tests/fixtures/astropt3-test-tiny.yaml").read_text())
@@ -37,6 +37,10 @@ def _trainer(tmp_path, resume=None):
         jetformer_noise_max=0.0,
         jetformer_noise_min=0.0,
     )
+    if split:
+        for modality in config["model"]["model_config"]["modalities"]:
+            if modality["family"] != "scalar":
+                modality["d_ar"] = modality["input_size"] // 2 + 1
     config["data_stages"] = pilot["data_stages"]  # parsed only: catalog streams are required, never opened
     config["tokens"].update(sequence_length=SEQ_LEN, micro_batch_size=2)
     config["optimizer"]["learning_rate_scheduler"].update(lr_warmup_steps=0, lr_warmup_style="linear")
@@ -164,8 +168,9 @@ def test_init_context_moves_buffers_without_casting_nonfloat(nt, dtype):
     assert not module.state_dict()
 
 
-def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt, tmp_path):
-    trainer = _trainer(tmp_path)
+@pytest.mark.parametrize("split", [False, True])
+def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt, tmp_path, split):
+    trainer = _trainer(tmp_path, split=split)
     model = trainer.unwrapped_model
     flat = _flat_batch(model.config)
     # The baseline scheduler starts at LR=0; the second update exercises nonzero outputs.
@@ -197,7 +202,7 @@ def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt,
         before = model.model(**regroup(flat, model.config.modality_names()))
     checkpoint = trainer.save_checkpoint()
     # Construction must reconstruct buffers without reading them from checkpoint tensors.
-    resumed = _trainer(tmp_path, resume=checkpoint)
+    resumed = _trainer(tmp_path, resume=checkpoint, split=split)
     loaded = resumed.unwrapped_model.eval()
     assert resumed.init_checkpoint_path is not None
     assert resumed.metadata.last_train_step == 2
@@ -211,19 +216,24 @@ def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt,
         for suffix in ("z", "logdet"):
             key = f"{name}_{suffix}"
             assert torch.equal(after[key], before[key]), key
-        for old_block, new_block in zip(_flows(model)[name].blocks, _flows(loaded)[name].blocks):
+        for old_block, new_block in zip(_flows(model)[name].blocks, _flows(loaded)[name].blocks, strict=True):
             assert torch.equal(old_block.permutation, new_block.permutation)
             assert torch.equal(old_block.inverse_permutation, new_block.inverse_permutation)
 
 
-def test_hf_nanotron_parity_and_exact_conversion(nt, tmp_path):
+@pytest.mark.parametrize("split", [False, True])
+def test_hf_nanotron_parity_and_exact_conversion(nt, tmp_path, split):
     from astropt3 import AstroPT3Model
     from astropt3.flows import flow_object_ids
 
-    trainer = _trainer(tmp_path)
+    trainer = _trainer(tmp_path, split=split)
     model = trainer.unwrapped_model.eval()
     config = model.config
     hf_config = nt.to_hf.get_hf_config(config)
+    round_trip = nt.from_hf.get_nanotron_config(hf_config)
+    for name in config.modality_names():
+        assert hf_config.modality_registry().get_config(name).d_ar == config.modality(name)["d_ar"]
+        assert round_trip.modality(name)["d_ar"] == config.modality(name)["d_ar"]
     for field in ("jetformer_flow_depth", "jetformer_flow_heads"):
         assert getattr(hf_config, field) == getattr(config, field)
         assert getattr(nt.from_hf.get_nanotron_config(hf_config), field) == getattr(config, field)
@@ -257,6 +267,16 @@ def test_hf_nanotron_parity_and_exact_conversion(nt, tmp_path):
                 )
                 assert torch.equal(z, predictions[f"{name}_z"])
                 assert torch.equal(logdet, predictions[f"{name}_logdet"])
+                assert z.shape[-1] == config.modality(name)["input_size"]
+                assert model.model.token_position_embeddings.pp_block.encoders[name].c_fc.in_features == config.modality(name)["d_ar"]
+                reconstructed = nt_output[f"{name}_ar_loss"] + nt_output[f"{name}_prior_loss"] - nt_output[f"{name}_logdet_loss"]
+                torch.testing.assert_close(nt_output[f"{name}_loss"], reconstructed)
+                for component in ("ar", "prior", "logdet"):
+                    assert nt_output[f"{name}_{component}_loss"].item() == pytest.approx(
+                        hf_output.loss_components[name][component].item(), rel=REL_TOL, abs=1e-5
+                    )
+                if not split:
+                    assert nt_output[f"{name}_prior_loss"].item() == 0
             assert nt_output[f"{name}_loss"].item() == pytest.approx(
                 hf_output.modality_losses[name].item(), rel=REL_TOL
             )
@@ -271,6 +291,8 @@ def test_hf_nanotron_parity_and_exact_conversion(nt, tmp_path):
     hf_back.save_pretrained(tmp_path / "hf")
     hf_loaded = AstroPT3Model.from_pretrained(tmp_path / "hf", dtype=torch.bfloat16).cuda().eval()
     _assert_permutations(hf_loaded.flows)
+    for name in config.modality_names():
+        assert hf_loaded.config.modality_registry().get_config(name).d_ar == config.modality(name)["d_ar"]
     nt_back = build_nt_model(nt, nt.from_hf.get_nanotron_config(hf_loaded.config)).eval()
     nt.from_hf.convert_hf_to_nt(hf_loaded, nt_back, config)
     for name, parameter in nt_back.named_parameters():
@@ -278,6 +300,96 @@ def test_hf_nanotron_parity_and_exact_conversion(nt, tmp_path):
     with torch.no_grad():
         # Conversion selects fused-kernel defaults; weights are exact, bf16 reductions need tolerance.
         torch.testing.assert_close(nt_back(**flat)["loss"], nt_output["loss"], rtol=1e-5, atol=1e-4)
+
+
+@pytest.mark.parametrize("d_ar", [3, 8])
+def test_factor_out_loss_gradients_absence_and_flops(nt, d_ar):
+    import math
+    from dataclasses import replace
+
+    from nanotron.models.astropt3 import (
+        AstroPT3Loss,
+        gmm_nll,
+        modality_flops_per_token,
+        unpack_gmm_params,
+    )
+    from test_nanotron_gpu import tiny_nt_config
+
+    config = tiny_nt_config(nt, modalities=[{"name": "images", "input_size": 8, "d_ar": d_ar}])
+    loss_module = AstroPT3Loss(config)
+    pred = torch.randn(4, config.jetformer_gmm_k * (1 + 2 * d_ar), device="cuda", requires_grad=True)
+    z = torch.randn(4, 8, device="cuda", requires_grad=True)
+    logdet = torch.randn(4, device="cuda", requires_grad=True)
+    output = loss_module({}, images_pred=pred, images_z=z, images_logdet=logdet)
+    ar = gmm_nll(z[:, :d_ar], *unpack_gmm_params(pred, config.jetformer_gmm_k, d_ar))
+    prior = 0.5 * (z[:, d_ar:].square() + math.log(2 * math.pi)).sum(-1)
+    expected = (ar + prior - logdet).mean() if d_ar < 8 else (ar - logdet).mean()
+    if d_ar == 8:
+        assert torch.equal(output["loss"], expected)
+    else:
+        torch.testing.assert_close(output["loss"], expected)
+    torch.testing.assert_close(output["images_prior_loss"], prior.mean())
+    torch.testing.assert_close(output["images_logdet_loss"], logdet.mean())
+    output["loss"].backward()
+    assert pred.grad is not None and z.grad is not None
+    assert torch.isfinite(pred.grad).all() and torch.count_nonzero(pred.grad)
+    if d_ar < 8:
+        torch.testing.assert_close(z.grad[:, d_ar:], z.detach()[:, d_ar:] / z.shape[0])
+    torch.testing.assert_close(logdet.grad, torch.full_like(logdet, -1 / z.shape[0]))
+
+    absent_pred = pred.detach()[:0].requires_grad_()
+    absent = loss_module({}, images_pred=absent_pred, images_z=z[:0], images_logdet=logdet[:0])
+    assert absent.keys() == output.keys()
+    assert all(value.item() == 0 for value in absent.values())
+    absent["loss"].backward()
+    assert absent_pred.grad is not None
+
+    full = replace(config, modalities=[{"name": "images", "input_size": 8}])
+    saved = modality_flops_per_token(full)["images"] - modality_flops_per_token(config)["images"]
+    assert saved == 2 * config.hidden_size * (8 - d_ar) * (1 + 2 * config.jetformer_gmm_k)
+
+
+def test_split_prior_reaches_flow_and_encoder_ignores_tail(nt, tmp_path, monkeypatch):
+    trainer = _trainer(tmp_path, split=True)
+    model = trainer.unwrapped_model
+    embedding = model.model.token_position_embeddings.pp_block
+    model.train()
+    flat = _flat_batch(model.config)
+    kwargs = regroup(flat, model.config.modality_names())
+    name = next(iter(embedding.flows))
+    d_ar = model.config.modality(name)["d_ar"]
+    embedding.jetformer_noise_max = embedding.jetformer_noise_min = 0.2
+    captured, draws = [], []
+    randn_like = torch.randn_like
+
+    def capture_noise(z):
+        noise = randn_like(z)
+        draws.append(noise)
+        return noise
+
+    hook = embedding.encoders[name].register_forward_pre_hook(lambda module, args: captured.append(args[0].detach().clone()))
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(torch, "randn_like", capture_noise)
+            emitted = embedding(**kwargs)
+    finally:
+        hook.remove()
+    z = emitted[f"{name}_z"]
+    assert captured[0].shape[-1] == d_ar
+    assert z.shape[-1] == model.config.modality(name)["input_size"]
+    assert draws[0].shape == z.shape
+    assert torch.equal(captured[0], (z + 0.2 * draws[0])[:, :d_ar].bfloat16())
+    with torch.no_grad():
+        clean = embedding.eval()(**kwargs)
+    assert torch.equal(clean[f"{name}_z"], z)
+    assert torch.equal(clean[f"{name}_logdet"], emitted[f"{name}_logdet"])
+    from astropt3.modalities import std_normal_nll
+
+    prior = std_normal_nll(emitted[f"{name}_z"][:, d_ar:]).mean()
+    parameters = tuple(embedding.flows[name].parameters())
+    gradients = torch.autograd.grad(prior, parameters, allow_unused=True)
+    assert all(torch.isfinite(grad).all() for grad in gradients if grad is not None)
+    assert any(torch.count_nonzero(grad) for grad in gradients if grad is not None)
 
 
 def test_rejects_context_parallel(nt):

@@ -17,9 +17,9 @@ Sequence contract (built by data/packing.py):
   tokens unless ``special_token_ce_weight > 0``.
 - The jetformer tokeniser (JetFormer/GIVT-style) is the sole regression
   head: patch values pass through a per-modality normalizing flow
-  (``flows[m]``) to a latent z that is both embedded and predicted by a
-  ``GMMHead``, and the per-modality loss is
-  ``mean(NLL_GMM(z) - logdet)`` — an exact likelihood in patch space (may
+  (``flows[m]``) to latent z. Its first ``d_ar`` coordinates are embedded
+  and predicted by a ``GMMHead``; the tail has a standard-normal prior.
+  The loss is ``mean(NLL_GMM(z_ar) + NLL_normal(z_tail) - logdet)`` (may
   be negative). Same left-shift alignment.
 - ADR 0008 scalar modalities (``ModalityConfig.scalar``) are GMM-headed
   directly (``scalar_gmm_k`` mixture over the raw normalized value; loss
@@ -46,6 +46,7 @@ from .modalities import (
     GMMHead,
     PositionEmbedder,
     gmm_nll,
+    std_normal_nll,
 )
 from .tokenization import PAD_ID
 
@@ -55,6 +56,7 @@ class AstroPT3Output(ModelOutput):
     loss: torch.Tensor | None = None
     modality_losses: dict | None = None
     family_losses: dict | None = None
+    loss_components: dict | None = None
     predictions: dict | None = None
     last_hidden_state: torch.Tensor | None = None
     # per-layer states (embeddings first, HF convention), populated only
@@ -95,9 +97,10 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
             if registry.get_config(name).family == "scalar"
         }
         patch_names = [n for n in self.modality_names if n not in self.scalar_names]
+        self.ar_dims = {name: cast(int, registry.get_config(name).d_ar) for name in self.modality_names}
         self.encoders = nn.ModuleDict(
             {
-                name: Encoder(config.hidden_size, registry.get_config(name).input_size)
+                name: Encoder(config.hidden_size, self.ar_dims[name])
                 for name in self.modality_names
             }
         )
@@ -121,7 +124,7 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
             {
                 name: GMMHead(
                     config.hidden_size,
-                    registry.get_config(name).input_size,
+                    self.ar_dims[name],
                     config.jetformer_gmm_k,
                 )
                 for name in patch_names
@@ -151,7 +154,7 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
         self.jet_noise_frac = 1.0
         self.post_init()
         for flow in self.flows.values():
-            flow.reset_coupling_outputs()
+            cast(JetFormerFlow, flow).reset_coupling_outputs()
 
     def _init_weights(self, module):
         super()._init_weights(module)
@@ -189,7 +192,7 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
             if name not in modality_masks or not modality_masks[name].any():
                 continue
             mask = modality_masks[name]
-            values = modality_values[name].to(embeds.dtype)
+            values = modality_values[name][..., : self.ar_dims[name]].to(embeds.dtype)
             content = self.encoders[name](values) + self.pos_embeds[name](
                 modality_positions[name]
             )
@@ -215,8 +218,8 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
         modality_masks = modality_masks or {}
         modality_positions = modality_positions or {}
 
-        # values -> flow -> latent z once, up front; z is both the embedded
-        # input and the GMM target, and logdet joins the loss. The noise
+        # Flow the full patch once; its AR prefix is embedded and GMM-predicted,
+        # while the Gaussian tail and full logdet join the loss. The noise
         # curriculum perturbs only the embedded copy (training mode) — the
         # GMM target z and the logdet stay clean.
         flow_logdets = {}
@@ -261,6 +264,7 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
         predictions = {}
         modality_losses = {}
         family_losses = {}
+        loss_components = {}
         loss = None
         if compute_loss:
             losses_by_family = {"image": [], "spectrum": [], "scalar": []}
@@ -288,12 +292,20 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
                         hidden[left_shift_mask(mask)]
                     )
                     target = modality_values[name].to(mu.dtype)  # latent z
-                    nll = gmm_nll(target, logits_pi, mu, log_sigma)
-                    mod_loss = (nll - flow_logdets[name].to(nll.dtype)).mean()
-                    # z-space mixture mean as the point prediction; inverse
-                    # flow (self.flows[name](z, reverse=True)) maps it back.
+                    d_ar = self.ar_dims[name]
+                    ar_nll = gmm_nll(target[..., :d_ar], logits_pi, mu, log_sigma)
+                    prior_nll = std_normal_nll(target[..., d_ar:])
+                    nll = ar_nll + prior_nll if d_ar < target.size(-1) else ar_nll
+                    logdet = flow_logdets[name].to(nll.dtype)
+                    mod_loss = (nll - logdet).mean()
+                    loss_components[name] = {
+                        "ar": ar_nll.mean(), "prior": prior_nll.mean(), "logdet": logdet.mean(),
+                    }
+                    # The prior mean is zero; inverse flow needs the full latent.
                     pi = torch.softmax(logits_pi, dim=-1)
-                    predictions[name] = (pi.unsqueeze(-1) * mu).sum(dim=-2)
+                    predictions[name] = F.pad(
+                        (pi.unsqueeze(-1) * mu).sum(dim=-2), (0, target.size(-1) - d_ar)
+                    )
                 modality_losses[name] = mod_loss
                 losses_by_family[self.modality_families[name]].append(mod_loss)
 
@@ -324,6 +336,7 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
             loss=loss,
             modality_losses=modality_losses,
             family_losses=family_losses,
+            loss_components=loss_components,
             predictions=predictions,
             last_hidden_state=hidden,
             hidden_states=getattr(body_out, "hidden_states", None),

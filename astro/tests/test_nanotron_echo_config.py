@@ -83,6 +83,37 @@ def test_derived_gpu_smoke_keeps_tiny_training_contract(tmp_path):
     assert config.checkpoints.checkpoint_schedule is None
 
 
+@pytest.mark.parametrize("setting, expected", [({}, 192), ({"d_ar": None}, 192), ({"d_ar": 192}, 192), ({"d_ar": 1}, 1), ({"d_ar": 97}, 97)])
+def test_nanotron_resolves_d_ar_and_round_trips_yaml(tmp_path, setting, expected):
+    baseline = Path(__file__).resolve().parents[1] / "configs/nanotron/astropt3-70m.yaml"
+    raw = yaml.safe_load(baseline.read_text())
+    raw["model"]["model_config"]["modalities"] = [{"name": "images", "input_size": 192, **setting}]
+    config = nanotron_config.get_config_from_dict(raw)
+    assert config.model.model_config.modality("images")["d_ar"] == expected
+    path = tmp_path / "split.yaml"
+    config.save_as_yaml(path)
+    restored = nanotron_config.get_config_from_file(path)
+    assert restored.model.model_config.modality("images")["d_ar"] == expected
+    assert raw["model"]["model_config"]["modalities"][0] == {"name": "images", "input_size": 192, **setting}
+
+
+@pytest.mark.parametrize("d_ar", [0, -1, 193, True, False, 1.5, "96"])
+def test_nanotron_rejects_invalid_d_ar(d_ar):
+    with pytest.raises(ValueError, match="d_ar"):
+        nanotron_config.AstroPT3Config(modalities=[{"name": "images", "input_size": 192, "d_ar": d_ar}])
+
+
+@pytest.mark.parametrize("d_ar", [None, 3, 1])
+def test_nanotron_scalar_requires_full_d_ar(d_ar):
+    modalities = [{"name": "photometry", "input_size": 3, "d_ar": d_ar}]
+    if d_ar == 1:
+        with pytest.raises(ValueError, match="scalar.*d_ar"):
+            nanotron_config.AstroPT3Config(modalities=modalities)
+    else:
+        config = nanotron_config.AstroPT3Config(modalities=modalities)
+        assert config.modality("photometry")["d_ar"] == 3
+
+
 @pytest.mark.parametrize("factor", [0, -1, True, False, 1.5, "2", None])
 def test_nanotron_rejects_invalid_echo_factor(factor):
     with pytest.raises(ValueError, match="positive integer"):
