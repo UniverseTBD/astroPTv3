@@ -23,7 +23,7 @@ from nanotron.trainer import DistributedTrainer
 
 ASTRO_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ASTRO_DIR / "tests"))
-from test_jetformer_flow_nanotron_gpu import _flat_batch  # noqa: E402
+from test_jetformer_flow_nanotron_gpu import SEQ_LEN, _flat_batch  # noqa: E402
 
 STEPS = 3
 
@@ -34,7 +34,7 @@ def main():
     config["model"]["model_config"].update(modalities=recipe["model"]["model_config"]["modalities"])
     config["data_stages"] = recipe["data_stages"]  # parsed only: streams are never opened
     config["parallelism"]["dp"] = 2
-    config["tokens"].update(sequence_length=64, micro_batch_size=2)
+    config["tokens"].update(sequence_length=SEQ_LEN, micro_batch_size=2)
     config["optimizer"]["learning_rate_scheduler"].update(lr_warmup_steps=0, lr_warmup_style="linear")
     workdir = Path(tempfile.mkdtemp(prefix="dp2_flow_check_"))
     config["checkpoints"]["checkpoints_path"] = str(workdir / "checkpoints")

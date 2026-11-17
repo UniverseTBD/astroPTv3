@@ -189,6 +189,7 @@ def smoke_config(nt, workdir):
     stage["name"] = "lsdb-experimental"
     stage["data"]["num_loading_workers"] = 0
     stage["data"]["dataset"]["echo_factor"] = 1
+    config["parallelism"]["dp"] = 1  # the recipe's cluster DP; the smoke run uses one GPU
     config["optimizer"]["zero_stage"] = 0
     config["optimizer"]["learning_rate_scheduler"].update(lr_warmup_steps=10, lr_decay_steps=40)
     config["tokens"].update(train_steps=50, micro_batch_size=4, sequence_length=SEQ_LEN)
@@ -216,12 +217,11 @@ def build_nt_model(nt, nt_config):
     return model
 
 
-def micro_batch(hf_config, device="cuda", skip=0):
+def micro_batch(hf_config, device="cuda", skip=0, catalog_stream=TINY_CATALOG_STREAM):
     from astropt3.data.nanotron_loader import PackedMicroBatches
 
-    dataset = PackedMicroBatches(
-        hf_config, MBS, SEQ_LEN, catalog_stream=TINY_CATALOG_STREAM
-    )
+    # The spec must cover the config's modalities; its streams are never opened.
+    dataset = PackedMicroBatches(hf_config, MBS, SEQ_LEN, catalog_stream=catalog_stream)
     # Parity needs deterministic tensors, not a live LSDB connection.
     records = (make_record(i) for i in count())
     flat = next(islice(dataset._pack_records(records), skip, None))
@@ -326,7 +326,8 @@ def test_tp2_replicated_module_gradients_with_noise(nt):
 def test_50step_live_run_and_checkpoint_conversion(nt, tmp_path_factory):
     """Train on live catalogs; convert; reload; reproduce a held-out batch loss."""
     workdir = tmp_path_factory.mktemp("nanotron_smoke")
-    stdout = run_train(smoke_config(nt, workdir), workdir, "test-tiny")
+    config = smoke_config(nt, workdir)
+    stdout = run_train(config, workdir, "test-tiny")
     losses = losses_from(stdout)
     assert len(losses) >= 40, f"expected ~50 logged losses, got {len(losses)}"
     # Likelihood loss can cross zero, so a ratio is not a learning criterion.
@@ -375,7 +376,8 @@ def test_50step_live_run_and_checkpoint_conversion(nt, tmp_path_factory):
         model=nt_model, parallel_context=nt.parallel_context, root_folder=checkpoint
     )
     nt_model.eval()
-    flat = micro_batch(hf_model.config, skip=7)  # fixed synthetic evaluation batch
+    stream = config["data_stages"][0]["data"]["dataset"]["catalog_stream"]
+    flat = micro_batch(hf_model.config, skip=7, catalog_stream=stream)  # fixed synthetic evaluation batch
     names = hf_model.config.modality_registry().names()
     with torch.no_grad():
         nt_loss = nt_model(**flat)["loss"].item()
