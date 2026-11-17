@@ -1,7 +1,7 @@
 """Offline contracts for configured catalogs, independent of the training runner."""
 
 import io
-from contextlib import closing, nullcontext
+from contextlib import closing, nullcontext, suppress
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -212,6 +212,37 @@ def test_catalog_count_projection_and_finite_draws(recipe, offline, count):
     assert stream.nested == expected_nested
     assert offline.clusters[0]["threads_per_worker"] == spec["partitions_per_chunk"]
     assert offline.clusters[0]["memory_limit"] == spec["worker_memory_limit"]
+
+
+def test_draws_drop_hf_array2d_extension_before_opening(recipe, offline):
+    """HF datasets' Array2D registration makes HSC's schema unreadable in-process."""
+    import pyarrow as pa
+
+    class Array2D(pa.ExtensionType):  # stand-in registered under the datasets name
+        def __init__(self):
+            super().__init__(pa.list_(pa.float32()), "datasets.features.features.Array2DExtensionType")
+
+        def __arrow_ext_serialize__(self):
+            return b""
+
+        @classmethod
+        def __arrow_ext_deserialize__(cls, storage_type, serialized):
+            return cls()
+
+    schema = pa.schema([pa.field("image", pa.struct([pa.field("flux", pa.list_(Array2D()))]))]).serialize()
+    pa.register_extension_type(Array2D())
+    try:
+        with pytest.raises(pa.ArrowNotImplementedError, match="extension"):
+            pa.ipc.read_schema(pa.BufferReader(schema)).empty_table()
+        spec, config = _case(recipe, 1)
+        stream = streaming.CatalogStream(spec, config)
+        offline.frames = lambda: [nested_frame([_row(spec)], tuple(stream.nested))]
+        with closing(stream.draws(seed=0, rank=0, worker_id=0)) as draws:
+            next(draws)
+        pa.ipc.read_schema(pa.BufferReader(schema)).empty_table()
+    finally:
+        with suppress(pa.ArrowKeyError):
+            pa.unregister_extension_type("datasets.features.features.Array2DExtensionType")
 
 
 def test_configured_loader_preserves_alignment_across_echoes(recipe, offline):

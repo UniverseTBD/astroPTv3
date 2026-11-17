@@ -78,6 +78,7 @@ def test_derived_gpu_smoke_keeps_tiny_training_contract(tmp_path):
     scheduler = config.optimizer.learning_rate_scheduler
     assert (scheduler.lr_warmup_steps, scheduler.lr_decay_steps) == (10, 40)
     assert config.optimizer.zero_stage == 0
+    assert config.parallelism.dp == 1
     assert config.checkpoints.checkpoint_interval == 50
     assert config.checkpoints.checkpoint_schedule is None
 

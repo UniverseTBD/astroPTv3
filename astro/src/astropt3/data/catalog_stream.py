@@ -8,10 +8,12 @@ import io
 import math
 import re
 import time
+from contextlib import suppress
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 from dask.distributed import Client, LocalCluster
 from PIL import Image
 from lsdb.loaders.hats.read_hats import open_catalog
@@ -40,6 +42,20 @@ _DEFAULTS = {
     "how": "outer", "radius_arcsec": 1.0,
     "partitions_per_chunk": 4, "worker_memory_limit": "auto",
 }
+
+
+def _unregister_hf_array2d_extension() -> None:
+    """Keep HSC's Arrow schema readable when Hugging Face ``datasets`` is imported.
+
+    ``datasets`` (imported by nanotron) registers ``Array2DExtensionType``
+    globally. HSC stores that metadata on its image fields, and LSDB's
+    ``Schema.empty_table()`` cannot build empty extension arrays
+    (``ArrowNotImplementedError: extension``). Spawned loader workers never
+    import ``datasets``; the in-process path (``num_loading_workers: 0``) does.
+    Dropping the registration makes Arrow read the plain list storage type.
+    """
+    with suppress(pa.ArrowKeyError):
+        pa.unregister_extension_type("datasets.features.features.Array2DExtensionType")
 
 
 class CatalogStream:
@@ -205,6 +221,7 @@ class CatalogStream:
 
     def draws(self, *, seed, rank, worker_id):
         """Yield (epoch, finite records) with bounded transport retries, no cursor."""
+        _unregister_hf_array2d_extension()
         telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in self.catalogs})
         failures = generation = draw = 0
         while True:

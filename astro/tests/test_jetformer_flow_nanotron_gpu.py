@@ -15,6 +15,7 @@ from test_nanotron_gpu import REL_TOL, build_nt_model, make_nt, regroup
 
 pytestmark = pytest.mark.gpu
 ASTRO_DIR = Path(__file__).resolve().parents[1]
+SEQ_LEN = 128  # fits two objects carrying every recipe modality
 
 
 @pytest.fixture(scope="module")
@@ -37,7 +38,7 @@ def _trainer(tmp_path, resume=None):
         jetformer_noise_min=0.0,
     )
     config["data_stages"] = pilot["data_stages"]  # parsed only: catalog streams are required, never opened
-    config["tokens"].update(sequence_length=64, micro_batch_size=2)
+    config["tokens"].update(sequence_length=SEQ_LEN, micro_batch_size=2)
     config["optimizer"]["learning_rate_scheduler"].update(lr_warmup_steps=0, lr_warmup_style="linear")
     config["checkpoints"]["checkpoints_path"] = str(tmp_path / "checkpoints")
     config["checkpoints"]["resume_checkpoint_path"] = str(resume) if resume is not None else None
@@ -52,21 +53,22 @@ def _flat_batch(config):
     """Two packed rows, three unequal object spans, shuffled modality ordering."""
     names = config.modality_names()
     batch = {
-        "input_ids": torch.zeros((2, 64), dtype=torch.long),
-        "position_ids": torch.zeros((2, 64), dtype=torch.long),
+        "input_ids": torch.zeros((2, SEQ_LEN), dtype=torch.long),
+        "position_ids": torch.zeros((2, SEQ_LEN), dtype=torch.long),
     }
     values = {name: [] for name in names}
     positions = {name: [] for name in names}
     for name in names:
-        batch[f"{name}_mask"] = torch.zeros((2, 64), dtype=torch.bool)
+        batch[f"{name}_mask"] = torch.zeros((2, SEQ_LEN), dtype=torch.bool)
     generator = torch.Generator().manual_seed(19)
     for row, lengths in enumerate(((3, 2), (1,))):
         cursor = 0
-        for object_index, length in enumerate(lengths):
+        for object_index, object_length in enumerate(lengths):
             tokens = [config.bos_token_id]
             order = names if object_index == 0 else list(reversed(names))
             for name in order:
                 modality = config.modality(name)
+                length = 1 if modality["family"] == "scalar" else object_length
                 begin, placeholder, end = modality["token_ids"]
                 tokens.append(begin)
                 start = cursor + len(tokens)
@@ -205,7 +207,7 @@ def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt,
         assert torch.equal(parameter, original_parameters[name]), name
     with torch.no_grad():
         after = loaded.model(**regroup(flat, loaded.config.modality_names()))
-    for name in model.config.modality_names():
+    for name in _flows(model):  # scalar modalities have no flow, z or logdet
         for suffix in ("z", "logdet"):
             key = f"{name}_{suffix}"
             assert torch.equal(after[key], before[key]), key
@@ -247,13 +249,14 @@ def test_hf_nanotron_parity_and_exact_conversion(nt, tmp_path):
         nt_output = model(**flat)
         hf_output = hf_model(**kwargs)
         for name in config.modality_names():
-            z, logdet = hf_model.flows[name](
-                flat[f"{name}_values"].bfloat16(),
-                flat[f"{name}_positions"],
-                flow_object_ids(flat["position_ids"], flat[f"{name}_mask"]),
-            )
-            assert torch.equal(z, predictions[f"{name}_z"])
-            assert torch.equal(logdet, predictions[f"{name}_logdet"])
+            if name in hf_model.flows:  # scalar modalities have no flow
+                z, logdet = hf_model.flows[name](
+                    flat[f"{name}_values"].bfloat16(),
+                    flat[f"{name}_positions"],
+                    flow_object_ids(flat["position_ids"], flat[f"{name}_mask"]),
+                )
+                assert torch.equal(z, predictions[f"{name}_z"])
+                assert torch.equal(logdet, predictions[f"{name}_logdet"])
             assert nt_output[f"{name}_loss"].item() == pytest.approx(
                 hf_output.modality_losses[name].item(), rel=REL_TOL
             )
