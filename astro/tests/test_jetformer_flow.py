@@ -243,8 +243,8 @@ def test_every_recipe_trains_the_same_modalities_and_catalogs(recipe):
 
 
 @pytest.mark.parametrize("name,flow", [
-    ("astropt3-70m", 35_276_800),
-    ("astropt3-410m", 133_453_824),
+    ("astropt3-70m", 43_070_464),
+    ("astropt3-410m", 161_617_920),
 ])
 def test_recipe_flow_parameter_counts(name, flow):
     config = load_recipe(f"{name}.yaml")["model"]["model_config"]

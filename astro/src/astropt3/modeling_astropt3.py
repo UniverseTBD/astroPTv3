@@ -43,6 +43,7 @@ from .configuration_astropt3 import AstroPT3Config
 from .flows import FlowCoupling, JetFormerFlow, flow_object_ids
 from .modalities import (
     Encoder,
+    CategoricalHead,
     GMMHead,
     PositionEmbedder,
     gmm_nll,
@@ -127,11 +128,18 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
                 for name in patch_names
             }
         )
+        self.categorical_names = {
+            name for name in self.scalar_names if registry.get_config(name).categories
+        }
         for name in sorted(self.scalar_names):
-            self.decoders[name] = GMMHead(
-                config.hidden_size,
-                registry.get_config(name).input_size,
-                config.scalar_gmm_k,
+            self.decoders[name] = (
+                CategoricalHead(config.hidden_size, registry.get_config(name).categories)
+                if name in self.categorical_names
+                else GMMHead(
+                    config.hidden_size,
+                    registry.get_config(name).input_size,
+                    config.scalar_gmm_k,
+                )
             )
         self.pos_embeds = nn.ModuleDict(
             {
@@ -273,7 +281,13 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
                         f"modality '{name}' token at sequence position 0 has no "
                         "preceding token to predict it from (missing <|bos|>?)"
                     )
-                if name in self.scalar_names:
+                if name in self.categorical_names:
+                    # one-hot target -> class index; cross-entropy, no density
+                    logits = self.decoders[name](hidden[left_shift_mask(mask)]).float()
+                    target = modality_values[name].argmax(dim=-1)
+                    mod_loss = F.cross_entropy(logits, target)
+                    predictions[name] = torch.softmax(logits, dim=-1)
+                elif name in self.scalar_names:
                     # ADR 0008: GMM NLL on the raw normalized scalar — no
                     # flow, no logdet
                     logits_pi, mu, log_sigma = self.decoders[name](

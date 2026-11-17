@@ -261,8 +261,10 @@ and/or `scalar_columns` (**record key → flat catalog column**). Keep existing
 token IDs frozen; new names need non-colliding IDs and sufficient `vocab_size`.
 
 Decoders are `legacy_image`, `hsc_image`, `desi_spectrum`, `sdss_spectrum`, and
-`scalars`; new calibrations require code. Scalars need registered transforms;
-DESI `Z` needs valid `ZWARN` from the same catalog. Missing modalities are
+`scalars`; new calibrations require code. Scalars need registered transforms
+(`data/scalar_registry.py`); a value outside the scalar's `VALID_RANGES` or
+failing a `QUALITY_GATES` flag drops the span, and a gated scalar (e.g. DESI
+`Z`, gated on `ZWARN`) needs that flag column from the same catalog. Missing modalities are
 omitted; rows with none are dropped. The first catalog anchors the join;
 right-only rows stay separate, not joined to one another. Adjust `min_catalogs`
 to `1..number of catalogs`: this selects sky covered by that many catalogs,

@@ -69,7 +69,9 @@ def test_default_recipe_keeps_reserved_modality_tokens(default_recipe):
         "images": [2, 3, 4], "spectra": [5, 6, 7],
         "sdss_spectra": [17, 18, 19], "hsc_images": [20, 21, 22], "galaxies": [23, 24, 25],
     }
-    assert len(modalities) == 14 and all(m["family"] == "scalar" for m in modalities[5:])
+    assert len(modalities) == 48
+    assert [m["name"] for m in modalities if m["family"] != "scalar"] == [
+        "images", "spectra", "sdss_spectra", "hsc_images", "galaxies", "gz10_images"]
 
 
 def test_training_caps_loader_workers_on_one_gpu(tmp_path, default_recipe):
@@ -315,7 +317,7 @@ def test_resume_normalizes_modalities_and_preserves_legacy_checkpoint(
 
 
 @pytest.mark.parametrize("field,value", [
-    ("missing", None), ("name", "renamed"), ("token_ids", [53, 54, 55]),
+    ("missing", None), ("name", "renamed"), ("token_ids", [148, 149, 150]),
     ("source", "different-survey"), ("input_size", 384), ("pos_input_size", 2),
 ])
 def test_resume_rejects_generic_modality_mismatches(tmp_path, default_recipe, field, value):

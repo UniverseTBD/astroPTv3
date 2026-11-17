@@ -151,7 +151,7 @@ def nt():
     return make_nt()
 
 
-def tiny_nt_config(nt, **overrides):
+def tiny_nt_config(nt, vocab_size=64, **overrides):
     return nt.config_cls(
         hidden_size=64,
         num_hidden_layers=4,  # crosses one NoPE layer (idx 3)
@@ -162,7 +162,7 @@ def tiny_nt_config(nt, **overrides):
         rope_theta=100000.0,
         no_rope_layer=4,
         rms_norm_eps=1e-6,
-        vocab_size=64,
+        vocab_size=vocab_size,
         pad_token_id=0,
         bos_token_id=1,
         eos_token_id=1,
@@ -182,7 +182,7 @@ def smoke_config(nt, workdir):
     config["general"]["run"] = "test-tiny"
     model = config["model"]["model_config"]
     model.update(asdict(tiny_nt_config(
-        nt, modalities=model["modalities"], use_cache=False,
+        nt, modalities=model["modalities"], vocab_size=model["vocab_size"], use_cache=False,
         _fused_rms_norm=False, _fused_rotary_emb=False,
     )))
     stage = config["data_stages"][0]
@@ -217,13 +217,13 @@ def build_nt_model(nt, nt_config):
     return model
 
 
-def micro_batch(hf_config, device="cuda", skip=0, catalog_stream=TINY_CATALOG_STREAM):
+def micro_batch(hf_config, device="cuda", skip=0, catalog_stream=TINY_CATALOG_STREAM, record=make_record):
     from astropt3.data.nanotron_loader import PackedMicroBatches
 
     # The spec must cover the config's modalities; its streams are never opened.
     dataset = PackedMicroBatches(hf_config, MBS, SEQ_LEN, catalog_stream=catalog_stream)
     # Parity needs deterministic tensors, not a live LSDB connection.
-    records = (make_record(i) for i in count())
+    records = (record(i) for i in count())
     flat = next(islice(dataset._pack_records(records), skip, None))
     return {k: v.to(device) for k, v in flat.items()}
 
@@ -383,3 +383,45 @@ def test_50step_live_run_and_checkpoint_conversion(nt, tmp_path_factory):
         nt_loss = nt_model(**flat)["loss"].item()
         hf_loss = hf_model(**regroup(flat, names)).loss.item()
     assert hf_loss == pytest.approx(nt_loss, rel=REL_TOL), f"NT={nt_loss}, HF={hf_loss}"
+
+
+def test_categorical_scalar_parity_and_conversion(nt):
+    """A categorical scalar (one-hot in, cross-entropy out) matches across the twins."""
+    from copy import deepcopy
+
+    import astropt3  # noqa: F401 -- registers Auto classes
+    from astropt3 import AstroPT3Model
+    from astropt3.configuration_astropt3 import DEFAULT_MODALITIES
+
+    label = {"name": "gz10_label", "family": "scalar", "source": "gz10", "record_keys": ["gz10_label"],
+             "token_ids": [64, 65, 66], "input_size": 10, "patch_size": 1, "pos_type": "index",
+             "max_positions": 1, "categories": 10}
+    nt_config = tiny_nt_config(nt, vocab_size=67, jetformer_flow_hidden=32,
+                               modalities=[*DEFAULT_MODALITIES, label])
+    hf_config = nt.to_hf.get_hf_config(nt_config)
+    torch.manual_seed(0)
+    hf_model = AstroPT3Model(hf_config)
+    nt_model = build_nt_model(nt, nt_config)
+    nt.from_hf.convert_hf_to_nt(hf_model, nt_model, nt_config)
+    torch.nn.Module.cuda(hf_model)
+    torch.nn.Module.to(hf_model, dtype=torch.bfloat16)
+    hf_model.eval()
+    nt_model.eval()
+    spec = deepcopy(TINY_CATALOG_STREAM)
+    spec["catalogs"][0]["scalar_columns"]["gz10_label"] = "gz10_label"
+    flat = micro_batch(hf_config, catalog_stream=spec, record=lambda i: {**make_record(i), "gz10_label": i % 10})
+    assert flat["gz10_label_mask"].any()
+    names = hf_config.modality_registry().names()
+    with torch.no_grad():
+        nt_out = nt_model(**flat)
+        hf_out = hf_model(**regroup(flat, names))
+    assert nt_out["gz10_label_loss"].item() == pytest.approx(hf_out.modality_losses["gz10_label"].item(), rel=REL_TOL)
+    assert nt_out["loss"].item() == pytest.approx(hf_out.loss.item(), rel=REL_TOL)
+    hf_back = AstroPT3Model(hf_config)
+    torch.nn.Module.cuda(hf_back)
+    torch.nn.Module.to(hf_back, dtype=torch.bfloat16)
+    nt.to_hf.convert_nt_to_hf(nt_model, hf_back, nt_config)
+    original = hf_model.state_dict()
+    for key, value in hf_back.state_dict().items():
+        assert torch.equal(value, original[key]), f"roundtrip drift in {key}"
+    assert original["decoders.gz10_label.proj.weight"].shape == (10, hf_config.hidden_size)

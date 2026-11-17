@@ -22,7 +22,7 @@ from lsdb.streams.catalog_streams import CrossMatchStream, InfiniteStream, _rest
 from . import nanotron_loader as loader
 from . import telemetry
 from .packing import has_modality
-from .scalar_registry import _transforms
+from .scalar_registry import CATEGORICAL, QUALITY_GATES, _transforms
 
 # Decoder names describe verified payload contracts, not arbitrary calibrations.
 _PROFILES = {
@@ -33,6 +33,8 @@ _PROFILES = {
     "scalars": (None, (), "scalar"),
     # 8-bit RGB PNG/JPEG struct {bytes, path} (e.g. galaxies-with-hats); dequantized to (k + U(0,1)) / 255
     "rgb_png": ("image", (), "image"),
+    # Galaxy10 DECaLS: the same 256x256 RGB PNG struct, stored as ``rgb_image``
+    "gz10_png": ("rgb_image", (), "image"),
 }
 # Catalogs whose identifier column is not ``object_id``.
 _ID_COLUMNS = {"rgb_png": "dr8_id"}
@@ -125,15 +127,18 @@ class CatalogStream:
             modality = self.registry.get_config(name)
             if modality.family == "scalar":
                 _transforms(name)  # Reject uncalibrated scalars before opening catalogs.
+                if modality.categories != CATEGORICAL.get(name, 0):
+                    raise ValueError(f"modality {name!r} categories disagree with scalar_registry.CATEGORICAL")
             for key in modality.record_keys:
                 if key not in outputs or outputs[key][0] != modality.family:
                     raise ValueError(f"modality {name!r} has no compatible catalog output for {key!r}")
                 if modality.family == "spectrum" and outputs[key][1] != f"{modality.source}_spectrum":
                     raise ValueError(f"modality {name!r} source disagrees with its spectrum decoder")
-            if name == "Z" and ("ZWARN" not in outputs or any(
-                outputs[key][2] != outputs["ZWARN"][2] for key in modality.record_keys
-            )):
-                raise ValueError("Z requires an explicit ZWARN scalar column from the same catalog")
+            for flag in QUALITY_GATES.get(name, ()):
+                if flag not in outputs or any(
+                    outputs[key][2] != outputs[flag][2] for key in modality.record_keys
+                ):
+                    raise ValueError(f"{name} requires an explicit {flag} scalar column from the same catalog")
         minimum = self.spec["min_catalogs"]
         if type(minimum) is not int or not 1 <= minimum <= len(self.catalogs):
             raise ValueError("min_catalogs must be an integer in 1..number of catalogs")
@@ -167,10 +172,6 @@ class CatalogStream:
                 key: loader._finite_scalar(row.get(f"{column}{suffix}"))
                 for key, column in catalog["scalar_columns"].items()
             }
-            # A missing/invalid quality flag must not make a redshift look reliable.
-            if ("ZWARN" in scalars and scalars["ZWARN"] is None
-                    and (value is not None or any(number is not None for number in scalars.values()))):
-                scalars["ZWARN"] = 1.0
             scalars = {key: number for key, number in scalars.items() if number is not None}
             if value is None and not scalars:
                 continue
@@ -195,7 +196,7 @@ class CatalogStream:
                 if scale.shape != (5,) or not np.allclose(scale, 0.168, rtol=1e-6, atol=0):
                     raise ValueError("HSC Wide pixel scale must be 0.168 arcsec in all five bands")
                 result = {"flux": flux, "band": bands}
-            elif decoder == "rgb_png":
+            elif decoder in ("rgb_png", "gz10_png"):
                 with Image.open(io.BytesIO(value["bytes"])) as png:
                     rgb = np.asarray(png.convert("RGB"), dtype=np.float32)
                 # Uniform dequantization: a continuous likelihood on exact k/255 levels

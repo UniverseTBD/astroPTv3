@@ -55,9 +55,12 @@ def recipe():
 def _case(recipe, count=4):
     spec = deepcopy(recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"])
     modalities = deepcopy(recipe["model"]["model_config"]["modalities"])
-    # the four survey catalogs; galaxies-with-hats has its own test
-    spec["catalogs"] = [c for c in spec["catalogs"] if c["decoder"] != "rgb_png"]
-    modalities = [m for m in modalities if m["source"] != "galaxies_with_hats"]
+    # the four survey payloads without their scalars; galaxies-with-hats and
+    # the recipe's scalar wiring have their own tests
+    spec["catalogs"] = [c for c in spec["catalogs"] if c["decoder"] not in ("rgb_png", "gz10_png", "scalars")]
+    for catalog in spec["catalogs"]:
+        catalog.pop("scalar_columns", None)
+    modalities = [m for m in modalities if m["family"] != "scalar" and m["source"] not in ("galaxies_with_hats", "gz10")]
     if count < 4:
         names = ("sdss", "desi")[:count]
         spec["catalogs"] = [next(c for c in spec["catalogs"] if c["name"] == n) for n in names]
@@ -104,8 +107,8 @@ def _row(spec, index=1):
         suffix = "" if i == 0 else f"_{catalog['name']}"
         decoder = catalog["decoder"]
         row[f"{streaming._ID_COLUMNS.get(decoder, 'object_id')}{suffix}"] = f"{catalog['name']}-{index}"
-        if decoder == "rgb_png":
-            row[f"image{suffix}"] = payloads[decoder]
+        if decoder in ("rgb_png", "gz10_png"):  # same PNG struct, different column name
+            row[f"{streaming._PROFILES[decoder][0]}{suffix}"] = payloads["rgb_png"]
         elif decoder != "scalars":
             payload = "image" if decoder.endswith("image") else "spectrum"
             row[f"{payload}{suffix}"] = {
@@ -283,7 +286,7 @@ def test_configured_loader_preserves_alignment_across_echoes(recipe, offline):
 def test_recipe_and_shared_builder(recipe, offline):
     dataset_args = recipe["data_stages"][0]["data"]["dataset"]
     assert dataset_args["echo_factor"] == 4
-    assert len(recipe["model"]["model_config"]["modalities"]) == 14
+    assert len(recipe["model"]["model_config"]["modalities"]) == 48
     batches = loader.build_astropt3_dataloader(
         SimpleNamespace(**dataset_args), SimpleNamespace(**recipe["model"]["model_config"]),
         micro_batch_size=1, sequence_length=1024, dp_rank=0, num_workers=0,
@@ -529,7 +532,7 @@ def test_per_catalog_join_overrides_stream_join(recipe, offline):
         next(draws)
     opened = offline.streams[0]
     joins = {right["suffixes"][1]: right["how"] for right in opened.rights}
-    assert joins == {"_sdss": "outer", "_desi": "outer", "_hsc": "outer", "_galaxies": "left"}
+    assert joins == {"_sdss": "outer", "_desi": "outer", "_hsc": "outer", "_galaxies": "left", "_provabgs": "left", "_gz10": "left"}
     # sky is selected from the anchor and outer surveys only; galaxies cannot widen it
     surveys = tuple(f"hf://datasets/{c['repo']}" for c in spec["catalogs"][1:4])
     assert opened.kwargs["footprint"] == ("footprint", f"hf://datasets/{spec['catalogs'][0]['repo']}", surveys, 3)
@@ -619,6 +622,11 @@ def test_galaxies_with_hats_png_scalars_and_sentinels(recipe):
     scalars = spec["catalogs"][0]["scalar_columns"]
     row[scalars["gwh_redshift"]] = 0.1
     row[scalars["gwh_mass_med_photoz"]] = -99.0  # photo-z fill value means "not measured"
+    row[scalars["gwh_total_sfr_flag"]] = 0.0  # MPA-JHU flag 0 = reliable
+    row[scalars["gwh_total_ssfr_flag"]] = 2.0  # any other flag drops the span
+    for key in ("gwh_mag_f", "gwh_mag_n", "gwh_mag_u", "gwh_mag_i"):
+        row[scalars[key]] = 18.0
+    row[scalars["gwh_bar_strong_fraction"]] = 0.25
     record = _decode(stream, row)
     assert record["object_id"] == "galaxies-3"
     image = record["galaxy_image"]
@@ -632,8 +640,9 @@ def test_galaxies_with_hats_png_scalars_and_sentinels(recipe):
     values = ObjectSequencer(config).build(record).values
     assert values["galaxies"].shape == (256, 768)  # whole image (image_crop 0), raw [0, 1] pixels
     torch.testing.assert_close(values["gwh_redshift"], torch.log1p(torch.tensor([[0.1]])))
-    assert "gwh_mass_med_photoz" not in values
-    assert set(values) == {m["name"] for m in modalities} - {"gwh_mass_med_photoz"}
+    assert values["gwh_gz_bar"].shape == (1, 2)  # one joint span per Galaxy Zoo question
+    torch.testing.assert_close(values["gwh_gz_bar"], torch.tensor([[-0.5, 0.0]]))
+    assert set(values) == {m["name"] for m in modalities} - {"gwh_mass_med_photoz", "gwh_total_ssfr_median"}
 
 
 def test_left_joined_galaxy_without_match_is_skipped(recipe):
@@ -643,9 +652,33 @@ def test_left_joined_galaxy_without_match_is_skipped(recipe):
     row = _row(spec)
     row["dr8_id_galaxies"] = pd.NA
     row["image_galaxies"] = pd.NA  # no galaxy within the match radius
-    for column in spec["catalogs"][-1]["scalar_columns"].values():
+    galaxies = next(c for c in spec["catalogs"] if c["name"] == "galaxies")
+    for column in galaxies["scalar_columns"].values():
         row[f"{column}_galaxies"] = pd.NA
     record = _decode(stream, row)
     assert record["object_id"] == "legacy-1"
     assert "galaxy_image" not in record and not any(key.startswith("gwh_") for key in record)
     assert "galaxies" not in ObjectSequencer(config).build(record).values
+
+
+def test_galaxy10_png_and_categorical_label(recipe):
+    spec = deepcopy(recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"])
+    spec["catalogs"] = [c for c in spec["catalogs"] if c["decoder"] == "gz10_png"]
+    spec["catalogs"][0].pop("how")
+    spec["min_catalogs"] = 1
+    modalities = [m for m in recipe["model"]["model_config"]["modalities"] if m["source"] == "gz10"]
+    config = AstroPT3Config(modalities=modalities, vocab_size=256)
+    stream = streaming.CatalogStream(spec, config)
+    assert stream.columns[0] == "object_id" and "rgb_image" in stream.columns
+    row = _row(spec, index=2)
+    row["gz10_label"] = 4
+    record = _decode(stream, row)
+    assert record["gz10_image"]["flux"].shape == (3, 256, 256)
+    values = ObjectSequencer(config).build(record).values
+    assert values["gz10_images"].shape == (256, 768)
+    torch.testing.assert_close(values["gz10_label"], torch.nn.functional.one_hot(torch.tensor([4]), 10).float())
+    row["gz10_label"] = 12  # not a Galaxy10 class: the label span is dropped, the image stays
+    assert set(ObjectSequencer(config).build(_decode(stream, row)).values) == {"gz10_images"}
+    with pytest.raises(ValueError, match="categories"):
+        bad = [{**m, "categories": 0, "input_size": 1} if m["name"] == "gz10_label" else m for m in modalities]
+        streaming.CatalogStream(spec, AstroPT3Config(modalities=bad, vocab_size=256))

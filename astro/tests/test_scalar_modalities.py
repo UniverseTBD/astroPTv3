@@ -9,7 +9,7 @@ from astropt3.modalities import gmm_nll
 
 
 def test_scalar_registry_roundtrip_and_unknown_raises():
-    x = torch.tensor([0.0, 0.03, 0.7, 1.5, 42.0])
+    x = torch.tensor([0.03, 0.7, 1.5, 42.0])  # positive: several maps are log10
     for name in (
         "Z",
         "sdss_Z",
@@ -18,7 +18,10 @@ def test_scalar_registry_roundtrip_and_unknown_raises():
         "provabgs_Z_MW",
         "provabgs_TAGE_MW",
         "provabgs_AVG_SFR",
-        "gwh_smooth-or-featured_smooth_fraction",
+        "gwh_gz_smooth-or-featured",
+        "gwh_W50",
+        "sdss_vdisp",
+        "provabgs_MAG_W1",
         "ebv",
         "photometry",
         # ADR 0014 A8 free scalars
@@ -30,7 +33,7 @@ def test_scalar_registry_roundtrip_and_unknown_raises():
     ):
         rt = scalar_inverse(name, scalar_normalize(name, x))
         assert torch.allclose(rt, x, atol=1e-5), name
-    for unknown in ("sSFR", "gwh_undocumented_fraction"):
+    for unknown in ("sSFR", "gwh_smooth-or-featured_smooth_fraction", "gwh_gz_undocumented"):
         with pytest.raises(NotImplementedError):
             scalar_normalize(unknown, x)
 
@@ -194,3 +197,116 @@ def test_scalar_head_metrics(tiny_model):
     for key in ("nmad", "outlier_frac", "coverage_1sig", "bias", "r2"):
         assert torch.isfinite(torch.tensor(result[key])), key
     assert result["r2"] <= 1.0
+
+
+def test_scalar_predicates_ranges_and_quality_gates():
+    from astropt3.data.scalar_registry import scalar_valid
+
+    good = {"sdss_ZWARNING": 0.0}
+    assert scalar_valid("sdss_vdisp", [150.0], good)
+    assert not scalar_valid("sdss_vdisp", [0.0], good)  # 0 = no measurement
+    assert not scalar_valid("sdss_vdisp", [850.0], good)  # SDSS cap
+    assert not scalar_valid("sdss_vdisp", [150.0], {"sdss_ZWARNING": 1.0})
+    assert not scalar_valid("sdss_vdisp", [150.0], {})  # unknown quality is not reliable
+    assert not scalar_valid("gwh_total_sfr_median", [-99.0], {"gwh_total_sfr_flag": 0.0})
+    errors = {f"hsc_{band}_cmodel_magerr": 0.01 for band in "grizy"}
+    assert scalar_valid("hsc_cmodel_mag", [21.0] * 5, errors)
+    assert not scalar_valid("hsc_cmodel_mag", [21.0] * 5, {**errors, "hsc_y_cmodel_magerr": 0.2})
+    assert not scalar_valid("hsc_cmodel_mag", [21.0, 21.0, float("nan"), 21.0, 21.0], errors)
+    with pytest.raises(ValueError, match="non-numeric"):
+        scalar_valid("ebv", ["dusty"], {})
+
+
+def test_maps_undefined_at_zero_have_a_positive_valid_range():
+    """A log map without a lower bound would emit NaN tokens for x <= 0."""
+    from astropt3.data.scalar_registry import SCALAR_TRANSFORMS, VALID_RANGES
+
+    for name in SCALAR_TRANSFORMS:
+        edge = scalar_normalize(name, torch.tensor([-0.5, 0.0]))
+        if not torch.isfinite(edge).all():
+            assert VALID_RANGES[name][0] >= 0.0, name
+
+
+def test_recipe_galaxy_zoo_spans_match_registry_questions():
+    from pathlib import Path
+
+    import yaml
+
+    from astropt3.data.scalar_registry import GZ_QUESTIONS
+
+    recipe = Path(__file__).resolve().parents[1] / "configs/nanotron/astropt3-70m.yaml"
+    modalities = yaml.safe_load(recipe.read_text())["model"]["model_config"]["modalities"]
+    spans = {m["name"]: m for m in modalities if m["name"].startswith("gwh_gz_")}
+    assert set(spans) == {f"gwh_gz_{question}" for question in GZ_QUESTIONS}
+    for question, answers in GZ_QUESTIONS.items():
+        span = spans[f"gwh_gz_{question}"]
+        assert span["record_keys"] == [f"gwh_{question}_{answer}_fraction" for answer in answers]
+        assert span["input_size"] == len(answers)
+
+
+GZ10_LABEL = {
+    "name": "gz10_label", "family": "scalar", "source": "gz10", "record_keys": ["gz10_label"],
+    "token_ids": [64, 65, 66], "input_size": 10, "patch_size": 1, "pos_type": "index",
+    "max_positions": 1, "categories": 10,
+}
+
+
+@pytest.fixture
+def categorical_model(tiny_config):
+    from astropt3 import AstroPT3Config, AstroPT3Model
+
+    config = AstroPT3Config(**{**tiny_config.to_dict(), "modalities": [*tiny_config.modalities, GZ10_LABEL],
+                               "vocab_size": 67})
+    torch.manual_seed(0)
+    return AstroPT3Model(config).eval()
+
+
+def test_categorical_scalar_is_one_hot_with_cross_entropy(categorical_model, full_record):
+    from astropt3.data.packing import ObjectSequencer
+    from astropt3.data.scalar_registry import scalar_valid
+    from astropt3.modalities import CategoricalHead
+    from astropt3.modeling_astropt3 import left_shift_mask
+
+    model = categorical_model
+    assert isinstance(model.decoders["gz10_label"], CategoricalHead)
+    assert "gz10_label" in model.scalar_names and "gz10_label" not in model.flows
+    sequencer = ObjectSequencer(model.config)
+    obj = sequencer.build({**full_record, "gz10_label": 7})
+    torch.testing.assert_close(obj.values["gz10_label"], torch.nn.functional.one_hot(torch.tensor([7]), 10).float())
+    assert scalar_inverse("gz10_label", obj.values["gz10_label"]).item() == 7
+    for bad in (10, -1, 2.5):  # out of range, or not a class index
+        assert not scalar_valid("gz10_label", [bad], {})
+        assert "gz10_label" not in sequencer.build({**full_record, "gz10_label": bad}).masks
+    from astropt3.data.packing import PackedCollator
+
+    batch = PackedCollator(model.config, seq_len=896)([obj])
+    with torch.no_grad():
+        out = model(**batch)
+    mask = batch["modality_masks"]["gz10_label"]
+    logits = model.decoders["gz10_label"](out.last_hidden_state[left_shift_mask(mask)])
+    expected = torch.nn.functional.cross_entropy(logits.float(), torch.tensor([7]))
+    torch.testing.assert_close(out.modality_losses["gz10_label"], expected)
+    assert out.predictions["gz10_label"].shape == (1, 10)
+
+
+def test_categorical_generation_samples_one_hot_classes(categorical_model, full_record):
+    from astropt3.data.packing import ObjectSequencer
+    from astropt3.generation import generate
+
+    template = ObjectSequencer(categorical_model.config).build(
+        {**full_record, "gz10_label": 3}, modality_order=["images", "gz10_label"] if "spectrum" not in full_record
+        else ["images", "spectra", "Z", "ebv", "photometry", "gz10_label"],
+    )
+    sampled = generate(categorical_model, template, {"gz10_label"}, n=4,
+                       generator=torch.Generator().manual_seed(0))["gz10_label"]
+    assert sampled.shape == (4, 1, 10)
+    assert torch.equal(sampled.sum(-1), torch.ones(4, 1)) and set(sampled.unique().tolist()) <= {0.0, 1.0}
+
+
+@pytest.mark.parametrize("patch", [{"categories": 10, "family": "image"}, {"categories": 10, "input_size": 9},
+                                   {"categories": 1, "input_size": 1}])
+def test_categorical_config_is_validated(patch):
+    from astropt3.modalities import ModalityConfig
+
+    with pytest.raises(ValueError, match="categorical"):
+        ModalityConfig(**{**GZ10_LABEL, "record_keys": tuple(GZ10_LABEL["record_keys"]), **patch})

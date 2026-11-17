@@ -10,6 +10,8 @@
   image-struct projection, record the Legacy projection as a measured null
   result, and adopt seven free scalar modalities — telescope measurements
   included by owner decision — from columns already on the wire (A7, A8).
+  **Amended 2026-11-17 (r5)** to adopt the issue #53 value-added scalar
+  triage and the PROVABGS scalar spoke (A9).
   The implementation amendments at the foot of
   this document record eight corrections the code found. Supersedes and absorbs
   the labbook working document *"Useful bytes per megabyte downloaded"*
@@ -1027,3 +1029,153 @@ catalogue, one patch of sky. The extinction degeneracy and the magnitude
 signal-to-noise are structural and will hold corpus-wide; the shape and
 resolved-fraction statistics are the least safe to generalise, and the HSC
 figures describe 0.7% of the corpus.
+
+## Implementation amendments (2026-11-17, r5)
+
+**A9 — value-added scalar triage (issue #53): 33 new scalar modalities
+across six catalogues, PROVABGS as a left-joined scalar spoke, and Galaxy10
+as a left-joined image + categorical-label spoke.** The
+method is A8's: measured distributions on 2–3 partitions per catalogue (HATS
+revisions pinned in the recipes; PROVABGS at `a50ea5c`, Galaxy10 at `e999187`), keep a field only if
+it carries information the stream does not already hold, and record its
+transform, range and gate in `scalar_registry.py`. Every recipe now wires 42
+scalars (48 modalities, ids to 147, `vocab_size: 256` for headroom).
+
+*One predicate for every scalar.* `scalar_registry.scalar_valid` is the single
+gate `has_modality` and the sequencer use: every value finite and inside the
+scalar's open `VALID_RANGES` interval, and every `QUALITY_GATES` flag present
+and at most its limit. A missing flag fails. `CatalogStream` rejects a recipe
+whose gated scalar lacks its flag column from the same catalogue. The range
+table absorbs the earlier `-99` sentinel list and A8's predicates.
+
+*Kept:*
+
+| Modality | Columns | Coverage | Transform | Range / gate |
+| --- | --- | ---: | --- | --- |
+| `ebv`, `photometry`, `fiberflux`, `psfdepth` | Legacy anchor | 100% | ADR 0008 / A8 | `psfdepth > 0` |
+| `Z` | DESI `Z` | all DESI | `log(1+z)` | `ZWARN ≤ 0` |
+| `sdss_Z` | SDSS `Z` | all SDSS | `log(1+z)` | `ZWARNING ≤ 0` |
+| `sdss_vdisp` | SDSS `VDISP` | 82% | `log10(v) − 2` | `0 < v < 850`, `ZWARNING ≤ 0` |
+| `hsc_cmodel_mag`, `hsc_extendedness`, `hsc_shape`, `hsc_psf_shape` | HSC (A8) | all HSC | A8 | `10 < m < 30`, each `magerr ≤ 0.1` |
+| `gwh_gz_<question>` ×10 | Zoobot fractions, n−1 per question | 100% / 5.7% follow-ups | `2x − 1` | — |
+| `gwh_total_sfr_median`, `gwh_total_ssfr_median` | MPA-JHU | 11% | unchanged | `> −99`, MPA flag `≤ 0` (drops 12%) |
+| `gwh_fibre_sfr_median`, `gwh_fibre_ssfr_median` | MPA-JHU | 11% | as total | `> −99` |
+| `gwh_ssfr_med_photoz` | photo-z SED | 93% | `x + 11` | `> −99` |
+| `gwh_est_petro_th50` | half-light radius, arcsec | 100% | `log10` | `> 0` |
+| `gwh_sersic_n`, `gwh_sersic_ba` | NSA | 7.4% | `log10`, `2x − 1` | `n > 0` |
+| `gwh_petro_radius` | NSA `petro_th50`, `petro_th90` (joint: concentration) | 7.4% | `log10` | `> 0` |
+| `gwh_petro_ba` | NSA `petro_ba50`, `petro_ba90` (joint: inner vs. outer axis ratio) | 7.4% | `2x − 1` | `> 0` |
+| `gwh_nsa_mag` | NSA GALEX F, N, SDSS u, i (bands Legacy lacks) | ~6.5% | `(m − 17)/2` | `10 < m < 30` |
+| `gwh_logMH`, `gwh_W50` | ALFALFA HI mass, line width | 1.1% | `(x − 10)/2`, `log10(W) − 2` | `W > 0` |
+| `provabgs_LOG_MSTAR`, `_Z_MW`, `_TAGE_MW`, `_AVG_SFR` | PROVABGS SED fit | 223k objects | registry maps | — |
+| `provabgs_MAG_W1` | WISE W1 | 223k objects | `(m − 18)/2` | `10 < m < 30` |
+| `gz10_label` | Galaxy10 DECaLS class 0–9 (categorical) | ≤ ~7k objects | one-hot | integer in `0..9` |
+
+*Galaxy Zoo grouping (owner decision, 2026-11-17).* Each question's Zoobot
+fractions sum to 1 to float precision, so a question is one joint span over
+its non-null answers. The dropped answer (no, none, artifact or can't-tell,
+else the last) is `1 − Σ kept`; keeping it would hand the diagonal GMM a
+degenerate direction, and joint samples stay on the simplex the way joint
+`photometry` stays colour-consistent. This is A8's grouping rule (one
+quantity, several components), and it costs 30 tokens per object, not the
+102 of 34 separate spans. Unreached follow-up questions are NaN upstream,
+which is the ordinary absent span.
+
+*Refused:*
+
+- **Copies of a kept field (ADR 0008's `z_spec` rule).** galaxies-with-hats
+  `spec_z`, `photo_z` and `redshift_nsa`: `redshift` is `spec_z` where
+  present (97%), else `photo_z` (98%). `mag_{g,r,z}_desi`: galaxies-with-hats
+  joins only onto Legacy rows, so these are the anchor's fluxes. DESI
+  `FLUX_*`, `FIBERFLUX_*`, `FIBERTOTFLUX_*` and `EBV` are Legacy targeting
+  photometry and the same dust map. PROVABGS `Z_HP` equals DESI `Z` on 97% of
+  matches (99.9% share an `object_id`), and `MAG_G/R/Z` and `FIBMAG_R` are
+  Legacy photometry. Legacy `z_spec` (4.8% coverage) is the redshift again.
+- **Derivable from kept fields.** `elpetro_mass_log` (NSA mass beside the
+  photo-z mass), `elpetro_absmag_*` and `mag_abs_*_photoz` (apparent
+  magnitude plus redshift), `u_minus_r`, `est_petro_th50_kpc` (arcsec size
+  plus redshift), `HIflux` (`logMH` plus distance), `log_bolometric_l`.
+  `elpetro_ba` equals `petro_ba90`, and `elpetro_theta_r` duplicates the
+  Petrosian radii.
+- **Measurement error, posterior summaries, bookkeeping.** Every `*ERR`,
+  `*_IVAR`, `sig*`, `SNR`, `RMS`, percentile, mode, mean and entropy column;
+  `photo_zerr`; PROVABGS weights, `TSNR2_BGS`, `HPIX_64`, `SCHLEGEL_COLOR`,
+  `PROVABGS_Z_MAX`; `galaxy_size` (undocumented); position angles
+  (orientation is not a galaxy property). HSC `a_*` and the other bands'
+  extendedness and shape moments stay refused as in A8.
+- **Functions of a spectrum already modelled.** SDSS `SPECTROFLUX_*` and
+  `SPECTROSYNFLUX_*`.
+- **Coverage.** OSSY AGN fields (`log_l_oiii`, `log_l_ha`, `log_m_bh`, line
+  widths): 0.04% of galaxies-with-hats, about 3k objects in the stream.
+
+*PROVABGS joins left.* It has a HATS margin, but an outer join would emit
+right-only rows that are label-only objects, and its objects are DESI
+targets anyway. Left-joined, it decorates Legacy-anchored rows and stays out
+of the `min_catalogs` footprint selection, like galaxies-with-hats. Its
+values come from SED fits to DESI spectra and photometry, so a model
+predicting them partly distils PROVABGS; read them as that, not as truth.
+
+*Same quantity, different method, kept on purpose.* `gwh_mass_med_photoz`
+and `provabgs_LOG_MSTAR` (stellar mass), and `gwh_ssfr_med_photoz` beside
+MPA-JHU `gwh_total_ssfr_median`. These disagree for physical reasons (SED
+from photometry vs. from spectra), so the conditional between them is
+information, not copying. If either head looks too good, compare it against
+the other source as the baseline first.
+
+*Measured cost (23,043 live records, 70M recipe, seed 0).* "Before" is the
+same records with the previous 9 scalars. Each scalar span is 3 tokens.
+
+| | mean | p50 | p95 | p99 | max | next-fit packing at 4096 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| before | 145.9 | 147 | 444 | 590 | 629 | 0.969 |
+| after | 158.8 | 159 | 474 | 643 | 710 | 0.966 |
+
+Tokens per record rise 8.8%; every object still fits in one row. Record
+shares for the new spans: HSC scalars 40–41%, Legacy scalars 35%, PROVABGS
+10%, photo-z sSFR 6.1%, MPA-JHU fibre 2.0%, `sdss_vdisp` 1.9%, NSA 1.1–1.2%,
+Galaxy Zoo follow-ups 0.1–0.6%, ALFALFA under 0.05%. The rare heads will see
+few targets per step; read their losses with that in mind.
+
+*Galaxy10 (`UniverseTBD/mmu_gz10`).* 17,736 objects, ten classes
+(1,081 / 1,853 / 2,645 / 2,027 / 334 / 2,043 / 1,829 / 2,628 / 1,423 /
+1,873), 256×256 RGB PNGs at 0.262″/px in `rgb_image`. Measured:
+
+- 36% lie above dec 32.375 and 40% inside Legacy North's HEALPix coverage,
+  so at most about 7k can match the anchor. All of it lies inside
+  galaxies-with-hats coverage, and 91% of a 97-object sample matches a
+  galaxies-with-hats object within 1″.
+- The two cutouts of a shared galaxy are **not** the same image: pixel
+  correlation 0.35–0.99, mean |Δ| ≈ 20/255. `gz10_images` is a second view,
+  not a copy, so it is kept as its own image modality with the `galaxies`
+  encoder configuration (patch 16, `input_size` 768, `image_crop` 0, 256
+  positions) and its own flow. Decoder `gz10_png` is the `rgb_png` contract
+  on the `rgb_image` column.
+- Galaxy10 `redshift` equals `gwh_redshift` on 18 of 19 matched pairs:
+  **refused** as a copy. `rgb_pixel_scale` is a constant.
+- The label is derived from Galaxy Zoo DECaLS volunteer votes, which the
+  `gwh_gz_*` Zoobot fractions are trained on, so it is predictable from them.
+  That conditional is real information (thresholded votes vs. a network's
+  fractions), but a high label accuracy from objects carrying `gwh_gz_*`
+  spans is not evidence of image understanding; score it on objects without
+  them.
+
+Galaxy10 joins **left**: an outer join would make it count toward
+`min_catalogs` and pull South sky, with its SDSS/DESI/HSC rows, into the
+stream. The 60% outside Legacy North needs a South anchor.
+
+*Categorical scalars.* `ModalityConfig.categories > 0` marks a scalar whose
+one record key is a class index. The token value is its one-hot vector
+(`input_size == categories`) through the ordinary scalar encoder, and a
+`CategoricalHead` (one linear layer to class logits) replaces the GMM: the
+loss is cross-entropy, generation samples the softmax (temperature scales the
+logits; 0 or `argmax` takes the mode). It stays in the scalar family, so it
+shares the 0.1 weight. `scalar_registry.CATEGORICAL` owns the class count,
+and `CatalogStream` rejects a modality whose `categories` disagrees. A GMM over
+class indices was rejected because it would order the classes. Both
+implementations carry it, with a GPU parity and conversion test.
+
+*Deferred to follow-ups on issue #53:* nested struct paths (Legacy and HSC
+`image.psf_fwhm`, Gaia, MaNGA maps), filling a record key from a second
+catalogue when the first lacks it (DESI/SDSS photometry and HSC `a_*` for
+objects without a Legacy match), a South anchor for the rest of Galaxy10,
+Gaia and APOGEE.
