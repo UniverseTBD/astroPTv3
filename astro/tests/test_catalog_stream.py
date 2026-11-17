@@ -301,7 +301,15 @@ def test_renamed_sdss_modality_and_padding(recipe, offline):
         batch = next(batches)
     assert batch["input_ids"][0, :5].tolist() == [1, 35, 36, 36, 37]
     assert batch["optical_flux_values"].shape == (2, 256)
-    assert not batch["optical_flux_values"][0, 0]  # masked bin remains aligned
+    from astropt3.data.spectral import spectral_normalize
+
+    values = batch["optical_flux_values"].flatten()[:512]
+    expected = spectral_normalize(
+        torch.as_tensor(np.asarray(original["flux"], np.float32)),
+        torch.as_tensor(np.asarray(original["lambda"], np.float32)), source="sdss")
+    keep = ~torch.as_tensor(np.asarray(original["mask"], bool))
+    torch.testing.assert_close(values[keep].float(), expected[keep])  # real bins stay aligned
+    assert values[0] != 0  # masked bin 0 is fill noise, not an exact zero
 
 
 @pytest.mark.parametrize("catalog_index", range(4))

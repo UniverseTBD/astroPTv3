@@ -77,6 +77,35 @@ def span_order(names, object_id: str, epoch: int = 0) -> list[str]:
     return order
 
 
+# Normalized-unit floor for the fill noise; ~the 1st percentile of SDSS spectral
+# pixel noise (DESI and imaging are noisier).
+FILL_SIGMA_MIN = 0.01
+
+
+def noise_fill(values: torch.Tensor, fill: torch.Tensor, seed: int) -> torch.Tensor:
+    """Replace ``fill`` entries of ``values`` (C, ...) with N(0, sigma_c) noise.
+
+    Masked bins, tail padding and no-data pixels are exact constants: point
+    masses whose continuous likelihood the model can drive to -inf, which
+    eventually dominates the gradient. Noise at each channel's own pixel-noise
+    level (robust std of last-axis neighbour differences / sqrt 2, floored at
+    ``FILL_SIGMA_MIN``) bounds it. Filled entries carried no signal, so the map
+    stays invertible on real data. Seeded, so tokens remain a pure function of
+    the record (resume-exact, deterministic eval).
+    """
+    if not fill.any():
+        return values
+    diff = values[..., 1:] - values[..., :-1]
+    valid = ~(fill[..., 1:] | fill[..., :-1])
+    diff = torch.where(valid, diff, torch.nan).reshape(len(values), -1)
+    centred = diff - diff.nanmedian(dim=-1, keepdim=True).values
+    sigma = 1.4826 / 2**0.5 * centred.abs().nanmedian(dim=-1).values
+    sigma = torch.nan_to_num(sigma, nan=FILL_SIGMA_MIN).clamp(min=FILL_SIGMA_MIN)
+    gen = torch.Generator().manual_seed(seed)
+    noise = torch.randn(values.shape, generator=gen) * sigma.view(-1, *[1] * (values.ndim - 1))
+    return torch.where(fill, noise.to(values.dtype), values)
+
+
 @dataclass
 class ObjectSeq:
     """One object's token sequence and its continuous payloads."""
@@ -115,7 +144,7 @@ class ObjectSequencer:
         # normalization, likewise carried on the config
         self.spectra_norm_divisor = config.spectra_norm_divisor
 
-    def _image_tokens(self, name: str, record: dict):
+    def _image_tokens(self, name: str, record: dict, seed: int = 0):
         mod = self.registry.get_config(name)
         image = record[mod.record_keys[0]]
         flux = torch.as_tensor(image["flux"], dtype=torch.float32)
@@ -132,6 +161,8 @@ class ObjectSequencer:
         flux = physical_normalize(
             flux, bands, divisor=self.image_norm_divisor
         )
+        # exact 0.0 in float survey flux is no-data (e.g. Legacy footprint edges)
+        flux = noise_fill(flux, flux == 0, seed)
         if mod.channel_tokenization == "per_band":
             return self._per_band_tokens(mod, flux, bands)
         patches = patchify_image(flux, mod.patch_size)
@@ -170,17 +201,22 @@ class ObjectSequencer:
         positions = torch.arange(len(patches), dtype=torch.long)
         return patches, positions
 
-    def _spectrum_tokens(self, name: str, record: dict):
+    def _spectrum_tokens(self, name: str, record: dict, seed: int = 0):
         mod = self.registry.get_config(name)
         spec = record[mod.record_keys[0]]
         flux = torch.as_tensor(spec["flux"], dtype=torch.float32)
         lam = torch.as_tensor(spec["lambda"], dtype=torch.float32)
         mask = torch.as_tensor(spec["mask"], dtype=torch.bool)
+        # zero first so masked garbage never reaches the normalization
         flux = torch.where(mask, torch.zeros_like(flux), flux)
         flux = spectral_normalize(
             flux, lam, divisor=self.spectra_norm_divisor, source=mod.source or ""
         )
         patches, lam_mean = patchify_spectrum(flux, lam, mod.patch_size)
+        # masked bins and the last patch's tail padding become noise, not exact zeros
+        fill = torch.ones(patches.numel(), dtype=torch.bool)
+        fill[: len(mask)] = mask
+        patches = noise_fill(patches.reshape(1, -1), fill.reshape(1, -1), seed).view_as(patches)
         positions = normalize_wavelength(lam_mean).unsqueeze(-1)
         return patches, positions
 
@@ -247,10 +283,12 @@ class ObjectSequencer:
                 continue
             if record.get(mod.record_keys[0]) is None:
                 continue
+            # fill-noise seed: per (object, modality, epoch), like the span order
+            seed = zlib.crc32(f"{record.get('object_id', '')}/{name}".encode()) ^ epoch
             if mod.family == "image":
-                parts[name] = self._image_tokens(name, record)
+                parts[name] = self._image_tokens(name, record, seed)
             elif mod.family == "spectrum":
-                parts[name] = self._spectrum_tokens(name, record)
+                parts[name] = self._spectrum_tokens(name, record, seed)
         if not parts:
             raise ValueError(
                 f"record {record.get('object_id')!r} has no known modality"

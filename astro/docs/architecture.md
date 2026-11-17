@@ -56,6 +56,14 @@ survey data to model input (using LegacySurvey and DESI as examples):
    constant, 3600–9824 Å × 0.8 Å, so the map inverts with no side info) →
    `arcsinh(f_ν/10)` (knee = 10 nMgy, the fiber sky-noise scale). Exactly
    invertible (`spectral_inverse`); unknown grids raise.
+   **Noise fill** (`packing.noise_fill`): after normalization, masked
+   spectral bins, the last spectral patch's tail padding and exact-zero
+   (no-data) image pixels are replaced with N(0, σ) noise at the channel's
+   own pixel-noise level (floor 0.01), seeded on `(object_id, modality,
+   epoch)`. Exact constants are point masses the continuous likelihood can
+   drive to −∞; on the 70M run they took ~95% of the gradient norm by
+   step 10k. Filled entries carry no signal, so invertibility on real data
+   is unchanged.
 
 3. **Patchify** (`tokenization.py`):
    - images → central 96×96 crop (`packing.IMAGE_CROP`; JWST cubes are
