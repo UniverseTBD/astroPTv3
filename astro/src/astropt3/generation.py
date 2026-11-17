@@ -19,6 +19,8 @@ caching only if generation ever becomes a hot path.
 """
 
 
+from typing import Any
+
 import torch
 
 from .data.packing import ObjectSeq, PackedCollator
@@ -120,6 +122,13 @@ def generate(
             argmax=argmax,
             generator=generator,
         )
+        prior_dim = values[m_t].size(-1) - z.size(-1)
+        if prior_dim:
+            # Temperature scales the AR mixture only; the fixed prior stays N(0, I).
+            prior = z.new_zeros(n, prior_dim) if argmax else torch.randn(
+                (n, prior_dim), generator=generator, device=z.device, dtype=z.dtype
+            )
+            z = torch.cat((z, prior), dim=-1)
         # Flows invert only after the entire latent span is sampled; scalar
         # GMMs predict raw normalized values with no flow (ADR 0008).
         values[m_t] = torch.cat([values[m_t], z.unsqueeze(1)], dim=1)
@@ -147,7 +156,7 @@ def reconstruct(model, template: ObjectSeq) -> dict:
     """
     model.eval()
     device = next(model.parameters()).device
-    batch = PackedCollator(model.config, seq_len=len(template))([template])
+    batch: dict[str, Any] = PackedCollator(model.config, seq_len=len(template))([template])
     batch = {
         k: (
             {kk: vv.to(device) for kk, vv in v.items()}

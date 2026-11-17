@@ -136,6 +136,9 @@ class AstroPT3Config(SmolLM3Config):
     ):
         raw_modalities = modalities if modalities is not None else DEFAULT_MODALITIES
         self.modalities = _complete_modalities(raw_modalities)
+        registry = self.modality_registry()
+        for modality in self.modalities:
+            modality["d_ar"] = registry.get_config(modality["name"]).d_ar
         required_vocab = required_vocab_size(self.modalities)
         if vocab_size is None:
             vocab_size = required_vocab

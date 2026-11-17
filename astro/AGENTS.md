@@ -109,9 +109,10 @@ stages is implicit and easy to break, so understand it before editing:
    sogol_branch) is the sole regression head: each patch modality's tokens
    flow through a per-modality `JetFormerFlow` (`flows.py`: affine couplings
    with ViT conditioners attending across each object's modality span;
-   `docs/jetformer-flow.md`) to a latent z that is both
-   embedded and predicted by a per-modality `GMMHead`, with loss the exact
-   patch-space likelihood `mean(NLL_GMM(z) - logdet)` at positions one left
+   `docs/jetformer-flow.md`) to a latent z whose first per-modality `d_ar`
+   coordinates (default: full `input_size`) are embedded and predicted by a
+   `GMMHead`; the tail has a fixed N(0, I) prior. Exact patch-space loss is
+   `mean(NLL_GMM(z[:d_ar]) + NLL_normal(z[d_ar:]) - logdet)` at positions one left
    of each modality token (`<|begin_m|>` predicts patch 0 — astroPT's
    `starts-1` alignment), via `left_shift_mask`; the loss can go negative;
    weighted mean over modalities present. A noise curriculum

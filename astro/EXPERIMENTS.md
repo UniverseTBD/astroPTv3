@@ -544,6 +544,87 @@ The two v3 runs differ only in loader stalls: non-stalled window time was
 run attributed 19.1 of 62.9 GiB returned payload to DESI, the first live
 check of DESI attribution.
 
+## 14. Gaussian factor-out bounded pilot (issue #51, 2026-11-17)
+
+**Question:** does assigning the tail of each flowed patch to N(0, I), with
+only `d_ar` coordinates embedded/GMM-predicted, help early learning or cost?
+**Result: mixed, not evidence to change the full-width default.**
+
+Used the saved `isqm4s6c` five-catalog `effective.yaml` from
+`astroPTv3_telemetry/astropt3-70m-gwh-dequant-echo4-20261116T230151Z/`.
+A bounded live sample supplied 64 unique training objects and 32 disjoint
+validation IDs, shared across all arms. Each arm trained from scratch for
+100 steps (4 objects/batch, seq 4096), seed 0. Matching-shaped parameters
+started identically; narrower encoders/heads were freshly initialized.
+Only patch `d_ar` differs between arms; scalar widths and full flow widths
+are unchanged. The fractions round down (`max(1, int(D * fraction))`).
+
+**Pilot deviations from production:** HF FP32/SDPA rather than Nanotron
+bf16; constant peak AdamW LR 0.001 rather than the production LR schedule;
+fixed small data and span order rather than live streaming/echo4. Betas
+0.9/0.95, epsilon 1e-8, weight decay 0.1 and global clip 1 are shared. Noise
+uses the original 10,000-step horizon. This is not a continuation or a
+10,000-step replication. The held-out objects share the sampled sky window;
+this is not a spatially held-out generalization test.
+
+One initially idle H200 NVL, pinned as GPU 2; torch 2.8.0+cu128,
+transformers 5.13.0, LSDB 0.11.3.dev3+g8aa1e63f9. Timings synchronize CUDA
+and exclude 5 warmup steps; fixed-batch host-to-device transfers are included,
+network collection is excluded. Single run per arm, no timing confidence
+interval. Working branch `feat/51-gaussian-factor-out`, based on Astro
+`54b7093` and Nanotron `48fb180`.
+
+| AR fraction (HSC d_ar) | Parameters incl. flows | Mean step (s) | Peak allocated GiB | Total NLL | All-image source NLL |
+|---|---:|---:|---:|---:|---:|
+| 1.0 (320) | 113,407,488 | 0.278 | 6.873 | −152.914 | 39.021 |
+| 0.4 (128) | 108,444,672 | 0.294 | 6.799 | −137.224 | 9.981 |
+| 0.2 (64) | 106,795,008 | 0.293 | 6.771 | −129.283 | 3.028 |
+
+All likelihoods are **nats/token, lower is better**, summed over the complete
+patch (AR + prior − logdet), then token-weighted. Total covers 4,889 tokens;
+it is not the family-balanced training objective. Source/sky masks are
+fixed per object across arms: invert the image arcsinh normalization, take
+channel-wise median and 1.4826×MAD, then mark a patch as source if any pixel
+is more than 4 sigma from its channel median (absolute deviation). This is
+an approximate segmentation, not the issue author's original mask.
+
+| Image group / held-out tokens | Full width | 0.4 fraction | 0.2 fraction |
+|---|---:|---:|---:|
+| HSC all / 1,008 | 150.885 | 148.328 | 147.846 |
+| HSC sky / 871 | 144.090 | 138.867 | 140.728 |
+| HSC source / 137 | 194.084 | 208.480 | 193.096 |
+| Legacy all / 2,304 | 62.175 | 82.284 | 84.739 |
+| Legacy source / 303 | 96.635 | 117.008 | 111.865 |
+| Galaxies RGB all / 1,024 | −1063.928 | −1058.535 | −1012.620 |
+| Galaxies RGB source / 150 | −218.983 | −387.510 | −390.417 |
+
+The source aggregate improves mainly through galaxies RGB; it does not imply
+uniform source improvement. HSC has only 7 held-out cutouts, Legacy 16 and
+RGB 4. DESI and SDSS total NLL also worsen in both split arms. The 0.4/0.2
+arms save 4.4%/5.8% of parameters and 1.1%/1.5% of peak allocated memory,
+but are 6.1%/5.4% slower in this run. Scalar NLLs are mixed and have at most
+four validation targets per scalar. **No linear probe, scalar-head accuracy,
+multiple-seed study, or full-training representation claim is supported.**
+LSDB warned that a right catalog lacks a margin cache; all arms share the
+same potentially incomplete boundary matches.
+
+Local artifacts: `astro/tmp/issue51-real100/{recipe.yaml,hf_config.json,data.pt,result.json}`.
+The result includes AR/prior/logdet components, training curves, exact object
+IDs and dimensions. `data.pt` contains the exact sequences and train/eval
+batches (SHA256 `704e979a20a4894bf0a9ad137f5ac9a09c5dfb379edc7aae027ea678d37c8b0f`).
+The output directory is ignored scratch, not a committed corpus. Command:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+  .venv-astropt3/bin/python astro/scripts/benchmark_factor_out.py \
+  --config-file /h/msmith/projects/astropt/astroPTv3_telemetry/astropt3-70m-gwh-dequant-echo4-20261116T230151Z/effective.yaml \
+  --output astro/tmp/issue51-real100 --steps 100
+```
+
+**Next scientific gate:** matched multi-seed, full-horizon Nanotron runs with
+held-out source NLL, scalar-free linear probes and scalar-head accuracy on
+converted checkpoints. Keep factor-out opt-in until then.
+
 ## Open items / not pursued
 
 - **`chunk=2`**: not tested after the section-7 re-tune; the win at 4 was

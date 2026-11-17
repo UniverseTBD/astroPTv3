@@ -27,6 +27,9 @@ class ModalityConfig:
         name: modality name; registry order (alphabetical) fixes sequence order.
         input_size: flattened patch vector length (e.g. 8*8*3 = 192 for images).
         patch_size: patch side length (images) or window length (1-D data).
+        d_ar: flowed dimensions embedded and predicted autoregressively; defaults
+            to input_size. Remaining dimensions have a fixed N(0, I) prior.
+            Scalar modalities always use input_size.
         pos_type: "index" for learned integer-position embeddings,
             "continuous" for a projected float position (e.g. wavelength).
         pos_input_size: dimensionality of the continuous position vector.
@@ -67,8 +70,15 @@ class ModalityConfig:
     channel_tokenization: str = "fused"
     band_order: tuple[str, ...] = ()
     image_crop: int = 96
+    d_ar: int | None = None
 
     def __post_init__(self):
+        if self.d_ar is None:
+            self.d_ar = self.input_size
+        if type(self.d_ar) is not int or not 0 < self.d_ar <= self.input_size:
+            raise ValueError(f"modality {self.name!r} d_ar must be an integer in [1, input_size]")
+        if self.family == "scalar" and self.d_ar != self.input_size:
+            raise ValueError(f"scalar modality {self.name!r} d_ar must equal input_size")
         if self.family not in {"image", "spectrum", "scalar"}:
             raise ValueError(
                 f"modality {self.name!r} has invalid family {self.family!r}"
@@ -135,6 +145,7 @@ class ModalityConfig:
             "channel_tokenization": self.channel_tokenization,
             "band_order": list(self.band_order),
             "image_crop": self.image_crop,
+            "d_ar": self.d_ar,
         }
 
 
@@ -212,8 +223,8 @@ class PositionEmbedder(nn.Module):
 # attending across each object's modality span, because the packed collator
 # only ever hands the model flat (N, D) token values — this is also what makes
 # the flow modality-generic (images and spectra alike). Per-modality loss is
-# ``mean_tokens(NLL_GMM(z) - logdet)``: exact likelihood in (standardized)
-# patch space, so it can be negative. The v2 noise curriculum lives on the
+# ``mean_tokens(NLL_GMM(z_ar) + NLL_normal(z_tail) - logdet)``: exact likelihood
+# in patch space, so it can be negative. The v2 noise curriculum lives on the
 # model (``AstroPT3Model.set_jet_noise_frac``), not here.
 
 
@@ -236,6 +247,11 @@ class GMMHead(nn.Module):
         mu = out[..., 1 : 1 + self.d]
         log_sigma = out[..., 1 + self.d :].clamp(-7.0, 2.0)
         return logits_pi, mu, log_sigma
+
+
+def std_normal_nll(y):
+    """Per-token NLL under N(0, I); an empty last dimension costs zero."""
+    return 0.5 * (y.square().sum(dim=-1) + y.size(-1) * math.log(2 * math.pi))
 
 
 def gmm_nll(y, logits_pi, mu, log_sigma):

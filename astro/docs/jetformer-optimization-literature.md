@@ -31,28 +31,7 @@ coefficients alone do not establish a 1000-fold decay mismatch.
 
 ## Translation to AstroPTv3
 
-[Table 5](https://arxiv.org/html/2411.19722v2#A1.T5)’s flow has **32 coupling blocks, width 512, block depth 4/4/6**, 447M/447M/650M parameters. Local source inspection instead identifies four patch-vector `CouplingMLP` blocks, hidden128, fixed across backbone widths; loss is mean(GMM_NLL(z)−logdet), without detachment, aggregated by modality family.
-
-For the current four-modality recipe, a CPU count of the HF `TinyFlow1D` modules
-(whose constructors match the Nanotron implementation) gives:
-
-| Flow | Patch dimension | Parameters |
-|---|---:|---:|
-| Legacy images | 192 | 148,736 |
-| DESI spectra | 256 | 198,144 |
-| SDSS spectra | 256 | 198,144 |
-| HSC images | 320 | 247,552 |
-| **All four** | — | **792,576** |
-
-Each coupling is `Linear(D/2,128) → GELU → Linear(128,D)`, predicting affine
-scale/shift for half the patch features. The flow has no attention or
-cross-patch mixing; positions are added by a separate embedding module, and
-the decoder mixes information across tokens. See
-[`CouplingMLP`/`TinyFlow1D`](../src/astropt3/modalities.py) and the
-[actual Nanotron flow/embedding](../../nanotron/src/nanotron/models/astropt3.py).
-The current trunk is 22 layers, hidden2048, with separate modality GMM heads.
-This is a substantial **tokenizer-capacity/context** difference, not a different
-basic flow-plus-autoregressive-GMM likelihood construction.
+[Table 5](https://arxiv.org/html/2411.19722v2#A1.T5)’s flow has **32 coupling blocks, width 512, block depth 4/4/6**, 447M/447M/650M parameters. AstroPTv3 uses **8 couplings, depth 4**, with width `min(hidden_size // 4, 512)` and full attention within each object's modality span. See [the flow architecture and parameter table](jetformer-flow.md). Its likelihood is trained end to end without detachment and aggregated by modality family. Flow capacity and GMM size remain independent experimental variables.
 
 More precisely, [paper §4](https://arxiv.org/html/2411.19722v2#S4) specifies
 32 coupling blocks with 4 or 6 **ViT blocks** per conditioner. The released
@@ -66,15 +45,12 @@ The paper also uses **1024 mixture components** over **128 autoregressive
 latent dimensions**. Its 256×256 RGB images are patchified into 256 tokens
 with 768 channels; the other 640 flow-output channels per token are modeled
 by a Gaussian prior rather than the autoregressive trunk (§3.2 and Appendix D).
-Our resolved 1B recipe uses **4 mixture components**, predicts all 192/256/320
-coordinates of each modality's flowed patch, and has no such Gaussian-prior
-factor-out. Both systems nevertheless use an autoregressive decoder and a
-differentiable flow-plus-GMM density model; these differences do **not** by
-themselves establish an optimal LR ratio.
+AstroPTv3 uses **4 mixture components** and defaults to predicting every
+coordinate. Per-modality `d_ar` opts into the same AR/Gaussian-prior split;
+see [Gaussian factor-out](jetformer-flow.md#gaussian-factor-out). Neither this
+split nor the mixture count establishes an optimal flow/trunk LR ratio.
 
-The earlier local **2×** flow-LR experiment has been removed. The current 1B recipe uses one AdamW peak **3e-4** for all model parameters, with **2000-step warmup + cosine floor 0.1** and global clip1.0. These are not JetFormer-equivalent hyperparameters or architecture; the literature does not establish an optimal flow/trunk LR ratio.
-
-Only this note was written; no training, environment, code/config changes, or reproduction runs were performed.
+The current 1B recipe uses one AdamW peak **3e-4** for all model parameters, with **2000-step warmup + cosine floor 0.1** and global clip1.0. These are not JetFormer-equivalent hyperparameters or architecture; the literature does not establish an optimal flow/trunk LR ratio.
 
 [paper]: https://arxiv.org/abs/2411.19722
 [release]: https://github.com/google-research/big_vision/commit/9c006bfbfb443d6da8aa3bbc6a7a380f54fc190b

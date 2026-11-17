@@ -8,6 +8,8 @@ of the training RNG. Like RoPE tables they are nonpersistent buffers: identical
 configurations reconstruct identical permutations in HF and Nanotron.
 """
 
+from typing import cast
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -15,7 +17,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.checkpoint import checkpoint
 
 
-def flow_object_ids(position_ids: torch.Tensor, modality_mask: torch.Tensor) -> torch.Tensor:
+def flow_object_ids(position_ids: torch.Tensor | None, modality_mask: torch.Tensor) -> torch.Tensor:
     """Map row-major modality values to their packed objects, not batch rows."""
     if position_ids is None or position_ids.shape != modality_mask.shape:
         raise ValueError("JetFormer flows require packed position_ids matching the modality mask")
@@ -48,6 +50,9 @@ class FlowTransformerBlock(nn.Module):
 
 
 class FlowCoupling(nn.Module):
+    permutation: torch.Tensor
+    inverse_permutation: torch.Tensor
+
     def __init__(
         self, dim, hidden_dim, depth, num_heads, pos_type, max_positions,
         pos_input_size, stage,
@@ -140,7 +145,8 @@ class JetFormerFlow(nn.Module):
 
     def reset_coupling_outputs(self):
         """Reapply zero-output initialization after the parent model initializes."""
-        for block in self.blocks:
+        for module in self.blocks:
+            block = cast(FlowCoupling, module)
             nn.init.zeros_(block.out_proj.weight)
             nn.init.zeros_(block.out_proj.bias)
 
@@ -179,10 +185,10 @@ class JetFormerFlow(nn.Module):
         blocks = reversed(self.blocks) if reverse else self.blocks
         for block in blocks:
             if self.training and torch.is_grad_enabled():
-                z, ld = checkpoint(
+                z, ld = cast(tuple[torch.Tensor, torch.Tensor], checkpoint(
                     block, z, pos, allowed_keys, reverse,
                     use_reentrant=False, preserve_rng_state=False,
-                )
+                ))
             else:
                 z, ld = block(z, pos, allowed_keys, reverse)
             logdet = logdet + ld
