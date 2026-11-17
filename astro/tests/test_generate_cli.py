@@ -27,7 +27,10 @@ def test_templates_use_selected_catalogs_and_close_after_one_draw(monkeypatch, r
     config = hf_config_from_modalities(modalities)
     keys = [modality["record_keys"][0] for modality in modalities]
     spec = recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
-    spec["catalogs"] = [next(cat for cat in spec["catalogs"] if cat["record_key"] == key) for key in keys]
+    available = spec["anchors"] + spec["catalogs"]
+    selected = [next(cat for cat in available if cat["record_key"] == key).copy() for key in keys]
+    spec["anchors"] = [{**selected[0], "draw_weight": 1}]
+    spec["catalogs"] = [{k: v for k, v in cat.items() if k != "draw_weight"} for cat in selected[1:]]
     spec["min_catalogs"] = min(count, 3)
     before = copy.deepcopy(spec)
     sparse = {"object_id": "sparse", keys[0]: {}}
@@ -35,7 +38,7 @@ def test_templates_use_selected_catalogs_and_close_after_one_draw(monkeypatch, r
     closed = []
 
     def draws(stream, **kwargs):
-        assert [cat["record_key"] for cat in stream.catalogs] == keys
+        assert [cat["record_key"] for cat in stream.spec["anchors"] + stream.spec["catalogs"]] == keys
         assert kwargs == {"seed": 17, "rank": 0, "worker_id": 0}
         try:
             yield 0, iter([sparse, full])
@@ -80,11 +83,19 @@ def test_cli_rejects_old_or_ambiguous_recipes_before_loading_checkpoint(monkeypa
     assert not output.exists()
 
 
-def test_cli_forwards_explicit_stream_to_template_selection(monkeypatch, tmp_path, recipe):
+@pytest.mark.parametrize("configured,override,expected", [
+    ("train", [], "validation"), ("train", ["--split", "train"], "train"), (None, [], None),
+])
+def test_cli_forwards_explicit_stream_to_template_selection(monkeypatch, tmp_path, recipe, configured, override, expected):
     from transformers import AutoConfig
 
     from astropt3.eval import samples
 
+    training_stream = recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
+    if configured is None:
+        training_stream.pop("split", None)
+    else:
+        training_stream["split"] = configured
     path = tmp_path / "recipe.yaml"
     path.write_text(yaml.safe_dump(recipe))
     config = hf_config_from_modalities(recipe["model"]["model_config"]["modalities"])
@@ -93,7 +104,7 @@ def test_cli_forwards_explicit_stream_to_template_selection(monkeypatch, tmp_pat
 
     def draw(actual_config, spec, rows, seed):
         assert actual_config is config
-        assert spec == recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
+        assert spec == (training_stream if expected is None else {**training_stream, "split": expected})
         assert rows == [1, 0] and seed == 17
         return records
 
@@ -104,5 +115,5 @@ def test_cli_forwards_explicit_stream_to_template_selection(monkeypatch, tmp_pat
     monkeypatch.setattr(cli, "_draw_live_records", draw)
     monkeypatch.setattr(samples, "sample_checkpoint", sample)
     monkeypatch.setattr(sys, "argv", ["generate.py", "--checkpoint", "unused", "--config-file", str(path),
-                                     "--rows", "1,0", "--stream-seed", "17", "--out", str(tmp_path / "output")])
+                                     "--rows", "1,0", "--stream-seed", "17", *override, "--out", str(tmp_path / "output")])
     cli.main()

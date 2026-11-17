@@ -3,6 +3,7 @@
 Template records come from one draw of the explicit recipe's catalog_stream.
 Rows with more active modalities come first; --rows selects positions in that
 ordering. Sampling only produces spans actually present in the template.
+A split-aware recipe draws validation templates unless --split train is set.
 
 Usage:
     uv run python scripts/generate.py --checkpoint <hf_dir> \
@@ -55,6 +56,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=1.0, help="scales GMM sigma")
     parser.add_argument("--seed", type=int, default=0, help="sampling RNG seed")
     parser.add_argument("--stream-seed", type=int, default=0, help="catalog draw seed")
+    parser.add_argument("--split", choices=["train", "validation"], help="override the template draw split")
     parser.add_argument("--rows", default="0", help="comma-separated nonnegative template indices")
     parser.add_argument("--out", default="generated", help="output directory")
     parser.add_argument("--device", default=None)
@@ -77,6 +79,8 @@ def main():
         if "crossmatch_desi" in dataset:
             raise ValueError("crossmatch_desi is removed; use an explicit catalog_stream")
         spec = dataset["catalog_stream"]
+        if args.split is not None or "split" in spec:
+            spec = {**spec, "split": args.split or "validation"}
     except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError) as error:
         parser.error(f"Invalid rows or catalog configuration: {error}")
 

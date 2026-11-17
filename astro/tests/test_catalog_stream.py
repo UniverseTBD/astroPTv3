@@ -42,14 +42,17 @@ def test_real_lsdb_stream_decodes_local_catalogs(recipe, monkeypatch, count):
     with closing(stream.draws(seed=0, rank=0, worker_id=0)) as draws:
         _, records = next(draws)
         record, = records
-    assert record["object_id"] == f"{spec['catalogs'][0]['name']}-1"
+    name = spec['catalogs'][0]['name']
+    assert record["object_id"] == f"{name}:{name}-1"
     assert len(ObjectSequencer(config).build(record).values) == count
 
 
 @pytest.fixture
 def recipe():
-    path = Path(__file__).resolve().parents[1] / "configs/nanotron/astropt3-70m.yaml"
-    return yaml.safe_load(path.read_text())
+    path = Path(__file__).resolve().parents[1] / "configs/controls/astropt3-70m-north.yaml"
+    control = yaml.safe_load(path.read_text())
+    control['data_stages'][0]['data']['dataset']['catalog_stream'].pop('split', None)
+    return control
 
 
 def _case(recipe, count=4):
@@ -117,6 +120,7 @@ def _row(spec, index=1):
 
 
 def _decode(stream, row):
+    stream, = stream.stars
     mapped = {k: v for k, v in row.items() if k not in stream.nested}
     for column, fields in stream.nested.items():
         value = row.get(column) or {}
@@ -174,7 +178,7 @@ def test_catalog_count_projection_and_finite_draws(recipe, offline, count):
     before = deepcopy(spec)
     stream = streaming.CatalogStream(spec, config)
     assert spec == before
-    frame = nested_frame([_row(spec)], tuple(stream.nested))
+    frame = nested_frame([_row(spec)], tuple(stream.stars[0].nested))
     offline.frames = lambda: [frame, frame]
     with closing(stream.draws(seed=42, rank=2, worker_id=3)) as draws:
         for expected_epoch in range(2):
@@ -209,7 +213,7 @@ def test_catalog_count_projection_and_finite_draws(recipe, offline, count):
                       ("band", "flux", "scale") if decoder == "hsc_image" else
                       ("flux", "lambda", "mask"))
             expected_nested[payload[0] + suffix] = fields
-    assert stream.nested == expected_nested
+    assert stream.stars[0].nested == expected_nested
     assert offline.clusters[0]["threads_per_worker"] == spec["partitions_per_chunk"]
     assert offline.clusters[0]["memory_limit"] == spec["worker_memory_limit"]
 
@@ -236,7 +240,7 @@ def test_draws_drop_hf_array2d_extension_before_opening(recipe, offline):
             pa.ipc.read_schema(pa.BufferReader(schema)).empty_table()
         spec, config = _case(recipe, 1)
         stream = streaming.CatalogStream(spec, config)
-        offline.frames = lambda: [nested_frame([_row(spec)], tuple(stream.nested))]
+        offline.frames = lambda: [nested_frame([_row(spec)], tuple(stream.stars[0].nested))]
         with closing(stream.draws(seed=0, rank=0, worker_id=0)) as draws:
             next(draws)
         pa.ipc.read_schema(pa.BufferReader(schema)).empty_table()
@@ -259,7 +263,7 @@ def test_configured_loader_preserves_alignment_across_echoes(recipe, offline):
     row = _row(spec)
     expected = ObjectSequencer(config).build(_decode(stream, row))
     assert len(expected.values) == 6
-    frame = nested_frame([row], tuple(stream.nested))
+    frame = nested_frame([row], tuple(stream.stars[0].nested))
     offline.frames = lambda: [frame]
     with closing(iter(batches)) as iterator:
         for exposure in range(4):
@@ -292,7 +296,7 @@ def test_recipe_and_shared_builder(recipe, offline):
     assert batches.dataset.catalog_stream.spec == expected
     assert batches.dataset.echo_factor == 4
     stream = batches.dataset.catalog_stream
-    frame = nested_frame([_row(stream.spec)], tuple(stream.nested))
+    frame = nested_frame([_row(stream.spec)], tuple(stream.stars[0].nested))
     offline.frames = lambda: [frame]
     with closing(iter(batches)) as iterator:
         for exposure in range(4):
@@ -320,7 +324,8 @@ def test_renamed_sdss_modality_and_padding(recipe, offline):
     row["spectrum"]["lambda"][0] = -1
     decoded = _decode(dataset.catalog_stream, row)
     assert decoded is not None
-    assert set(decoded) == {"object_id", "observed_spectrum"}
+    assert decoded['source_ids'] == {'sdss': 'sdss-1'}
+    assert decoded['anchor'] == decoded['anchor_path'] == 'sdss'
     for key, values in original.items():
         np.testing.assert_array_equal(decoded["observed_spectrum"][key], values)
     assert decoded["observed_spectrum"]["flux"].dtype == np.float32
@@ -356,10 +361,9 @@ def test_optional_catalogs_and_right_only_identity(recipe, catalog_index, missin
     record = _decode(stream, selected)
     assert record is not None
     expected_id = row[f"object_id{suffix}"]
-    if catalog_index:
-        expected_id = f"{catalog['name']}:{expected_id}"
-    assert record["object_id"] == expected_id
-    assert set(record) == {"object_id", catalog["record_key"]}
+    assert record["object_id"] == f"{catalog['name']}:{expected_id}"
+    assert record['source_ids'] == {catalog['name']: expected_id}
+    assert record['anchor'] == (None if catalog_index else catalog['name'])
     np.testing.assert_array_equal(record[catalog["record_key"]]["flux"],
                                   np.asarray(row[f"{payload}{suffix}"]["flux"], dtype=np.float32))
     assert len(ObjectSequencer(config).build(record).values) == 1
@@ -380,11 +384,11 @@ def test_stream_retains_matched_and_unpaired_records(recipe, offline):
         row[f"object_id{suffix}"] = "same-id"
         payload = "image" if catalog["decoder"].endswith("image") else "spectrum"
         rows.append({key: row[key] for key in (f"object_id{suffix}", f"{payload}{suffix}")})
-    offline.frames = lambda: [nested_frame(rows, tuple(dataset.catalog_stream.nested))]
+    offline.frames = lambda: [nested_frame(rows, tuple(dataset.catalog_stream.stars[0].nested))]
     with closing(dataset._open_records(None)) as records:
         decoded = [next(records) for _ in rows]
     assert [record["object_id"] for record in decoded] == [
-        "same-id", "same-id", "sdss:same-id", "desi:same-id", "hsc:same-id",
+        "legacy:same-id", "legacy:same-id", "sdss:same-id", "desi:same-id", "hsc:same-id",
     ]
     sequences = [dataset.sequencer.build(record) for record in decoded]
     assert [set(sequence.values) for sequence in sequences] == [
@@ -453,12 +457,12 @@ def test_empty_and_no_active_records(recipe, offline):
     assert _decode(stream, {"object_id": "empty"}) is None
     with pytest.raises(ValueError, match="no supported data or object_id"):
         _decode(stream, {})
-    frames = [pd.DataFrame(), nested_frame([inactive, row], tuple(stream.nested))]
+    frames = [pd.DataFrame(), nested_frame([inactive, row], tuple(stream.stars[0].nested))]
     offline.frames = lambda: frames
     with closing(stream.draws(seed=0, rank=0, worker_id=0)) as draws:
         epoch, records = next(draws)
         assert epoch == 1
-        assert [r["object_id"] for r in records] == [row["object_id"]]
+        assert [r["object_id"] for r in records] == ['legacy:' + row['object_id']]
 
 
 @pytest.mark.parametrize("target,patch,match", [
@@ -523,7 +527,7 @@ def test_per_catalog_join_overrides_stream_join(recipe, offline):
     spec = deepcopy(recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"])
     config = AstroPT3Config(modalities=recipe["model"]["model_config"]["modalities"])
     stream = streaming.CatalogStream(spec, config)
-    frame = nested_frame([_row(stream.spec)], tuple(stream.nested))
+    frame = nested_frame([_row(stream.spec)], tuple(stream.stars[0].nested))
     offline.frames = lambda: [frame]
     with closing(stream.draws(seed=0, rank=0, worker_id=0)) as draws:
         next(draws)
@@ -541,7 +545,7 @@ def test_per_catalog_join_overrides_stream_join(recipe, offline):
 def test_retry_reopens_with_new_seed_and_cleans_resources(recipe, offline):
     spec, config = _case(recipe, 1)
     stream = streaming.CatalogStream(spec, config)
-    frame = nested_frame([_row(spec)], tuple(stream.nested))
+    frame = nested_frame([_row(spec)], tuple(stream.stars[0].nested))
 
     def frames():
         yield frame
@@ -586,7 +590,7 @@ def test_nonretryable_errors_close_resources(recipe, offline, failure):
     if failure == "decode":
         row = _row(spec)
         row["image_hsc"]["flux"][0][80][80] = np.nan
-        frame = nested_frame([row], tuple(stream.nested))
+        frame = nested_frame([row], tuple(stream.stars[0].nested))
         offline.frames = lambda: [frame]
         error, message = ValueError, "HSC Wide"
     elif failure == "empty-footprint":
@@ -614,13 +618,15 @@ def test_galaxies_with_hats_png_scalars_and_sentinels(recipe):
     modalities = [m for m in recipe["model"]["model_config"]["modalities"] if m["source"] == "galaxies_with_hats"]
     config = AstroPT3Config(modalities=modalities)
     stream = streaming.CatalogStream(spec, config)
-    assert stream.columns[0] == "dr8_id" and "image" in stream.columns and not stream.nested
+    star, = stream.stars
+    assert star.columns[0] == "dr8_id" and "image" in star.columns and not star.nested
     row = _row(spec, index=3)
     scalars = spec["catalogs"][0]["scalar_columns"]
     row[scalars["gwh_redshift"]] = 0.1
     row[scalars["gwh_mass_med_photoz"]] = -99.0  # photo-z fill value means "not measured"
     record = _decode(stream, row)
-    assert record["object_id"] == "galaxies-3"
+    assert record is not None
+    assert record["object_id"] == "galaxies:galaxies-3"
     image = record["galaxy_image"]
     assert image["band"] == ["rgb-r", "rgb-g", "rgb-b"]
     assert image["flux"].shape == (3, 256, 256)
@@ -646,6 +652,7 @@ def test_left_joined_galaxy_without_match_is_skipped(recipe):
     for column in spec["catalogs"][-1]["scalar_columns"].values():
         row[f"{column}_galaxies"] = pd.NA
     record = _decode(stream, row)
-    assert record["object_id"] == "legacy-1"
+    assert record is not None
+    assert record["object_id"] == "legacy:legacy-1"
     assert "galaxy_image" not in record and not any(key.startswith("gwh_") for key in record)
     assert "galaxies" not in ObjectSequencer(config).build(record).values

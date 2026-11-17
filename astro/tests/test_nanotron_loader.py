@@ -136,7 +136,7 @@ def test_open_draws_delegates_identity_and_epoch(tiny_config, fake_lsdb):
         for epoch in range(2):
             records = list(next(draws))
             assert len(records) == 6
-            assert records[0]["object_id"] == "synth_00000000"
+            assert records[0]["object_id"] == "legacy:synth_00000000"
             assert stream._epoch == epoch
     assert len(fake_lsdb.streams) == 1
     assert fake_lsdb.streams[0].seed == consumer_seed(19, 2, 3, 0)

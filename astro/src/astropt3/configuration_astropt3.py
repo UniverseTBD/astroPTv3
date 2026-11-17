@@ -79,6 +79,21 @@ DEFAULT_MODALITIES = [
 ]
 
 
+# Opt-in DR10 South contract; never give North's released 192-wide tokens a fourth band.
+LEGACY_SOUTH_IMAGES = {
+    "name": "legacy_south_images",
+    "family": "image",
+    "source": "legacy_south",
+    "record_keys": ["legacy_south_image"],
+    "token_ids": [53, 54, 55],
+    "input_size": 256,
+    "patch_size": 8,
+    "image_crop": 96,
+    "pos_type": "index",
+    "max_positions": 144,
+}
+
+
 def _complete_modalities(modalities: list[dict]) -> list[dict]:
     """Backfill only the five released modalities; new ones self-describe."""
     legacy = {modality["name"]: modality for modality in DEFAULT_MODALITIES}

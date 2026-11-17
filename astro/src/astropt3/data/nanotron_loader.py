@@ -89,12 +89,10 @@ def regroup_micro_batch(flat: dict, names) -> dict:
 
 
 def _as_mapping(value: Any) -> Mapping:
+    if hasattr(value, "as_py"):
+        value = value.as_py()  # Arrow StructScalar is also a Mapping of boxed scalars.
     if isinstance(value, Mapping):
         return value
-    if hasattr(value, "as_py"):
-        value = value.as_py()
-        if isinstance(value, Mapping):
-            return value
     if hasattr(value, "to_dict"):
         try:
             value = value.to_dict(orient="list")
@@ -156,6 +154,33 @@ def decode_legacy_image(value: Any) -> dict:
     if len(bands) != IMAGE_SHAPE[0]:
         raise ValueError(f"image has {len(bands)} bands, expected {IMAGE_SHAPE[0]}")
     return {"flux": flux, "band": bands}
+
+
+def decode_legacy_south_image(value: Any) -> dict:
+    """Decode the DR10 South griz cube. MMU's boolean mask is True for clean pixels."""
+    image = _as_mapping(value)
+    bands = list(image.get("band", ()))
+    if bands != ["des-g", "des-r", "des-i", "des-z"]:
+        raise ValueError(f"Legacy South bands must be ordered des-g/r/i/z, got {bands}")
+    scale = np.asarray(image.get("scale"), dtype=np.float32)
+    if scale.shape != (4,) or not np.allclose(scale, 0.262, rtol=1e-6, atol=0):
+        raise ValueError("Legacy South pixel scale must be 0.262 arcsec/pixel in every band")
+
+    def cube(field):
+        if image.get(field) is None:
+            raise ValueError(f"Legacy South image is missing {field}")
+        array = _stack_nested(image[field])
+        if array.shape != (4, 160, 160):
+            raise ValueError(f"Legacy South {field} has shape {array.shape}, expected (4, 160, 160)")
+        return array
+
+    flux = cube("flux").astype(np.float32, copy=False)
+    clean = cube("mask")
+    if clean.dtype != np.bool_:
+        raise ValueError("Legacy South mask must be boolean (True = clean)")
+    ivar = cube("ivar")
+    good = clean & np.isfinite(flux) & np.isfinite(ivar) & (ivar > 0)
+    return {"flux": np.where(good, flux, np.float32(0)), "band": bands, "fill_mask": ~good}
 
 
 def _decode_spectrum(value: Any) -> dict:
