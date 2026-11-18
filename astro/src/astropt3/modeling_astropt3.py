@@ -12,8 +12,12 @@ Sequence contract (built by data/packing.py):
   block-diagonal (doc) masking (torch >= 2.6).
 - Loss: predictions read one position LEFT of each modality token
   (``<|begin_m|>`` predicts patch 0 — astroPT's ``starts-1`` alignment).
-  The loss averages modalities within each family, then combines present
-  image:spectrum:scalar families at 1:1:0.1. No loss on special or pad
+  Each family's loss is one mean over all of its tokens (so a modality
+  counts in proportion to its tokens in the batch); image and spectrum
+  token NLLs are first divided by the modality's ``input_size`` (nats per
+  dimension, so patch size does not set the weight). Present families
+  combine at image:spectrum:scalar 1:1:0.1. ``modality_losses`` stay the
+  raw per-token means. No loss on special or pad
   tokens unless ``special_token_ce_weight > 0``.
 - The jetformer tokeniser (JetFormer/GIVT-style) is the sole regression
   head: patch values pass through a per-modality normalizing flow
@@ -43,6 +47,7 @@ from .configuration_astropt3 import AstroPT3Config
 from .flows import FlowCoupling, JetFormerFlow, flow_object_ids
 from .modalities import (
     Encoder,
+    CategoricalHead,
     GMMHead,
     PositionEmbedder,
     gmm_nll,
@@ -87,6 +92,9 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
             name: cast(str, registry.get_config(name).family)
             for name in self.modality_names
         }
+        self.modality_input_sizes = {
+            name: registry.get_config(name).input_size for name in self.modality_names
+        }
         # ADR 0008: scalar modalities are GMM-headed directly and never
         # flow — one-token spans over raw normalized values
         self.scalar_names = {
@@ -127,11 +135,18 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
                 for name in patch_names
             }
         )
+        self.categorical_names = {
+            name for name in self.scalar_names if registry.get_config(name).categories
+        }
         for name in sorted(self.scalar_names):
-            self.decoders[name] = GMMHead(
-                config.hidden_size,
-                registry.get_config(name).input_size,
-                config.scalar_gmm_k,
+            self.decoders[name] = (
+                CategoricalHead(config.hidden_size, registry.get_config(name).categories)
+                if name in self.categorical_names
+                else GMMHead(
+                    config.hidden_size,
+                    registry.get_config(name).input_size,
+                    config.scalar_gmm_k,
+                )
             )
         self.pos_embeds = nn.ModuleDict(
             {
@@ -263,7 +278,7 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
         family_losses = {}
         loss = None
         if compute_loss:
-            losses_by_family = {"image": [], "spectrum": [], "scalar": []}
+            family_sums, family_counts = {}, {}
             for name in self.modality_names:
                 if name not in modality_masks or not modality_masks[name].any():
                     continue
@@ -273,14 +288,21 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
                         f"modality '{name}' token at sequence position 0 has no "
                         "preceding token to predict it from (missing <|bos|>?)"
                     )
-                if name in self.scalar_names:
+                if name in self.categorical_names:
+                    # one-hot target -> class index; cross-entropy, no density
+                    logits = self.decoders[name](hidden[left_shift_mask(mask)]).float()
+                    token_loss = F.cross_entropy(
+                        logits, modality_values[name].argmax(dim=-1), reduction="none"
+                    )
+                    predictions[name] = torch.softmax(logits, dim=-1)
+                elif name in self.scalar_names:
                     # ADR 0008: GMM NLL on the raw normalized scalar — no
                     # flow, no logdet
                     logits_pi, mu, log_sigma = self.decoders[name](
                         hidden[left_shift_mask(mask)]
                     )
                     target = modality_values[name].to(mu.dtype)
-                    mod_loss = gmm_nll(target, logits_pi, mu, log_sigma).mean()
+                    token_loss = gmm_nll(target, logits_pi, mu, log_sigma)
                     pi = torch.softmax(logits_pi, dim=-1)
                     predictions[name] = (pi.unsqueeze(-1) * mu).sum(dim=-2)
                 else:
@@ -289,21 +311,27 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
                     )
                     target = modality_values[name].to(mu.dtype)  # latent z
                     nll = gmm_nll(target, logits_pi, mu, log_sigma)
-                    mod_loss = (nll - flow_logdets[name].to(nll.dtype)).mean()
+                    token_loss = nll - flow_logdets[name].to(nll.dtype)
                     # z-space mixture mean as the point prediction; inverse
                     # flow (self.flows[name](z, reverse=True)) maps it back.
                     pi = torch.softmax(logits_pi, dim=-1)
                     predictions[name] = (pi.unsqueeze(-1) * mu).sum(dim=-2)
-                modality_losses[name] = mod_loss
-                losses_by_family[self.modality_families[name]].append(mod_loss)
+                modality_losses[name] = token_loss.mean()
+                family = self.modality_families[name]
+                # patch tokens in nats per dimension; scalar tokens as they are
+                pooled = token_loss.float().sum()
+                if family != "scalar":
+                    pooled = pooled / self.modality_input_sizes[name]
+                family_sums[family] = family_sums.get(family, 0.0) + pooled
+                family_counts[family] = family_counts.get(family, 0) + token_loss.numel()
 
             family_weights = {"image": 1.0, "spectrum": 1.0, "scalar": 0.1}
             weighted = hidden.new_zeros(())
             weight_sum = 0.0
-            for family, losses in losses_by_family.items():
-                if not losses:
+            for family in family_weights:
+                if family not in family_sums:
                     continue
-                family_loss = torch.stack(losses).mean()
+                family_loss = family_sums[family] / family_counts[family]
                 family_losses[family] = family_loss
                 weighted = weighted + family_weights[family] * family_loss
                 weight_sum += family_weights[family]

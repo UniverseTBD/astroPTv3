@@ -58,9 +58,9 @@ errors fail immediately.
 
 Full nanotron run configs live in `astro/configs/nanotron/`: the Pythia ladder
 `astropt3-{70m,160m,410m,1b,1p4b,2p8b,6p9b,12b}.yaml` plus single-GPU smoke
-recipes `astropt3-{1m,10m}.yaml`. Every ladder rung trains the same
-modalities from the same dual-anchor streams (five survey catalogs plus
-galaxies-with-hats RGB images and nine scalars); rungs differ in model size, cluster
+recipes `astropt3-{1m,10m}.yaml`. Every rung trains the same 58 modalities from
+the same dual-anchor stream: 12 calibrated image bands, two display RGB
+products, two spectra and 42 scalars. Rungs differ in model size, cluster
 topology, batch and LR. The convenience launcher's default is
 **`astropt3-70m.yaml`**, run at DP=1 with at most 4 loader workers (TP=1 rungs
 only). Every ladder rung echoes each draw 4 times.
@@ -266,13 +266,15 @@ modality `record_keys` match catalog outputs. A catalog supplies `record_key`
 and/or `scalar_columns` (**record key → flat catalog column**). Keep existing
 token IDs frozen; new names need non-colliding IDs and sufficient `vocab_size`.
 
-North and [DR10 South](legacy-south.md) each anchor an LSDB star with SDSS, DESI and HSC outer joins and a galaxies-with-hats left join at 1″. The latter has no margin; boundary matches can be lost. `min_catalogs: 3` selects each anchor's sky where at least two outer partners have coverage. It does not count the alternative anchor, the left-only partner, or modalities on a row. Missing modalities are omitted; right-only rows stay separate. Scalars require a registered transform; DESI `Z` requires valid `ZWARN` from the same catalog.
+North and [DR10 South](legacy-south.md) each anchor an LSDB star with SDSS, DESI and HSC outer joins and galaxies-with-hats, PROVABGS and Galaxy10 left joins at 1″. Galaxies-with-hats has no margin; boundary matches can be lost. `min_catalogs: 3` selects each anchor's sky where at least two outer partners have coverage. It does not count the alternative anchor, left-only partners, or modalities on a row. Missing modalities are omitted; right-only rows stay separate, and rows with no usable modalities are dropped.
+
+Scalars need registered transforms (`data/scalar_registry.py`). Values outside `VALID_RANGES` or missing or failing `QUALITY_GATES` flags omit the scalar span. Gated scalars (e.g. DESI `Z`, gated on `ZWARN`) need flag columns from the same catalog. Legacy anchor scalars are supplied by North only; Galaxy10 supplies a display RGB image and a 10-class morphology scalar.
 
 **Ownership is by sky, not a global object crossmatch.** The first anchor owns its eligible footprint. Each subsequent anchor gets its eligible footprint minus earlier claims and a one-cell order-14 guard around them. The guard prevents a partner within 1″ of two centers on opposite sides from entering through both paths. This protects both attached partners and outer-only rows without an index or cross-worker state. The cost is genuine South objects lost in shared sky: in the [pinned audit](dual-anchor-audit.md) 31 of 46 eligible South objects in the overlap cone have no North counterpart within 1″. Do not interpret this as a complete unique-object union. Records carry `source_ids`, source-qualified `object_id`, `anchor_path` (sky owner), and `anchor` (null for outer-only records).
 
 **Mixing:** `draw_weight` counts partition draws per worker cycle, not objects or tokens. The ladder uses 1 North : 2 South to give the larger eligible South sky more draws while guaranteeing North one in every three. This is not a measured optimum. The reader seed rotates the starting path; LSDB shuffles partitions and rows. Both stars share one Dask client per worker, but can each hold a prefetched frame; size workers for available memory. Benchmark JSON reports `anchor_counts`, `fresh_anchor_counts`, and `replayed_anchor_counts` in the measured window. These count object exposures and nonpadding tokens by owning path, including outer-only objects. See the [bounded pilot](dual-anchor-pilot.md) for measured exposures and limitations.
 
-**Splits:** recipes use `split: train`; generation defaults to `validation` for those recipes. Every source uses the same fixed 154 of 3,072 all-sky order-4 HEALPix cells for validation. A one-order-10-cell collar around them is excluded from training to separate adjacent cutouts and 1″ matches, including partners drawn without an anchor. The [North-only control](../configs/controls/astropt3-70m-north.yaml) uses the same split. Its model cannot resume as a dual-anchor model: South adds a four-band image head, not a fourth channel to the North head.
+**Splits:** recipes use `split: train`; generation defaults to `validation` for those recipes. Every source uses the same fixed 154 of 3,072 all-sky order-4 HEALPix cells for validation. A one-order-10-cell collar around them is excluded from training to separate adjacent cutouts and 1″ matches, including partners drawn without an anchor. The [North-only control](../configs/controls/astropt3-70m-north.yaml) uses the same split. Its model cannot resume as a dual-anchor model: South adds four separate band heads.
 
 ### Echoing, accounting, and resume
 

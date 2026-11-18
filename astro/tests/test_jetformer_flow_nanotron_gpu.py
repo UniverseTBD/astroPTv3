@@ -16,7 +16,7 @@ from test_nanotron_gpu import REL_TOL, build_nt_model, make_nt, regroup
 
 pytestmark = pytest.mark.gpu
 ASTRO_DIR = Path(__file__).resolve().parents[1]
-SEQ_LEN = 256  # fits two objects carrying every recipe modality
+SEQ_LEN = 512  # fits two synthetic objects carrying every recipe modality
 
 
 @pytest.fixture(scope="module")
@@ -76,7 +76,11 @@ def _flat_batch(config):
                 start = cursor + len(tokens)
                 batch[f"{name}_mask"][row, start : start + length] = True
                 tokens.extend([placeholder] * length + [end])
-                values[name].append(torch.randn(length, modality["input_size"], generator=generator) * 0.1)
+                if categories := modality.get("categories", 0):
+                    labels = torch.randint(categories, (length,), generator=generator)
+                    values[name].append(torch.nn.functional.one_hot(labels, categories).float())
+                else:
+                    values[name].append(torch.randn(length, modality["input_size"], generator=generator) * 0.1)
                 positions[name].append(
                     torch.arange(length)
                     if modality.get("pos_type", "index") == "index"

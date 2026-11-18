@@ -4,9 +4,10 @@
 [`training.md`](training.md).*
 
 Training uses live LSDB access to YAML-configured catalogs and modality lists.
-The training recipes combine Legacy Survey North, Legacy Survey South, HSC and
-galaxies-with-hats images with DESI and SDSS spectra and nine galaxies-with-hats
-scalars. This document focuses on the survey-to-model contract.
+The training recipes combine Legacy Survey North, Legacy Survey South and HSC
+image bands, galaxies-with-hats and Galaxy10 RGB images, DESI and SDSS spectra,
+and 42 scalar modalities including PROVABGS and the Galaxy10 morphology label.
+This document focuses on the survey-to-model contract.
 
 ## What this is
 
@@ -68,7 +69,8 @@ survey data to model input (using LegacySurvey and DESI as examples):
      crop to 96×96, then form **144 patches of 64 floats per band** (8×8),
      with integer positions restarting at zero for each band;
    - display RGB (`image_format: rgb`) → keep all three channels together.
-     Galaxies-with-hats uses its whole 256×256 image: **256 patches of 768 floats** (16×16×3);
+     Galaxies-with-hats and Galaxy10 each use the whole 256×256 image:
+     **256 patches of 768 floats** (16×16×3);
    - spectra → pad 7781→7936 → **31 patches of 256 floats**, each with a
      *continuous* position: the patch's mean wavelength, normalized
      `(λ−3000)/7000`.
@@ -105,12 +107,14 @@ survey data to model input (using LegacySurvey and DESI as examples):
 | Legacy North | `legacy_north_{g,r,z}` | 160–168 | 439 |
 | Legacy South | `legacy_south_{g,r,i,z}` | 169–180 | 585 |
 | HSC | `hsc_{g,r,i,z,y}` | 181–195 | 731 |
-| Galaxies-with-hats | `galaxies` (fused display RGB) | 23–25 | 259 |
+| Galaxies-with-hats | `galaxies` (display RGB) | 23–25 | 259 |
+| Galaxy10 | `gz10_images` (display RGB) | 145–147 | 259 |
 
 Each row's IDs are assigned in consecutive triplets per category. Training
-recipes use a 256-row vocabulary; there is no text vocabulary. IDs 2–4,
-20–22, and 53–55 are reserved and never assigned to bands. Spectral, scalar,
-and RGB IDs are unchanged. HF and
+recipes use a 256-row vocabulary; there is no text vocabulary. The
+survey-wide image blocks at 2–4, 20–22, and 53–55 stay reserved. The ladder
+leaves 38–52 unassigned and uses 196–213 for its six additional survey scalar
+blocks, preserving marker meanings across recipes. HF and
 Nanotron checkpoints carry the same modality definitions, including `band`
 and `image_format` where applicable. Each band has its own encoder, position
 embedding, flow and head. Train the band models from scratch; resume requires
@@ -137,8 +141,9 @@ reference):
   modality also has a per-modality normalizing flow (`JetFormerFlow`, ViT
   conditioners over each object's modality span; `docs/jetformer-flow.md`)
   that maps its raw patch values to latents z — z is both what gets embedded and what
-  the `GMMHead` decoder predicts; scalar modalities (`Z`, `ebv`, `photometry`)
-  skip the flow and feed a `GMMHead` directly on the raw normalized value.
+  the `GMMHead` decoder predicts. Scalars bypass the flow: continuous values
+  use a `GMMHead` on the normalized value; categorical values are one-hot on
+  input and use a `CategoricalHead` with cross-entropy.
 - **Body**: the stock SmolLM3 decoder stack, consuming `inputs_embeds`.
   RoPE θ=100k, **NoPE every 4th layer** (`no_rope_layer: 4` /
   `no_rope_layer_interval: 4`), GQA, RMSNorm ε=1e-6, SwiGLU, bf16 training.
@@ -146,9 +151,12 @@ reference):
   (may be negative) computed at positions **one to the left** of each
   modality token — `<|begin_m|>` predicts patch 0, patch *i* predicts patch
   *i+1* (AstroPT's `starts−1` alignment, implemented via `left_shift_mask`).
-  The loss averages present modalities within image/spectrum/scalar, then
-  combines present family means at 1:1:0.1. Special tokens and
-  pads carry no loss.
+  Each family (image, spectrum, scalar) takes one mean over all of its
+  tokens, so a modality counts in proportion to its tokens in the batch;
+  image and spectrum token NLLs are first divided by the modality's
+  `input_size` (nats per dimension), so patch size does not set the weight.
+  Present families combine at 1:1:0.1. Per-modality losses are logged as raw
+  per-token means. Special tokens and pads carry no loss.
 - **Init**: stock SmolLM3 `_init_weights`, normal(0, 0.02).
 
 ### Size family (Pythia-mirrored nominal sizes, no vocab head)

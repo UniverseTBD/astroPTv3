@@ -46,7 +46,7 @@ def test_yaml_uses_current_modalities(path):
     images = {m["name"]: m for m in expected if m["family"] == "image"}
     assert set(images) == {
         "legacy_north_g", "legacy_north_r", "legacy_north_z",
-        "hsc_g", "hsc_r", "hsc_i", "hsc_z", "hsc_y", "galaxies",
+        "hsc_g", "hsc_r", "hsc_i", "hsc_z", "hsc_y", "galaxies", "gz10_images",
     }
     rgb = images["galaxies"]
     assert rgb["image_format"] == "rgb" and "band" not in rgb
@@ -61,8 +61,11 @@ def test_yaml_uses_current_modalities(path):
     )
     assert model["vocab_size"] == control["model"]["model_config"]["vocab_size"] == 256
     assert model["vocab_size"] % raw["parallelism"]["tp"] == 0
-    worst_case = 1 + sum(m["max_positions"] + 2 for m in model["modalities"])
-    assert worst_case <= raw["tokens"]["sequence_length"]
+    config = AstroPT3Config(**model)
+    # Each record can carry at most one Legacy anchor's bands and scalars.
+    for absent in ({"legacy_north", "legacy"}, {"legacy_south"}):
+        worst_case = 1 + sum(m["max_positions"] + 2 for m in model["modalities"] if m["source"] not in absent)
+        assert worst_case <= raw["tokens"]["sequence_length"]
     original = control["data_stages"][0]["data"]["dataset"]["catalog_stream"]
     assert original["split"] == "train"
     for stage in raw["data_stages"]:
@@ -71,3 +74,4 @@ def test_yaml_uses_current_modalities(path):
         assert [north] == original["anchors"] and north["draw_weight"] == 1
         assert south["draw_weight"] == 2 and south["record_key"] == "legacy_south_image"
         assert stream == {**original, "anchors": [north, south]}
+        CatalogStream(stream, config)
