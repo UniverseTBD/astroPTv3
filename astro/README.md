@@ -32,7 +32,7 @@ are hosted in the
 
 The [default 70M recipe](configs/nanotron/astropt3-70m.yaml) streams
 [Multimodal Universe](https://huggingface.co/collections/UniverseTBD/multimodal-universe-hats)
-LegacySurvey North images, DESI and SDSS spectra, HSC Wide images, and
+Legacy Survey North and DR10 South images, DESI and SDSS spectra, HSC Wide images, and
 [galaxies-with-hats](https://huggingface.co/datasets/Smith42/galaxies-with-hats)
 RGB images with nine scalars (redshift, photo-z stellar mass, SFR, sSFR and five
 Galaxy Zoo vote fractions); every rung of the Pythia ladder
@@ -40,17 +40,18 @@ Galaxy Zoo vote fractions); every rung of the Pythia ladder
 modality lists; N-modal training is the normal path. New physical survey
 calibrations still require code.
 
-It outer-joins regions covered by at least three surveys, anchored on Legacy.
-Unmatched right-side records remain separate objects. **This is not a complete
+North and South each anchor an independent join in sky covered by the anchor
+and at least two outer partners. North owns shared eligible sky. Unmatched
+outer-join records remain separate objects. **This is not a complete
 survey pass.** Models learn from whichever configured modalities a record
 carries. See the [training guide](docs/training.md) for the experimental stream
 and echoing constraints.
 
 ## From measurements to predictions
 
-A LegacySurvey image arrives as a 3×152×152 flux cube; the sequencer takes a
-central 96×96 crop, physically normalizes each named band, and forms 144
-8×8×3 patches. DESI spectra are normalized onto an AB-flux scale and form
+Legacy Survey North images are 3×152×152 flux cubes; DR10 South images are
+4×160×160. The sequencer crops to 96×96, physically normalizes each band,
+and forms 144 patch tokens (192 values for North, 256 for South). DESI spectra are normalized onto an AB-flux scale and form
 31 patches of 256 bins with wavelength positions. There is **no per-patch
 standardization**: the flow-based likelihood needs the record-to-token
 mapping to retain patch information. Optional catalog scalars can become

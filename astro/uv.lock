@@ -190,6 +190,7 @@ dependencies = [
     { name = "hats" },
     { name = "huggingface-hub" },
     { name = "lsdb" },
+    { name = "mocpy" },
     { name = "numpy" },
     { name = "pillow" },
     { name = "pyyaml" },
@@ -199,6 +200,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "astropy" },
     { name = "matplotlib" },
     { name = "pytest" },
 ]
@@ -211,6 +213,7 @@ train = [
 
 [package.metadata]
 requires-dist = [
+    { name = "astropy", marker = "extra == 'dev'" },
     { name = "einops", specifier = ">=0.8" },
     { name = "flash-attn", marker = "extra == 'train'" },
     { name = "hats" },
@@ -218,6 +221,7 @@ requires-dist = [
     { name = "lsdb", git = "https://github.com/astronomy-commons/lsdb?rev=8aa1e63f90d3b80e79e997dfa473535a425bad44" },
     { name = "matplotlib", marker = "extra == 'dev'", specifier = ">=3.8" },
     { name = "matplotlib", marker = "extra == 'train'", specifier = ">=3.8" },
+    { name = "mocpy" },
     { name = "nanotron", marker = "extra == 'train'", editable = "../nanotron" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=12.3.0" },

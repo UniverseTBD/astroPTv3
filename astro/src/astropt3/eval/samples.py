@@ -43,6 +43,11 @@ from ..tokenization import antispiralise, unpatchify_image, unpatchify_spectrum
 MODES = ("unconditional", "image-to-spectra", "spectra-to-images", "reconstruct")
 
 
+def _present_modalities(sequencer, record):
+    return [m for m in sequencer.registry.modalities.values()
+            if m.family != "scalar" and record.get(m.record_keys[0]) is not None]
+
+
 def build_template(sequencer, record: dict, mode: str):
     """The mode's template: pinned span order, no scalar spans.
 
@@ -52,14 +57,10 @@ def build_template(sequencer, record: dict, mode: str):
     label into the panel, and scalar-free templates keep the panels
     comparable with pre-0008 runs.
     """
-    present = [
-        m
-        for m in ("images", "spectra")
-        if record.get({"images": "image", "spectra": "spectrum"}[m]) is not None
-    ]
-    if mode == "spectra-to-images":
-        present = list(reversed(present))
-    return sequencer.build(record, modality_order=present, include_scalars=False)
+    present = _present_modalities(sequencer, record)
+    first_family = "spectrum" if mode == "spectra-to-images" else "image"
+    present.sort(key=lambda m: m.family != first_family)
+    return sequencer.build(record, modality_order=[m.name for m in present], include_scalars=False)
 
 
 def save_image_png(
@@ -82,9 +83,9 @@ def save_image_png(
         1, len(panels), figsize=(3 * len(panels), 3.2), squeeze=False
     )
     for ax, (label, img) in zip(axes[0], panels, strict=True):
-        # Matplotlib accepts at most RGBA; source cubes such as five-band HSC
-        # use their first three published bands for this qualitative panel.
-        rgb = np.transpose(img[:3] if img.shape[0] > 4 else img, (1, 2, 0))
+        # The fourth South band is z, not an alpha channel: display z/r/g as RGB.
+        channels = img[[3, 1, 0]] if img.shape[0] == 4 else img[:3]
+        rgb = np.transpose(channels, (1, 2, 0))
         lo, hi = np.percentile(rgb, [1, 99])
         ax.imshow(np.clip((rgb - lo) / (hi - lo + 1e-8), 0, 1))
         ax.set_title(label, fontsize="small")
@@ -136,7 +137,8 @@ def save_spectra_png(
 def default_modes(config) -> list[str]:
     """The sampling modes a checkpoint supports."""
     modes = ["unconditional"]
-    if "spectra" in config.modality_registry().names():
+    families = {m.family for m in config.modality_registry().modalities.values()}
+    if {"image", "spectrum"} <= families:
         modes.extend(["image-to-spectra", "spectra-to-images"])
     return modes
 
@@ -154,26 +156,19 @@ def sample_template(
     """Run one sampling mode against a template: ``{name: [n, T, D]}``."""
     if mode == "reconstruct":
         return {m: v.unsqueeze(0) for m, v in reconstruct(model, template).items()}
-    if mode == "image-to-spectra":
-        if "spectra" not in template.masks:
-            raise ValueError(
-                "image-to-spectra needs a template record carrying a spectrum"
-            )
-        gen_modalities = {"spectra"}
-    elif mode == "spectra-to-images":
-        if not {"images", "spectra"} <= set(template.masks):
-            raise ValueError(
-                "spectra-to-images needs a template carrying both modalities"
-            )
-        # conditioning only flows left to right under the causal mask
-        if (
-            template.masks["spectra"].nonzero()[0].item()
-            > template.masks["images"].nonzero()[0].item()
+    if mode in ("image-to-spectra", "spectra-to-images"):
+        registry = model.config.modality_registry()
+        target = "spectrum" if mode == "image-to-spectra" else "image"
+        context = "image" if target == "spectrum" else "spectrum"
+        gen_modalities = {name for name in template.masks if registry.get_config(name).family == target}
+        given = {name for name in template.masks if registry.get_config(name).family == context}
+        if not given or not gen_modalities:
+            raise ValueError(f"{mode} needs a template carrying both modalities")
+        if max(template.masks[name].nonzero()[0].item() for name in given) > min(
+            template.masks[name].nonzero()[0].item() for name in gen_modalities
         ):
-            raise ValueError(
-                "spectra-to-images needs a spectra-first template (build_template)"
-            )
-        gen_modalities = {"images"}
+            first = "spectra" if context == "spectrum" else "images"
+            raise ValueError(f"{mode} needs a {first}-first template (build_template)")
     elif mode == "unconditional":
         gen_modalities = set(template.masks)
     else:
@@ -318,12 +313,13 @@ def sample_checkpoint(
 
     pngs = {}
     for record in records:
+        families = {m.family for m in _present_modalities(sequencer, record)}
+        if not families:
+            continue
         # scalar-free, images-first reference template (ADR 0008)
         template = build_template(sequencer, record, "unconditional")
         for mode in modes:
-            if mode in ("image-to-spectra", "spectra-to-images") and not (
-                "spectra" in template.masks and "images" in template.masks
-            ):
+            if mode in ("image-to-spectra", "spectra-to-images") and not {"image", "spectrum"} <= families:
                 continue
             # spectra-first skeleton for spectra-to-images; other modes keep
             # the images-first template

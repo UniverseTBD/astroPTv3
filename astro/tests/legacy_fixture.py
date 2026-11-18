@@ -30,14 +30,17 @@ LAMBDA_MAX = 9824.0
 
 # Explicit Legacy anchor + optional DESI payload for all five tiny modalities.
 TINY_CATALOG_STREAM = {
-    "catalogs": [
+    "anchors": [
         {
             "name": "legacy",
+            "draw_weight": 1,
             "repo": "UniverseTBD/mmu_ssl_legacysurvey_north",
             "decoder": "legacy_image",
             "record_key": "image",
             "scalar_columns": {key: key for key in ("ebv", "flux_g", "flux_r", "flux_z")},
         },
+    ],
+    "catalogs": [
         {
             "name": "desi",
             "repo": "UniverseTBD/mmu_desi_edr_sv3",

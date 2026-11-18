@@ -24,7 +24,7 @@ def test_echo_factor_round_trips_nanotron_yaml(tmp_path, factor):
     restored = nanotron_config.get_config_from_file(path)
     assert restored.data_stages[0].data.dataset.echo_factor == factor
     assert restored.data_stages[0].data.dataset.catalog_stream == raw["data_stages"][0]["data"]["dataset"]["catalog_stream"]
-    assert len(restored.model.model_config.modalities) == 14
+    assert len(restored.model.model_config.modalities) == 15
 
 
 def test_explicit_dataset_config_defaults_to_no_echoing():
@@ -60,7 +60,7 @@ def test_default_recipe_round_trips_catalog_stream(tmp_path):
     dataset = restored.data_stages[0].data.dataset
     assert dataset.echo_factor == 4
     assert dataset.catalog_stream == raw["data_stages"][0]["data"]["dataset"]["catalog_stream"]
-    assert len(restored.model.model_config.modalities) == 14
+    assert len(restored.model.model_config.modalities) == 15
 
 
 def test_derived_gpu_smoke_keeps_tiny_training_contract(tmp_path):
@@ -70,7 +70,7 @@ def test_derived_gpu_smoke_keeps_tiny_training_contract(tmp_path):
     config = nanotron_config.get_config_from_dict(yaml.safe_load(yaml.safe_dump(raw)))
     model = config.model.model_config
     assert (model.hidden_size, model.num_hidden_layers, model.jetformer_flow_hidden) == (64, 4, 128)
-    assert len(model.modalities) == 14 and not model.use_cache
+    assert len(model.modalities) == 15 and not model.use_cache
     assert not model._fused_rms_norm and not model._fused_rotary_emb
     data = config.data_stages[0].data
     assert data.num_loading_workers == 0 and data.dataset.echo_factor == 1

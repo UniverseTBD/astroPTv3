@@ -17,6 +17,7 @@ dependencies = [
     "pyyaml>=6.0",
     "lsdb",
     "hats",
+    "mocpy",
     "huggingface-hub",
     "pillow>=12.3.0",
 ]
@@ -32,6 +33,7 @@ train = [
     "matplotlib>=3.8",  # eval sidecar sample panels (astropt3.eval.samples)
 ]
 dev = [
+    "astropy",
     "pytest>=8.0",
     "matplotlib>=3.8",  # scripts/generate.py sample plots
 ]

@@ -46,9 +46,10 @@ stages is implicit and easy to break, so understand it before editing:
    live from the HF hub inside each DataLoader worker** by
    `data/catalog_stream.py` via merged LSDB main (commit pinned in
    `uv.lock`): `InfiniteStream` for one catalog, `CrossMatchStream` for several.
-   Explicit YAML `catalog_stream` lists define the sources and join policy.
-   Generation uses
-   this same stream. Upstream owns footprint and boundary-match semantics;
+   Explicit YAML `catalog_stream.anchors` and `catalog_stream.catalogs`
+   define anchors and shared partners. Generation uses the same stream.
+   AstroPT composes the sky masks for anchor ownership and evaluation splits;
+   LSDB handles catalog coverage, footprint filtering and boundary matching.
    AstroPT retains decoding, calibration, quality gates and bounded retries.
    `min_catalogs` selects sky coverage, not a per-record modality count;
    unknown settings are rejected.

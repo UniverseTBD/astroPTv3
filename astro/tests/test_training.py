@@ -69,7 +69,8 @@ def test_default_recipe_keeps_reserved_modality_tokens(default_recipe):
         "images": [2, 3, 4], "spectra": [5, 6, 7],
         "sdss_spectra": [17, 18, 19], "hsc_images": [20, 21, 22], "galaxies": [23, 24, 25],
     }
-    assert len(modalities) == 14 and all(m["family"] == "scalar" for m in modalities[5:])
+    assert len(modalities) == 15 and all(m["family"] == "scalar" for m in modalities[5:-1])
+    assert modalities[-1]["token_ids"] == [53, 54, 55]
 
 
 def test_training_caps_loader_workers_on_one_gpu(tmp_path, default_recipe):
@@ -154,7 +155,9 @@ def test_wandb_config_keeps_training_settings_without_local_provenance(tmp_path,
     serialized = json.dumps(payload)
     assert "catalog_stream" not in serialized
     assert "catalogs" not in payload["stream"]
-    for catalog in config["data_stages"][0]["data"]["dataset"]["catalog_stream"]["catalogs"]:
+    assert "anchors" not in payload["stream"]
+    stream = config["data_stages"][0]["data"]["dataset"]["catalog_stream"]
+    for catalog in stream["anchors"] + stream["catalogs"]:
         assert catalog["repo"] not in serialized
         assert catalog["repo"].split("@")[0] not in serialized
     assert payload["max_steps"] == 1
@@ -240,15 +243,16 @@ def test_decoder_rejects_invalid_hsc_payloads(default_stream, bad_field):
         del image["scale"]
     else:
         image["flux"][0, 80, 80] = float(bad_field)
+    star = default_stream.stars[0]
     mapped: dict = {"object_id_hsc": "hsc-only"}
     mapped.update(
         {
             f"image_hsc.{field}": np.asarray(image.get(field))
-            for field in default_stream.nested["image_hsc"]
+            for field in star.nested["image_hsc"]
         }
     )
     with pytest.raises(ValueError, match="HSC Wide"):
-        default_stream.decode_row(mapped)
+        star.decode_row(mapped)
 
 
 @pytest.mark.parametrize("args,tp,message", [
@@ -315,7 +319,7 @@ def test_resume_normalizes_modalities_and_preserves_legacy_checkpoint(
 
 
 @pytest.mark.parametrize("field,value", [
-    ("missing", None), ("name", "renamed"), ("token_ids", [53, 54, 55]),
+    ("missing", None), ("name", "renamed"), ("token_ids", [56, 57, 58]),
     ("source", "different-survey"), ("input_size", 384), ("pos_input_size", 2),
 ])
 def test_resume_rejects_generic_modality_mismatches(tmp_path, default_recipe, field, value):

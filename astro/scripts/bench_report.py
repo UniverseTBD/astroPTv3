@@ -110,6 +110,9 @@ def _summarise_step_series(series: list[list[dict]], slow_threshold: float) -> d
     # take the slowest world rank's wall time (the step ends when the last
     # rank does), and take the flops estimate once (it is already global).
     by_step: dict[int, dict] = {}
+    anchor_counts: dict[str, dict[str, Counter]] = {
+        f"{prefix}anchor_counts": {} for prefix in ("", "fresh_", "replayed_")
+    }
     for record in records:
         step = record.get("step", 0)
         merged = by_step.setdefault(
@@ -141,6 +144,9 @@ def _summarise_step_series(series: list[list[dict]], slow_threshold: float) -> d
             merged["rows"] += record.get("rows", 0)
             merged["loss_tokens"].update(record.get("loss_tokens", {}))
             merged["target_values"] += sum(record.get("target_values", {}).values())
+            for field, anchors in anchor_counts.items():
+                for anchor, counts in record.get(field, {}).items():
+                    anchors.setdefault(anchor, Counter()).update(counts)
 
     steps = [by_step[k] for k in sorted(by_step)]
     durations = [s["seconds"] for s in steps]
@@ -202,6 +208,7 @@ def _summarise_step_series(series: list[list[dict]], slow_threshold: float) -> d
         "tokens_nonpad": nonpad,
         "tokens_total": tokens_total,
         "rows": rows,
+        **anchor_counts,
         # end-to-end, wall-clock throughput — the number a fair loader-backend
         # comparison wants (galaxies actually delivered per second of the run,
         # not per second of stall — see telemetry.drain_step's rows_per_s for

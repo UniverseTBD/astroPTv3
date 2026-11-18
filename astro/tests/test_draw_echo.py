@@ -216,7 +216,9 @@ def test_worker_metadata_is_stripped_with_telemetry_off_or_on(
 ):
     if enabled:
         monkeypatch.setenv(telemetry.TELEMETRY_DIR_ENV, str(tmp_path))
-    draw = [_only(records[0], "image"), _only(records[1], "spectrum"), records[2]]
+    draw = [dict(_only(records[0], "image"), anchor_path="north"),
+            dict(_only(records[1], "spectrum"), anchor_path="south", anchor=None),
+            dict(records[2], anchor_path="south")]
     dataset = FiniteDraws(
         tiny_config, 1, 180, catalog_stream=TINY_CATALOG_STREAM,
         draws=[draw], echo_factor=3, seed=7,
@@ -231,7 +233,7 @@ def test_worker_metadata_is_stripped_with_telemetry_off_or_on(
     assert wrapped.num_workers == num_workers
     seen = Counter()
     for batch in wrapped:
-        assert ECHO_METADATA not in batch
+        assert ECHO_METADATA not in batch and telemetry.ANCHOR_METADATA not in batch
         assert all(isinstance(value, torch.Tensor) and value.device.type == "cpu" for value in batch.values())
         key = _payload_key(batch)
         index = seen[key]
@@ -246,6 +248,10 @@ def test_worker_metadata_is_stripped_with_telemetry_off_or_on(
         assert record["tokens_total"] == 180
         assert record["tokens_nonpad"] == int((batch["input_ids"] != PAD_ID).sum())
         assert record["rows"] == 1
+        anchor = "south" if batch["spectra_mask"].any() else "north"
+        assert record["anchor_counts"] == {anchor: {"objects": 1, "tokens_nonpad": record["tokens_nonpad"]}}
+        assert record["fresh_anchor_counts"] == (record["anchor_counts"] if index == 0 else {})
+        assert record["replayed_anchor_counts"] == (record["anchor_counts"] if index else {})
         assert record["loader_wait_s"] >= 0
         for prefix, include in (("fresh", index == 0), ("replayed", index > 0)):
             for field in ("micro_batches", "tokens_nonpad", "rows"):

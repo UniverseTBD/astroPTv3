@@ -131,9 +131,10 @@ def test_empty_modality_connects_all_parameters():
 def test_permutations_are_exact_reconstructible_derived_buffers():
     flow = JetFormerFlow(320, steps=2, hidden_dim=8, depth=1, num_heads=2).bfloat16().eval()
     for block in flow.blocks:
-        assert block.permutation.dtype == torch.int64
-        torch.testing.assert_close(block.permutation.sort().values, torch.arange(320))
-        torch.testing.assert_close(block.permutation[block.inverse_permutation], torch.arange(320))
+        permutation = block.get_buffer("permutation")
+        assert permutation.dtype == torch.int64
+        torch.testing.assert_close(permutation.sort().values, torch.arange(320))
+        torch.testing.assert_close(permutation[block.get_buffer("inverse_permutation")], torch.arange(320))
     assert not any("permutation" in key for key in flow.state_dict())
     torch.manual_seed(12345)
     restored = JetFormerFlow(320, steps=2, hidden_dim=8, depth=1, num_heads=2).bfloat16().eval()
@@ -153,7 +154,7 @@ def test_packed_object_ids_do_not_merge_adjacent_rows():
     ids = flow_object_ids(positions, mask)
     assert ids.tolist() == [1, 1, 2, 2, 3, 3]
     with pytest.raises(ValueError, match="position_ids"):
-        flow_object_ids(None, mask)
+        flow_object_ids(None, mask)  # pyright: ignore[reportArgumentType] -- exercise invalid input
 
 
 @pytest.mark.parametrize("field,value", [
@@ -171,7 +172,10 @@ def test_hf_packing_normalization_backward_and_save_load(tmp_path):
     cfg = flow_config()
     model = AstroPT3Model(cfg)
     for flow in model.flows.values():
-        assert all(not b.out_proj.weight.any() and not b.out_proj.bias.any() for b in flow.blocks)
+        assert isinstance(flow, JetFormerFlow)
+        for block in flow.blocks:
+            assert not block.get_parameter("out_proj.weight").any()
+            assert not block.get_parameter("out_proj.bias").any()
         activate(flow)
     base, _ = load_model_config(CONFIG)
     record = make_record(3, image_only_fraction=0)
@@ -243,8 +247,9 @@ def test_every_recipe_trains_the_same_modalities_and_catalogs(recipe):
 
 
 @pytest.mark.parametrize("name,flow", [
-    ("astropt3-70m", 35_276_800),
-    ("astropt3-410m", 133_453_824),
+    ("../controls/astropt3-70m-north", 35_276_800),
+    ("astropt3-70m", 42_165_248),
+    ("astropt3-410m", 159_811_584),
 ])
 def test_recipe_flow_parameter_counts(name, flow):
     config = load_recipe(f"{name}.yaml")["model"]["model_config"]

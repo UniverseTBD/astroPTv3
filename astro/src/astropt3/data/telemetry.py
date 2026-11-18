@@ -40,10 +40,12 @@ from ..tokenization import BOS_ID, PAD_ID
 from .echo import ECHO_METADATA
 
 TELEMETRY_DIR_ENV = "ASTROPT3_TELEMETRY_DIR"
+ANCHOR_METADATA = "_astropt3_anchors"
 
 _CATALOG_SOURCES = {
     "legacy": "hf://datasets/UniverseTBD/mmu_ssl_legacysurvey_north",
     "desi": "hf://datasets/UniverseTBD/mmu_desi_edr_sv3",
+    "legacy_south": "hf://datasets/hugging-science/mmu_legacysurvey_dr10_south_21",
 }
 _REPO_TO_SOURCE = {
     catalog.split("hf://datasets/")[-1].split("@")[0]: source
@@ -158,6 +160,7 @@ def _blank() -> dict[str, Any]:
         "rows": 0,
         "loss_tokens": {},
         "target_values": {},
+        "anchor_counts": {},
         "echo_index": 0,
         "echo_factor": 1,
     }
@@ -165,11 +168,12 @@ def _blank() -> dict[str, Any]:
         record.update({
             f"{prefix}_micro_batches": 0, f"{prefix}_tokens_nonpad": 0,
             f"{prefix}_rows": 0, f"{prefix}_loss_tokens": {}, f"{prefix}_target_values": {},
+            f"{prefix}_anchor_counts": {},
         })
     return record
 
 
-def observe_micro_batch(flat: dict, wait_s: float, *, echo_index=0, echo_factor=1) -> None:
+def observe_micro_batch(flat: dict, wait_s: float, *, echo_index=0, echo_factor=1, anchor_counts=None) -> None:
     """Accumulate one flat micro-batch into the current step's counters.
 
     ``{m}_mask`` counts loss-bearing tokens per modality (which is also the
@@ -197,6 +201,10 @@ def observe_micro_batch(flat: dict, wait_s: float, *, echo_index=0, echo_factor=
     for prefix in prefixes:
         for key, count in counts.items():
             _counters[f"{prefix}{key}"] += count
+        for anchor, anchor_batch in (anchor_counts or {}).items():
+            totals = _counters[f"{prefix}anchor_counts"].setdefault(anchor, {"objects": 0, "tokens_nonpad": 0})
+            for key, count in anchor_batch.items():
+                totals[key] += count
     for key, value in flat.items():
         if key.endswith("_mask"):
             name = key[: -len("_mask")]
@@ -285,14 +293,14 @@ class TelemetryLoader:
             except StopIteration:
                 return
             wait_s = time.perf_counter() - began
-            if ECHO_METADATA in batch:
+            if ECHO_METADATA in batch or ANCHOR_METADATA in batch:
                 batch = dict(batch)
-                self.echo_index, self.echo_factor = batch.pop(ECHO_METADATA)
-            else:
-                self.echo_index, self.echo_factor = 0, 1
+            self.echo_index, self.echo_factor = batch.pop(ECHO_METADATA, (0, 1))
+            anchor_counts = batch.pop(ANCHOR_METADATA, None)
             if self._enabled:
                 observe_micro_batch(
                     batch, wait_s, echo_index=self.echo_index, echo_factor=self.echo_factor,
+                    anchor_counts=anchor_counts,
                 )
             yield batch
 

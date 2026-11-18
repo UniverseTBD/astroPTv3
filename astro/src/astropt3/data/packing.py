@@ -158,17 +158,21 @@ class ObjectSequencer:
         # JWST cubes are already 96x96 and pass through untouched
         h, w = flux.shape[-2:]
         crop = mod.image_crop  # 0 keeps the whole image
+        fill = torch.as_tensor(image["fill_mask"]) if "fill_mask" in image else None
         if crop and (h > crop or w > crop):
             top = (h - crop) // 2
             left = (w - crop) // 2
-            flux = flux[..., top : top + crop, left : left + crop]
+            region = (..., slice(top, top + crop), slice(left, left + crop))
+            flux = flux[region]
+            if fill is not None:
+                fill = fill[region]
         # may arrive as a list or an array after a parquet round-trip
         bands = [str(b) for b in image["band"]]
         flux = physical_normalize(
             flux, bands, divisor=self.image_norm_divisor
         )
-        # exact 0.0 in float survey flux is no-data (e.g. Legacy footprint edges)
-        flux = noise_fill(flux, flux == 0, seed)
+        # Use the published pixel validity when available; do not erase measured zeros.
+        flux = noise_fill(flux, flux == 0 if fill is None else fill, seed)
         if mod.channel_tokenization == "per_band":
             return self._per_band_tokens(mod, flux, bands)
         patches = patchify_image(flux, mod.patch_size)
@@ -191,9 +195,9 @@ class ObjectSequencer:
         silently shifting every subsequent band's positions.
         """
         missing = [band for band in mod.band_order if band not in bands]
-        if missing:
+        if missing or sorted(bands) != sorted(mod.band_order):
             raise ValueError(
-                f"modality {mod.name!r} needs bands {list(mod.band_order)} for "
+                f"modality {mod.name!r} needs exactly {list(mod.band_order)} for "
                 f"per-band tokenisation; record has {bands} (missing {missing})"
             )
         per_band = []
