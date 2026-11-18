@@ -92,9 +92,9 @@ def test_yaml_uses_current_modalities(path):
         assert stream == {**original, "anchors": [north, south]}
 
 
-def test_70m_recipe_uses_pre_flow_noise_on_images_and_spectra():
+def test_70m_recipe_combines_pre_flow_and_constant_latent_noise():
     config = yaml.safe_load(REFERENCE.read_text())["model"]["model_config"]
-    assert config["jetformer_noise_min"] == config["jetformer_noise_max"] == 0.0
+    assert config["jetformer_noise_min"] == config["jetformer_noise_max"] == 0.1
     assert {m["name"]: m["pre_flow_noise_max"] for m in config["modalities"] if "pre_flow_noise_max" in m} == {
         "legacy_north_g": 0.21, "legacy_north_r": 0.37, "legacy_north_z": 1.08,
         "hsc_g": 0.15, "hsc_r": 0.20, "hsc_i": 0.32, "hsc_z": 0.49, "hsc_y": 0.93,

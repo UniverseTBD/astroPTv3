@@ -37,8 +37,8 @@ model:
     jetformer_flow_hidden: 128
     jetformer_flow_depth: 4
     jetformer_flow_heads: 8
-    jetformer_noise_max: 0.0 # use pre-flow noise only
-    jetformer_noise_min: 0.0
+    jetformer_noise_max: 0.1 # constant noise on decoder inputs, separate from pre-flow noise
+    jetformer_noise_min: 0.1
     modalities:
       - {name: legacy_north_g, family: image, source: legacy_north,
          record_keys: [image], band: des-g, token_ids: [160, 161, 162],
