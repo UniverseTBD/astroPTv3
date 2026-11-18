@@ -20,7 +20,7 @@ import torch
 from ..configuration_astropt3 import AstroPT3Config
 from .echo import echo_draw, validate_echo_factor
 from .packing import ObjectSequencer, PackedCollator
-from .telemetry import install_byte_probe, instrument
+from .telemetry import ANCHOR_METADATA, install_byte_probe, instrument, telemetry_dir
 
 IMAGE_SHAPE = (3, 152, 152)
 _MAX_NET_RETRIES = 60
@@ -282,6 +282,14 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
     def _pack_records(self, records, *, flush_tail=False):
         rows: list[list] = [[] for _ in range(self.micro_batch_size)]
         used = [0] * self.micro_batch_size
+        track_anchors = telemetry_dir() is not None
+        by_anchor: dict[str, dict[str, int]] = {}
+
+        def flatten(batch):
+            flat = flatten_packed_batch(batch, self.config, self.seq_len)
+            if by_anchor:
+                flat[ANCHOR_METADATA] = by_anchor
+            return flat
 
         for record in records:
             obj = self.sequencer.build(record, epoch=self._epoch)
@@ -297,14 +305,19 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
                     raise AssertionError(
                         f"packing mismatch: {batch['input_ids'].shape} != {expected_shape}"
                     )
-                yield flatten_packed_batch(batch, self.config, self.seq_len)
+                yield flatten(batch)
+                by_anchor = {}
                 rows = [[] for _ in range(self.micro_batch_size)]
                 used = [0] * self.micro_batch_size
                 row_index = 0
             rows[row_index].append(obj)
             used[row_index] += len(obj)
+            if track_anchors and (anchor := record.get("anchor_path")) is not None:
+                counts = by_anchor.setdefault(anchor, {"objects": 0, "tokens_nonpad": 0})
+                counts["objects"] += 1
+                counts["tokens_nonpad"] += len(obj)
         if flush_tail and any(used):
-            yield flatten_packed_batch(self.collator.collate_rows(rows), self.config, self.seq_len)
+            yield flatten(self.collator.collate_rows(rows))
 
 
 def build_astropt3_dataloader(

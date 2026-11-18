@@ -4,11 +4,13 @@ and the shared sample-rendering layer on top of it (astropt3.eval.samples)."""
 from pathlib import Path
 from typing import Any, cast
 
+import numpy as np
 import pytest
 import torch
 from legacy_fixture import make_record
 
 from astropt3.config_io import load_model_config
+from astropt3.configuration_astropt3 import LEGACY_SOUTH_IMAGES, AstroPT3Config
 from astropt3.data.packing import ObjectSequencer
 from astropt3.eval.samples import (
     render_sampled_tokens,
@@ -16,6 +18,7 @@ from astropt3.eval.samples import (
     sample_template,
 )
 from astropt3.generation import generate, reconstruct, sample_gmm
+from astropt3.modeling_astropt3 import AstroPT3Model
 
 CONFIG = Path(__file__).resolve().parents[1] / "configs" / "model" / "test-tiny.yaml"
 
@@ -33,7 +36,6 @@ def smoke_model(jet_config, tmp_path_factory):
     from transformers import AutoModel
 
     from astropt3.data.packing import ObjectSequencer, PackedCollator
-    from astropt3.modeling_astropt3 import AstroPT3Model
 
     torch.manual_seed(0)
     model = AstroPT3Model(jet_config)
@@ -241,3 +243,18 @@ def test_sample_checkpoint_end_to_end(smoke_model, tmp_path):
         f"image-to-spectra/spectra/{oid}",
     }
     assert all(Path(p).exists() and Path(p).stat().st_size > 0 for p in pngs.values())
+
+
+def test_sample_checkpoint_accepts_south_templates(jet_config, tmp_path):
+    config = AstroPT3Config(**{**jet_config.to_dict(), "modalities": [*jet_config.modalities, LEGACY_SOUTH_IMAGES]})
+    ckpt = tmp_path / "south"
+    AstroPT3Model(config).save_pretrained(ckpt)
+    image = {"band": ["des-g", "des-r", "des-i", "des-z"], "flux": np.ones((4, 160, 160), dtype=np.float32)}
+    alone = {"object_id": "south-only", "legacy_south_image": image}
+    matched = {**alone, "object_id": "south-match", "spectrum": make_record(3, image_only_fraction=0.0)["spectrum"]}
+    pngs = sample_checkpoint(ckpt, [alone, matched], modes=["reconstruct", "spectra-to-images"],
+                             n=1, out_dir=tmp_path / "samples", device="cpu")
+    assert set(pngs) == {
+        "reconstruct/legacy_south_images/south-only", "reconstruct/legacy_south_images/south-match",
+        "reconstruct/spectra/south-match", "spectra-to-images/legacy_south_images/south-match",
+    }

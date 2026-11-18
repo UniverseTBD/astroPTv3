@@ -61,7 +61,11 @@ done
 
 The measured run's ignored artifacts are in `astro/tmp/pilot58/`: two projected Parquets, `prepare/bytes.rank0.main.jsonl`, `{north,south,mixed}/steps.rank0.jsonl`, and per-arm stdout. No trained weights, images or intermediate tensors are published.
 
-## End-to-end LSDB follow-up: blocked before first draw
+## End-to-end LSDB follow-up: no completed draw
+
+A separate CPU probe exercised the active 70M loader with the same pins, joins, split and seed, but only one partition per draw and one in-process reader. It planned both paths (308 North and 2,751 South aligned pixels), then hit its **1 GiB encoded HTTP response-body limit** during the first North draw. Catalog startup had already consumed about 453 MiB of that budget. The probe ended after 22.1 s (peak process RSS 2.9 GiB), with no decoded rows or packed batches. These are startup and failure measurements, not throughput or realized mix. No optimizer ran.
+
+### Two-cell staging attempt
 
 Attempted to stage full decoder inputs from the active `configs/nanotron/astropt3-70m.yaml` pins for two deliberately chosen NESTED order-10 cells: **4807411** in the audited overlap field and **6978115** around the audited South four-partner example. This is not random sky. Staging selected rows by `_healpix_29`, without matching or decoding. The CPU process used two-core affinity, one BLAS thread, a 12 GiB virtual-address ceiling and a 145 s timeout per staging invocation. No Dask worker was started.
 

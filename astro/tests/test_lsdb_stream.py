@@ -29,7 +29,7 @@ def test_live_catalog_stream_decodes_and_selects(tiny_config, catalog_count):
     if min(MEMORY_LIMIT, psutil.virtual_memory().available) < WORKER_MEMORY_GIB * 1024**3:
         pytest.skip(f"Live catalog tests require {WORKER_MEMORY_GIB} GiB available RAM")
     spec = deepcopy(TINY_CATALOG_STREAM)
-    spec["catalogs"] = spec["catalogs"][:catalog_count]
+    spec["catalogs"] = spec["catalogs"][:catalog_count - 1]
     spec["partitions_per_chunk"] = 1
     # Explicit auto scales by thread count and can pause the sole worker mid-crossmatch.
     spec["worker_memory_limit"] = f"{WORKER_MEMORY_GIB}GiB"

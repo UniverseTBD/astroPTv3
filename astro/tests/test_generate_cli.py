@@ -62,7 +62,7 @@ def test_invalid_template_indices_fail_before_opening_catalogs(rows):
         cli._draw_live_records(None, {}, rows, 0)
 
 
-@pytest.mark.parametrize("invalid", ["missing", "legacy", "multiple"])
+@pytest.mark.parametrize("invalid", ["missing", "legacy", "multiple", "split"])
 def test_cli_rejects_old_or_ambiguous_recipes_before_loading_checkpoint(monkeypatch, tmp_path, recipe, invalid):
     from transformers import AutoConfig
 
@@ -70,6 +70,8 @@ def test_cli_rejects_old_or_ambiguous_recipes_before_loading_checkpoint(monkeypa
         del recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
     elif invalid == "legacy":
         recipe["data_stages"][0]["data"]["dataset"]["crossmatch_desi"] = False
+    elif invalid == "split":
+        recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]["split"] = "typo"
     else:
         recipe["data_stages"] *= 2
     path = tmp_path / "recipe.yaml"

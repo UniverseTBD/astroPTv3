@@ -1,7 +1,8 @@
 """Two real in-memory LSDB stars, no Hub or distributed worker needed."""
 
 from contextlib import closing, nullcontext
-from itertools import islice
+from itertools import islice, repeat
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -48,6 +49,44 @@ def test_dual_ownership_and_realized_cycle(monkeypatch):
     assert north['north:1']['source_ids'] == {'north': '1'}  # min_catalogs is sky, not rows
     assert south['south:1']['source_ids'] == {'south': '1', 'partner': '2'}
     assert north['partner:1']['anchor'] is south['partner:3']['anchor'] is None
+
+
+def test_healthy_anchor_does_not_reset_south_retries(monkeypatch):
+    spec = {'anchors': [survey('north', 'ebv', 1), survey('south', 'south_value', 2)], 'catalogs': []}
+    catalog = stream.CatalogStream(spec, AstroPT3Config(modalities=[DEFAULT_MODALITIES[3]]))
+    waits = []
+
+    class South:
+        npartitions = 1
+
+        def __iter__(self):
+            raise OSError('South unavailable')
+
+    class North:
+        npartitions = 1
+
+        def __iter__(self):
+            return repeat(SimpleNamespace(empty=True))
+
+    def plan(*args):
+        assert len(waits) <= 2, 'retry budget did not stop the reader'
+        return [North(), South()]
+
+    monkeypatch.setattr(stream, 'open_catalog', lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(stream, 'LocalCluster', lambda **kw: nullcontext())
+    monkeypatch.setattr(stream, 'Client', lambda c: nullcontext())
+    monkeypatch.setattr(stream.loader, 'consumer_seed', lambda *_args: 0)
+    monkeypatch.setattr(stream.loader, '_MAX_NET_RETRIES', 2)
+    monkeypatch.setattr(catalog, '_streams', plan)
+    monkeypatch.setattr(stream.time, 'sleep', waits.append)
+    with closing(catalog.draws(seed=0, rank=0, worker_id=0)) as draws, pytest.raises(OSError, match='South unavailable'):
+        next(draws)
+    assert waits == [5, 10]
+
+
+def test_explicit_anchor_required():
+    with pytest.raises(ValueError, match='anchors'):
+        stream.CatalogStream({'catalogs': [survey('north', 'ebv')]}, AstroPT3Config())
 
 
 def test_holdout_is_disjoint_and_buffered():

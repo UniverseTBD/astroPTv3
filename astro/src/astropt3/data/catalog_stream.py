@@ -232,21 +232,16 @@ class CatalogStream:
         if not isinstance(spec, dict) or set(spec) - {*_DEFAULTS, "anchors", "catalogs", "min_catalogs", "split"}:
             raise ValueError("catalog_stream has unknown settings or is not a mapping")
         self.spec = spec = {**_DEFAULTS, "min_catalogs": 1, **copy.deepcopy(spec)}
-        entries = spec.get("catalogs")
-        if not isinstance(entries, list) or (not entries and "anchors" not in spec):
-            raise ValueError("catalog_stream.catalogs must be a list with at least one catalog in the star")
-        self.weights = [1]
-        if "anchors" in spec:
-            anchors = spec["anchors"]
-            if not isinstance(anchors, list) or not anchors or not all(isinstance(c, dict) for c in anchors):
-                raise ValueError("anchors must be a nonempty list of catalogs with draw_weight")
-            self.weights = [c.get("draw_weight") for c in anchors]
-            if any(type(w) is not int or w < 1 for w in self.weights):
-                raise ValueError("draw_weight must be a positive integer for every anchor")
-            partners = entries
-            anchors = [{k: v for k, v in c.items() if k != "draw_weight"} for c in anchors]
-        else:
-            anchors, partners = entries[:1], entries[1:]
+        anchors = spec.get("anchors")
+        if not isinstance(anchors, list) or not anchors or not all(isinstance(c, dict) for c in anchors):
+            raise ValueError("catalog_stream.anchors must be a nonempty list of catalogs with draw_weight")
+        self.weights = [c.get("draw_weight") for c in anchors]
+        if any(type(w) is not int or w < 1 for w in self.weights):
+            raise ValueError("draw_weight must be a positive integer for every anchor")
+        anchors = [{k: v for k, v in c.items() if k != "draw_weight"} for c in anchors]
+        partners = spec.get("catalogs")
+        if not isinstance(partners, list):
+            raise ValueError("catalog_stream.catalogs must be a list of partner catalogs")
         self.catalogs = [*anchors, *partners]
         registry = config.modality_registry()
         self.stars = [_Star([anchor, *partners], registry) for anchor in anchors]
@@ -327,8 +322,10 @@ class CatalogStream:
         """Yield (epoch, finite records) with bounded transport retries, no cursor."""
         _unregister_hf_array2d_extension()
         telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in self.catalogs})
-        failures = generation = draw = 0
+        failures: dict[int | None, int] = {}
+        generation = draw = 0
         while True:
+            star_index = None  # Startup has its own retry budget.
             try:
                 with LocalCluster(
                     processes=False, n_workers=1,
@@ -347,22 +344,23 @@ class CatalogStream:
                         )
                     reader_seed = loader.consumer_seed(seed, rank, worker_id, generation)
                     streams = self._streams(opened, client, reader_seed)
+                    failures.pop(None, None)
                     print(f"[catalog-stream] worker={worker_id} pixels={[s.npartitions for s in streams]} "
                           f"generation={generation} catalogs={len(opened)} "
                           f"min_catalogs={self.spec['min_catalogs']}", flush=True)
                     readers = {}
-                    for path in _draw_paths(self.weights, reader_seed % len(streams)):
-                        if path not in readers:
-                            readers[path] = iter(streams[path])
-                        frame = next(readers[path], None)
+                    for star_index in _draw_paths(self.weights, reader_seed % len(streams)):
+                        if star_index not in readers:
+                            readers[star_index] = iter(streams[star_index])
+                        frame = next(readers[star_index], None)
                         if frame is None:
                             raise RuntimeError("Infinite catalog stream ended unexpectedly")
-                        failures = 0
+                        failures.pop(star_index, None)
                         epoch = draw
                         draw += 1
                         if frame.empty:
                             continue
-                        star = self.stars[path]
+                        star = self.stars[star_index]
                         decoded = frame.map_rows(star.decode_row, columns=star.columns, infer_nesting=False)
                         records = filter(None, decoded["record"].tolist())
                         del decoded, frame
@@ -370,11 +368,12 @@ class CatalogStream:
             except Exception as error:
                 if not loader._retryable(error):
                     raise
-                failures += 1
-                if failures > loader._MAX_NET_RETRIES:
+                attempts = failures[star_index] = failures.get(star_index, 0) + 1
+                if attempts > loader._MAX_NET_RETRIES:
                     raise
-                wait = min(5 * 2 ** (failures - 1), loader._MAX_NET_RETRY_WAIT)
-                print(f"[catalog-stream] worker={worker_id} retry={failures} "
+                wait = min(5 * 2 ** (attempts - 1), loader._MAX_NET_RETRY_WAIT)
+                anchor = 'startup' if star_index is None else self.stars[star_index].catalogs[0]['name']
+                print(f"[catalog-stream] worker={worker_id} anchor={anchor} retry={attempts} "
                       f"error={type(error).__name__} wait_s={wait}", flush=True)
                 time.sleep(wait)
                 generation += 1

@@ -29,8 +29,9 @@ Verify the env on a GPU box: `pytest -m gpu tests/test_nanotron_gpu.py`.
 There is **no prep step** and no local corpus. `data/nanotron_loader.py` opens
 Multimodal Universe HATS catalogs via LSDB inside each DataLoader worker,
 decodes rows into the shared record shape, then sequences and packs them for
-nanotron. The default recipe joins Legacy North, DESI, SDSS, and HSC; other
-YAMLs can select different supported modality/catalog combinations (§9).
+nanotron. The default recipe joins DESI, SDSS, HSC, and galaxies-with-hats
+separately to each of Legacy Survey North and DR10 South; other YAMLs can
+select different supported modality/catalog combinations (§9).
 Depending on overlap, records carry different subsets of the configured
 modalities. Recovered unmatched records come from partitions visited by the
 join, **not** every survey partition. The active YAML and loader are the
@@ -58,16 +59,17 @@ errors fail immediately.
 Full nanotron run configs live in `astro/configs/nanotron/`: the Pythia ladder
 `astropt3-{70m,160m,410m,1b,1p4b,2p8b,6p9b,12b}.yaml` plus single-GPU smoke
 recipes `astropt3-{1m,10m}.yaml`. Every ladder rung trains the same
-modalities from the same catalog streams (four MMU surveys plus galaxies-with-hats
-RGB images and nine scalars); rungs differ in model size, cluster
+modalities from the same dual-anchor streams (five survey catalogs plus
+galaxies-with-hats RGB images and nine scalars); rungs differ in model size, cluster
 topology, batch and LR. The convenience launcher's default is
 **`astropt3-70m.yaml`**, run at DP=1 with at most 4 loader workers (TP=1 rungs
 only). Every ladder rung echoes each draw 4 times.
 Model, catalog list, join policy, worker count and schedule are explicit YAML,
 not injected by the script (see §9).
 
-`catalog_stream` is required and lists the catalogs explicitly; unknown
-settings are rejected. Matching and footprint selection follow LSDB, pinned by
+`catalog_stream` requires an explicit `anchors` list and a shared partner
+`catalogs` list. Unknown settings are rejected. AstroPT selects the ownership
+and split masks; LSDB applies footprint filtering and matching, pinned by
 `uv.lock`; AstroPT applies calibration and quality gates.
 
 Governing knobs, top to bottom:
@@ -264,7 +266,7 @@ North and [DR10 South](legacy-south.md) each anchor an LSDB star with SDSS, DESI
 
 **Ownership is by sky, not a global object crossmatch.** The first anchor owns its eligible footprint. Each subsequent anchor gets its eligible footprint minus earlier claims and a one-cell order-14 guard around them. The guard prevents a partner within 1″ of two centers on opposite sides from entering through both paths. This protects both attached partners and outer-only rows without an index or cross-worker state. The cost is genuine South objects lost in shared sky: in the [pinned audit](dual-anchor-audit.md) 31 of 46 eligible South objects in the overlap cone have no North counterpart within 1″. Do not interpret this as a complete unique-object union. Records carry `source_ids`, source-qualified `object_id`, `anchor_path` (sky owner), and `anchor` (null for outer-only records).
 
-**Mixing:** `draw_weight` counts partition draws per worker cycle, not objects or tokens. The ladder uses 1 North : 2 South to give the larger eligible South sky more draws while guaranteeing North one in every three. This is not a measured optimum. The reader seed rotates the starting path; LSDB shuffles partitions and rows. Both stars share one Dask client per worker, but can each hold a prefetched frame; size workers for available memory. See the [bounded pilot](dual-anchor-pilot.md) for measured exposures and limitations.
+**Mixing:** `draw_weight` counts partition draws per worker cycle, not objects or tokens. The ladder uses 1 North : 2 South to give the larger eligible South sky more draws while guaranteeing North one in every three. This is not a measured optimum. The reader seed rotates the starting path; LSDB shuffles partitions and rows. Both stars share one Dask client per worker, but can each hold a prefetched frame; size workers for available memory. Benchmark JSON reports `anchor_counts`, `fresh_anchor_counts`, and `replayed_anchor_counts` in the measured window. These count object exposures and nonpadding tokens by owning path, including outer-only objects. See the [bounded pilot](dual-anchor-pilot.md) for measured exposures and limitations.
 
 **Splits:** recipes use `split: train`; generation defaults to `validation` for those recipes. Every source uses the same fixed 154 of 3,072 all-sky order-4 HEALPix cells for validation. A one-order-10-cell collar around them is excluded from training to separate adjacent cutouts and 1″ matches, including partners drawn without an anchor. The [North-only control](../configs/controls/astropt3-70m-north.yaml) uses the same split. Its model cannot resume as a dual-anchor model: South adds a four-band image head, not a fourth channel to the North head.
 

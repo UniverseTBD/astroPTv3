@@ -216,13 +216,14 @@ data_stages:
         echo_factor: 4
         catalog_stream:
           split: train
-          # First catalog anchors the join; right-only rows remain separate.
-          catalogs:
+          anchors:
             - name: legacy
+              draw_weight: 1
               repo: >-
                 UniverseTBD/mmu_ssl_legacysurvey_north@f634744d3c44dd4fde0dee3172d4887c5e3c31c0
               decoder: legacy_image
               record_key: image
+          catalogs:
             - name: sdss
               repo: >-
                 UniverseTBD/mmu_sdss_sdss@da175ca9bb931f4301ab950431922ba9f99089ba

@@ -311,7 +311,7 @@ tokens:
   limit_val_batches: 0 # eval never runs in the trainer (ADR 0015 defers
   limit_test_batches: 0 # source-backed val/probe sweeps)
 checkpoints:
-  checkpoints_path: ../astroPTv3_checkpoints/astropt3-1b
+  checkpoints_path: ../astroPTv3_checkpoints/astropt3-1b-dual-anchor
   checkpoint_schedule: pythia # steps 1,2,4,...,512 + every interval
   checkpoint_interval: 1000
   save_initial_state: false

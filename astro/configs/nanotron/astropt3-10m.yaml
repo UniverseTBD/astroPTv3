@@ -297,7 +297,7 @@ tokens:
   limit_val_batches: 0
   limit_test_batches: 0
 checkpoints:
-  checkpoints_path: ../astroPTv3_checkpoints/astropt3-10m
+  checkpoints_path: ../astroPTv3_checkpoints/astropt3-10m-dual-anchor
   resume_checkpoint_path: null
   checkpoint_schedule: pythia
   checkpoint_interval: 1000
