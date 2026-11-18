@@ -492,16 +492,16 @@ model:
         image_crop: 0
       - {name: legacy_south_g, family: image, source: legacy_south,
          record_keys: [legacy_south_image], band: des-g, token_ids: [169, 170, 171],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.15}
       - {name: legacy_south_r, family: image, source: legacy_south,
          record_keys: [legacy_south_image], band: des-r, token_ids: [172, 173, 174],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.14}
       - {name: legacy_south_i, family: image, source: legacy_south,
          record_keys: [legacy_south_image], band: des-i, token_ids: [175, 176, 177],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.45}
       - {name: legacy_south_z, family: image, source: legacy_south,
          record_keys: [legacy_south_image], band: des-z, token_ids: [178, 179, 180],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.64}
     spiral: true # center-outward image patch order (ADR 0004)
     hidden_size: 512
     num_hidden_layers: 23

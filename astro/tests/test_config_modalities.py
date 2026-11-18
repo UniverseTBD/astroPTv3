@@ -56,11 +56,12 @@ def test_yaml_uses_current_modalities(path):
     assert Path(raw["checkpoints"]["checkpoints_path"]).name == f"{path.stem}-dual-anchor"
     model = raw["model"]["model_config"]
     # Noise amplitude is a training setting, not part of the data contract.
-    assert [
+    definitions = [
         {key: value for key, value in m.items() if key != "pre_flow_noise_max"}
-        for m in model["modalities"][: len(expected)]
-    ] == expected
-    assert ModalityRegistry(model["modalities"][len(expected) :]).to_list() == (
+        for m in model["modalities"]
+    ]
+    assert definitions[: len(expected)] == expected
+    assert ModalityRegistry(definitions[len(expected) :]).to_list() == (
         ModalityRegistry(LEGACY_SOUTH_MODALITIES).to_list()
     )
     assert model["vocab_size"] == control["model"]["model_config"]["vocab_size"] == 256
@@ -86,6 +87,7 @@ def test_70m_recipe_combines_pre_flow_and_constant_latent_noise():
     assert config["jetformer_noise_min"] == config["jetformer_noise_max"] == 0.1
     assert {m["name"]: m["pre_flow_noise_max"] for m in config["modalities"] if "pre_flow_noise_max" in m} == {
         "legacy_north_g": 0.21, "legacy_north_r": 0.37, "legacy_north_z": 1.08,
+        "legacy_south_g": 0.15, "legacy_south_r": 0.14, "legacy_south_i": 0.45, "legacy_south_z": 0.64,
         "hsc_g": 0.15, "hsc_r": 0.20, "hsc_i": 0.32, "hsc_z": 0.49, "hsc_y": 0.93,
         "galaxies": 0.04, "spectra": 0.1, "sdss_spectra": 0.1,
     }

@@ -38,11 +38,13 @@ linear latent-input schedule; 70M sets them equal. Neither curriculum
 adds noise during evaluation or generation.
 
 Choose σ in the normalized units each flow sees. The 70M recipe starts
-Legacy North at `(0.21, 0.37, 1.08)` for `g, r, z` and HSC at
-`(0.15, 0.20, 0.32, 0.49, 0.93)` for `g, r, i, z, y`. These estimates use
-robust pixel scatter in the outer regions of 23 Legacy North and 26 HSC
-training cutouts, not a dedicated blank-sky measurement. Legacy South has
-no added noise. Galaxies-with-hats RGB uses one shared starting σ of `0.04`.
+Legacy North at `(0.21, 0.37, 1.08)` for `g, r, z`, Legacy South at
+`(0.15, 0.14, 0.45, 0.64)` for `g, r, i, z`, and HSC at
+`(0.15, 0.20, 0.32, 0.49, 0.93)` for `g, r, i, z, y`. The estimates use
+robust pixel scatter in the outer regions of 23 North and 26 HSC training
+cutouts and valid pixels from 70 South cutouts across three sampled fields.
+They are not a dedicated blank-sky calibration. Galaxies-with-hats RGB uses
+one shared starting σ of `0.04`.
 
 DESI and SDSS start at σ = 0.1 in normalized flux units, based on robust
 scatter between adjacent bins in archived training spectra. The SDSS estimate
