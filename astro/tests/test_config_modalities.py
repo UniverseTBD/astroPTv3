@@ -28,7 +28,7 @@ def test_invalid_fixed_band_config_is_rejected(backend, overrides, message):
     config_cls = AstroPT3Config if backend == "hf" else pytest.importorskip("nanotron.config").AstroPT3Config
     modality = {**DEFAULT_MODALITIES[0], **overrides}
     with pytest.raises(ValueError, match=message):
-        config_cls(modalities=[modality], vocab_size=200)
+        config_cls(modalities=[modality], vocab_size=256)
 
 
 def test_catalog_cannot_feed_south_flux_to_north_marker():
@@ -59,7 +59,7 @@ def test_yaml_uses_current_modalities(path):
     assert ModalityRegistry(model["modalities"][len(expected) :]).to_list() == (
         ModalityRegistry(LEGACY_SOUTH_MODALITIES).to_list()
     )
-    assert model["vocab_size"] == control["model"]["model_config"]["vocab_size"] == 200
+    assert model["vocab_size"] == control["model"]["model_config"]["vocab_size"] == 256
     assert model["vocab_size"] % raw["parallelism"]["tp"] == 0
     worst_case = 1 + sum(m["max_positions"] + 2 for m in model["modalities"])
     assert worst_case <= raw["tokens"]["sequence_length"]

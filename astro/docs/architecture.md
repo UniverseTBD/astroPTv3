@@ -108,9 +108,9 @@ survey data to model input (using LegacySurvey and DESI as examples):
 | Galaxies-with-hats | `galaxies` (fused display RGB) | 23–25 | 259 |
 
 Each row's IDs are assigned in consecutive triplets per category. Training
-recipes use a 200-row vocabulary (including padding to a multiple of 8);
-there is no text vocabulary. IDs 2–4, 20–22, and 53–55 are reserved and never
-assigned to bands. Spectral, scalar, and RGB IDs are unchanged. HF and
+recipes use a 256-row vocabulary; there is no text vocabulary. IDs 2–4,
+20–22, and 53–55 are reserved and never assigned to bands. Spectral, scalar,
+and RGB IDs are unchanged. HF and
 Nanotron checkpoints carry the same modality definitions, including `band`
 and `image_format` where applicable. Each band has its own encoder, position
 embedding, flow and head. Train the band models from scratch; resume requires

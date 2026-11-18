@@ -98,7 +98,7 @@ def main():
         rope_theta=100000.0,
         no_rope_layer=4,
         rms_norm_eps=1e-6,
-        vocab_size=200,
+        vocab_size=256,
         pad_token_id=0,
         bos_token_id=1,
         eos_token_id=1,

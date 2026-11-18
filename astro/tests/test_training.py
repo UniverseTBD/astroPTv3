@@ -66,7 +66,7 @@ def test_training_rejects_retired_selection(tmp_path, default_recipe, crossmatch
 def test_default_recipe_keeps_reserved_modality_tokens(default_recipe):
     model = default_recipe["model"]["model_config"]
     modalities = {m["name"]: m for m in model["modalities"]}
-    assert model["vocab_size"] == 200
+    assert model["vocab_size"] == 256
     assert modalities["spectra"]["token_ids"] == [5, 6, 7]
     assert modalities["sdss_spectra"]["token_ids"] == [17, 18, 19]
     rgb = modalities["galaxies"]

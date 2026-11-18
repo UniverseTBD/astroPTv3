@@ -201,7 +201,7 @@ model:
     hidden_act: silu
     attention_bias: false
     initializer_range: 0.02
-    vocab_size: 200
+    vocab_size: 256
     pad_token_id: 0
     bos_token_id: 1
     eos_token_id: 1

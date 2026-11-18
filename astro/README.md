@@ -59,7 +59,7 @@ standardization**: the flow-based likelihood needs the record-to-token
 mapping to retain patch information. Optional catalog scalars can become
 one-token spans when included in the config.
 
-The training recipes use a 200-id vocabulary for modality markers; it is
+The training recipes use a 256-entry vocabulary for modality markers; it is
 **not** a text vocabulary. The SmolLM3 decoder predicts the next continuous patch using a
 per-modality JetFormer flow and Gaussian-mixture likelihood head. Whole
 astronomical sources are packed into training sequences without splitting an
