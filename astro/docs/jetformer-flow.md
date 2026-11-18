@@ -31,11 +31,10 @@ flows in their own column and excludes them from the nominal-size check.
 
 ## Noise curricula
 
-Set `pre_flow_noise_max` on individual entries in `modalities` (HF YAML) or
-`model.model_config.modalities` (Nanotron YAML) to opt in. For example, add
-`pre_flow_noise_max: 0.5` to the existing `hsc_images` entry. Omitted entries
-use zero. Scalars cannot opt in; leave spectra at zero unless using a
-separately calibrated spectral σ (noise also affects zero-filled bins).
+Set `pre_flow_noise_max` on individual patch modalities in `modalities`
+(HF YAML) or `model.model_config.modalities` (Nanotron YAML). Omitted entries
+use zero; scalars cannot use pre-flow noise. The [70M Nanotron recipe](../configs/nanotron/astropt3-70m.yaml)
+uses pre-flow noise only, for both images and spectra.
 
 During training, independent Gaussian noise is added to normalized patch
 values before the flow, with `σ = pre_flow_noise_max · (1 + cos(π · step / train_steps)) / 2`.
@@ -46,12 +45,15 @@ independent linear latent-input noise; set both to zero for pre-flow only.
 
 Choose σ in each modality's normalized units. For calibrated images, estimate
 per-band noise on held-out blank-sky patches and pick a representative scale
-for the modality (a single σ is shared across bands). Don't reuse that σ
-for RGB scaled to [0, 1] or for spectra.
+for the modality (a single σ is shared across bands). The 70M recipe starts
+DESI and SDSS at σ = 0.1 in normalized flux units, based on robust scatter
+between adjacent bins in archived training spectra. The SDSS estimate is
+provisional (three spectra). The schedule also perturbs filled masked bins
+and tail padding during training.
 
 For the [#52 ablation](https://github.com/UniverseTBD/astroPTv3/issues/52), hold
 the `isqm4s6c` recipe, seed, training horizon, and validation samples fixed.
-Compare latent-only (baseline), both together, and pre-flow-only runs. After
+Compare latent-only (baseline) and pre-flow-only runs. After
 σ reaches zero, compare clean total NLL, source vs. sky token NLL on fixed
 cutouts, and linear-probe and scalar-head metrics.
 
