@@ -57,6 +57,19 @@ def test_templates_use_selected_catalogs_and_close_after_one_draw(monkeypatch, r
     assert closed == [True, True]
 
 
+def test_template_ranking_counts_image_sources_not_bands(monkeypatch, recipe):
+    config = hf_config_from_modalities(recipe["model"]["model_config"]["modalities"])
+    spec = recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
+    hsc_only = {"object_id": "hsc", "hsc_image": {}}
+    north_and_spectrum = {"object_id": "north", "image": {}, "spectrum": {}}
+
+    def draws(*args, **kwargs):
+        yield 0, [hsc_only, north_and_spectrum]
+
+    monkeypatch.setattr(cli.CatalogStream, "draws", draws)
+    assert cli._draw_live_records(config, spec, [0, 1], 17) == [north_and_spectrum, hsc_only]
+
+
 @pytest.mark.parametrize("rows", [[], [-1], [0, -2]])
 def test_invalid_template_indices_fail_before_opening_catalogs(rows):
     with pytest.raises(ValueError, match="nonnegative"):
@@ -113,12 +126,13 @@ def test_cli_forwards_explicit_stream_to_template_selection(monkeypatch, tmp_pat
 
     def sample(checkpoint, actual_records, **kwargs):
         assert checkpoint == "unused" and actual_records is records
-        assert kwargs["band"] == "hsc_g"
+        assert kwargs["band"] == "hsc_g" and kwargs["modes"] == ["image-to-spectra"]
         return {}
 
     monkeypatch.setattr(cli, "_draw_live_records", draw)
     monkeypatch.setattr(samples, "sample_checkpoint", sample)
     monkeypatch.setattr(sys, "argv", ["generate.py", "--checkpoint", "unused", "--config-file", str(path),
                                      "--rows", "1,0", "--stream-seed", "17", "--band", "hsc_g",
+                                     "--mode", "image-to-spectra",
                                      *override, "--out", str(tmp_path / "output")])
     cli.main()

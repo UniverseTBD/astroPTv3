@@ -5,12 +5,38 @@ from pathlib import Path
 import pytest
 import yaml
 
-from astropt3.configuration_astropt3 import LEGACY_SOUTH_MODALITIES
+from astropt3.configuration_astropt3 import (
+    DEFAULT_MODALITIES,
+    LEGACY_SOUTH_MODALITIES,
+    AstroPT3Config,
+)
+from astropt3.data.catalog_stream import CatalogStream
 from astropt3.modalities import ModalityRegistry
 
 ASTRO_DIR = Path(__file__).resolve().parents[1]
 CONTROL = ASTRO_DIR / "configs/controls/astropt3-70m-north.yaml"
 CONFIGS = sorted((ASTRO_DIR / "configs/nanotron").glob("*.yaml"))
+
+
+@pytest.mark.parametrize("backend", ["hf", "nanotron"])
+@pytest.mark.parametrize(("overrides", "message"), [
+    ({"band": "des-r"}, "legacy_north_g.*legacy_north.*des-g"),
+    ({"source": "legacy_south"}, "legacy_north_g.*legacy_north.*des-g"),
+    ({"record_keys": [""]}, "nonempty record key"),
+])
+def test_invalid_fixed_band_config_is_rejected(backend, overrides, message):
+    config_cls = AstroPT3Config if backend == "hf" else pytest.importorskip("nanotron.config").AstroPT3Config
+    modality = {**DEFAULT_MODALITIES[0], **overrides}
+    with pytest.raises(ValueError, match=message):
+        config_cls(modalities=[modality], vocab_size=200)
+
+
+def test_catalog_cannot_feed_south_flux_to_north_marker():
+    recipe = yaml.safe_load((ASTRO_DIR / "configs/nanotron/astropt3-70m.yaml").read_text())
+    spec = recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
+    modality = {**DEFAULT_MODALITIES[0], "record_keys": ["legacy_south_image"]}
+    with pytest.raises(ValueError, match="legacy_north_g.*source disagrees with its image decoder"):
+        CatalogStream(spec, AstroPT3Config(modalities=[modality]))
 
 
 @pytest.mark.parametrize("path", CONFIGS, ids=lambda path: str(path.relative_to(ASTRO_DIR)))

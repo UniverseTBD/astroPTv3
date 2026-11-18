@@ -18,6 +18,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from .tokenization import FIXED_IMAGE_CATEGORIES
+
 
 @dataclass
 class ModalityConfig:
@@ -65,12 +67,23 @@ class ModalityConfig:
             raise ValueError(
                 f"modality {self.name!r} has invalid family {self.family!r}"
             )
+
+        if type(self.input_size) is not int or self.input_size < 1:
+            raise ValueError(f"modality {self.name!r} input_size must be a positive integer")
+        if self.family != "scalar":
+            self._validate_patch_modality()
         if type(self.image_crop) is not int or self.image_crop < 0:
             raise ValueError(f"modality {self.name!r} image_crop must be a nonnegative integer")
         if self.family == "image":
             self._validate_image()
         elif self.band is not None or self.image_format != "physical":
             raise ValueError(f"modality {self.name!r} may only declare band or image_format for images")
+        if fixed := FIXED_IMAGE_CATEGORIES.get(self.name):
+            source, band, _ = fixed
+            image_format = "rgb" if band is None else "physical"
+            if (self.family, self.source, self.band, self.image_format) != ("image", source, band, image_format):
+                raise ValueError(f"modality {self.name!r} must use source {source!r} and "
+                                 f"band {band!r} ({image_format} image)")
         if not self.source:
             raise ValueError(f"modality {self.name!r} is missing source provenance")
         self.record_keys = tuple(self.record_keys)
@@ -88,6 +101,16 @@ class ModalityConfig:
             raise ValueError(f"modality {self.name!r} token_ids must be consecutive")
         self.token_ids = token_ids
 
+    def _validate_patch_modality(self):
+        if self.input_size % 2:
+            raise ValueError("jetformer flows require an even input_size for patch modalities")
+        if self.pos_type not in ("index", "continuous"):
+            raise ValueError(f"unknown pos_type {self.pos_type!r}")
+        for field in ("max_positions", "pos_input_size"):
+            value = getattr(self, field)
+            if type(value) is not int or value < 1:
+                raise ValueError(f"modality {self.name!r} {field} must be a positive integer")
+
     def _validate_image(self):
         if self.image_format == "rgb":
             if self.band is not None:
@@ -96,10 +119,13 @@ class ModalityConfig:
             raise ValueError(f"image modality {self.name!r} has invalid image_format {self.image_format!r}")
         elif not isinstance(self.band, str) or not self.band.strip() or self.band.startswith("rgb-"):
             raise ValueError(f"image modality {self.name!r} must declare one calibrated band")
+        if type(self.patch_size) is not int or self.patch_size < 1:
+            raise ValueError(f"image modality {self.name!r} patch_size must be a positive integer")
         if self.input_size != (3 if self.image_format == "rgb" else 1) * self.patch_size**2:
             raise ValueError(f"image modality {self.name!r} input_size does not match its patch dimensions")
-        if len(self.record_keys) != 1:
-            raise ValueError(f"image modality {self.name!r} must declare one record key")
+        keys = self.record_keys
+        if not isinstance(keys, (list, tuple)) or len(keys) != 1 or not isinstance(keys[0], str) or not keys[0].strip():
+            raise ValueError(f"image modality {self.name!r} must declare one nonempty record key")
 
     @property
     def scalar(self) -> bool:

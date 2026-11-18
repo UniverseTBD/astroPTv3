@@ -176,11 +176,12 @@ python astro/scripts/generate.py --checkpoint <hf_dir> \
 ```
 
 The checkpoint's modalities must have compatible outputs in that recipe. One
-configured draw supplies templates, ordered by active modality count; `--rows`
-selects positions in that ordering. Catalogs are never inferred from the model.
-Use `--band hsc_g` for a single-band sample; add `--mode spectra-to-images`
-to condition it on the template's spectra. The template must carry the
-selected source.
+configured draw supplies templates. Ranking counts each image payload once,
+regardless of filter count; `--rows` selects positions in that ordering.
+Catalogs are never inferred from the model. Use `--band hsc_g` for an
+unconditional single-band sample, `--mode spectra-to-images --band hsc_g`
+to generate that band from spectra, or `--mode image-to-spectra --band hsc_g`
+to generate spectra from that band alone. The template must carry the selected source.
 
 ## 7. Verification gates
 

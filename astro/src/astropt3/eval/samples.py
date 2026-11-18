@@ -30,7 +30,8 @@ from ..data.spectral import spectral_inverse
 from ..generation import generate, reconstruct
 from ..tokenization import antispiralise, unpatchify_image, unpatchify_spectrum
 
-MODES = ("unconditional", "image-to-spectra", "spectra-to-images", "reconstruct")
+BAND_MODES = ("unconditional", "image-to-spectra", "spectra-to-images")
+MODES = (*BAND_MODES, "reconstruct")
 
 
 def _present_modalities(sequencer, record):
@@ -49,12 +50,12 @@ def build_template(sequencer, record: dict, mode: str, *, band: str | None = Non
     """
     present = _present_modalities(sequencer, record)
     if band is not None:
-        if mode not in ("unconditional", "spectra-to-images"):
+        if mode not in BAND_MODES:
             raise ValueError(f"band selection is not supported in {mode!r} mode")
         if not any(m.name == band and m.band is not None for m in present):
             raise ValueError(f"template has no image band {band!r}")
         present = [m for m in present if m.name == band or (
-            mode == "spectra-to-images" and m.family == "spectrum"
+            mode != "unconditional" and m.family == "spectrum"
         )]
     first_family = "spectrum" if mode == "spectra-to-images" else "image"
     present.sort(key=lambda m: m.family != first_family)

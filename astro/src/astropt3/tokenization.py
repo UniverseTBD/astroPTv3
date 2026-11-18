@@ -1,10 +1,9 @@
 """Special-token vocabulary and patchification.
 
 Existing special-token ids are FROZEN: released checkpoints depend on them.
-Layout: 0 <|pad|>, 1 <|bos|>, then 3 consecutive ids per modality in the
-order modalities are added: <|begin_m|>, <|m|> (placeholder), <|end_m|>.
-New modalities take complete unused blocks in ids 17-63 first, then append
-blocks above 63 and requires the config to carry the enlarged vocabulary.
+Layout: 0 <|pad|>, 1 <|bos|>, and three consecutive IDs per modality:
+<|begin_m|>, <|m|> (placeholder), <|end_m|>. Built-ins own fixed blocks;
+automatically allocated modalities take free blocks below 64 first.
 
 Patchification is pinned to the verified MMU schemas:
 - images:  float32 (3, 152, 152) cubes, center-cropped to 96x96 by the
@@ -27,25 +26,29 @@ BOS_ID = 1
 
 # Survey-wide image blocks must not acquire new meanings.
 _RESERVED_IMAGE_BASES = (2, 20, 53)
+# name -> (source, payload band or None for display RGB, first marker ID)
+FIXED_IMAGE_CATEGORIES = {
+    "galaxies": ("galaxies_with_hats", None, 23),
+    "legacy_north_g": ("legacy_north", "des-g", 160),
+    "legacy_north_r": ("legacy_north", "des-r", 163),
+    "legacy_north_z": ("legacy_north", "des-z", 166),
+    "legacy_south_g": ("legacy_south", "des-g", 169),
+    "legacy_south_r": ("legacy_south", "des-r", 172),
+    "legacy_south_i": ("legacy_south", "des-i", 175),
+    "legacy_south_z": ("legacy_south", "des-z", 178),
+    "hsc_g": ("hsc", "hsc-g", 181),
+    "hsc_r": ("hsc", "hsc-r", 184),
+    "hsc_i": ("hsc", "hsc-i", 187),
+    "hsc_z": ("hsc", "hsc-z", 190),
+    "hsc_y": ("hsc", "hsc-y", 193),
+}
 _MODALITY_ID_BLOCKS = {
     "spectra": 5,  # begin=5, placeholder=6, end=7
     # ADR 0008 scalar modalities (one-token spans, GMM heads)
     "Z": 8,  # begin=8, placeholder=9, end=10
     "ebv": 11,  # begin=11, placeholder=12, end=13
     "photometry": 14,  # begin=14, placeholder=15, end=16
-    "galaxies": 23,    # RGB display composite
-    "legacy_north_g": 160,
-    "legacy_north_r": 163,
-    "legacy_north_z": 166,
-    "legacy_south_g": 169,
-    "legacy_south_r": 172,
-    "legacy_south_i": 175,
-    "legacy_south_z": 178,
-    "hsc_g": 181,
-    "hsc_r": 184,
-    "hsc_i": 187,
-    "hsc_z": 190,
-    "hsc_y": 193,
+    **{name: base for name, (_, _, base) in FIXED_IMAGE_CATEGORIES.items()},
 }
 
 

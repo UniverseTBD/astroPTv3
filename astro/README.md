@@ -96,7 +96,8 @@ See [training.md](docs/training.md) for custom recipes, echo overrides, resource
 limits, and resume instructions. There is no source-backed evaluation sweep;
 model-side evaluation and sample rendering are in `src/astropt3/eval/` and
 `scripts/generate.py`. Use `--band hsc_g` to generate one calibrated band,
-or add `--mode spectra-to-images` to condition that band on the template's spectra.
+or pair it with `--mode spectra-to-images` to generate the band from spectra
+and `--mode image-to-spectra` to generate spectra from the band alone.
 
 For a bounded, YAML-based training benchmark with standard JSON results, see
 [throughput benchmarking](docs/training.md#8-standard-throughput-benchmark).

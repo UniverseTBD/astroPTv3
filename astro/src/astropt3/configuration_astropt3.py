@@ -86,13 +86,16 @@ DEFAULT_MODALITIES = [
 ]
 
 
-def _complete_modalities(modalities: list[dict]) -> list[dict]:
-    """Backfill metadata for default modalities."""
-    legacy = {modality["name"]: modality for modality in DEFAULT_MODALITIES}
+def complete_modalities(modalities: list[dict] | None) -> list[dict]:
+    """Complete and validate the modality config shared by HF and Nanotron."""
+    defaults_by_name = {modality["name"]: modality for modality in DEFAULT_MODALITIES}
     completed = []
-    for raw in modalities:
+    for raw in DEFAULT_MODALITIES if modalities is None else modalities:
         modality = dict(raw)
-        defaults = legacy.get(modality.get("name"), {})
+        name = modality.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("modality name must be a nonempty string")
+        defaults = defaults_by_name.get(name, {})
         for key in ("family", "source", "record_keys", "band", "token_ids"):
             if key not in modality and key in defaults:
                 modality[key] = defaults[key]
@@ -107,7 +110,9 @@ def _complete_modalities(modalities: list[dict]) -> list[dict]:
         if {"channel_tokenization", "band_order"} & modality.keys():
             raise ValueError(f"modality {modality['name']!r} must declare one image band per span")
         completed.append(modality)
-    return assign_modality_token_ids(completed)
+    completed = assign_modality_token_ids(completed)
+    ModalityRegistry(completed)
+    return completed
 
 
 class AstroPT3Config(SmolLM3Config):
@@ -143,9 +148,7 @@ class AstroPT3Config(SmolLM3Config):
         eos_token_id: int = 1,
         **kwargs,
     ):
-        raw_modalities = modalities if modalities is not None else DEFAULT_MODALITIES
-        self.modalities = _complete_modalities(raw_modalities)
-        self.modality_registry()  # validate modality contracts when loading the config
+        self.modalities = complete_modalities(modalities)
         required_vocab = required_vocab_size(self.modalities)
         if vocab_size is None:
             vocab_size = required_vocab
@@ -159,8 +162,6 @@ class AstroPT3Config(SmolLM3Config):
                 raise ValueError("jetformer flow dimensions must be positive integers")
         if jetformer_flow_hidden % jetformer_flow_heads:
             raise ValueError("jetformer_flow_hidden must be divisible by jetformer_flow_heads")
-        if any(m["input_size"] % 2 for m in self.modalities if m["family"] != "scalar"):
-            raise ValueError("jetformer flows require an even input_size for patch modalities")
         self.jetformer_flow_steps = jetformer_flow_steps
         self.jetformer_flow_hidden = jetformer_flow_hidden
         self.jetformer_flow_depth = jetformer_flow_depth

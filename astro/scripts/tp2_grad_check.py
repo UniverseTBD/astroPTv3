@@ -49,7 +49,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 from legacy_fixture import make_record
 
-from astropt3.data.nanotron_loader import flatten_packed_batch, hf_config_from_modalities
+from astropt3.data.nanotron_loader import (
+    flatten_packed_batch,
+    hf_config_from_modalities,
+)
 from astropt3.data.packing import ObjectSequencer, PackedCollator
 
 MBS = 2
@@ -95,7 +98,7 @@ def main():
         rope_theta=100000.0,
         no_rope_layer=4,
         rms_norm_eps=1e-6,
-        vocab_size=64,
+        vocab_size=200,
         pad_token_id=0,
         bos_token_id=1,
         eos_token_id=1,

@@ -341,11 +341,14 @@ def test_resume_normalizes_modalities_and_preserves_legacy_checkpoint(
 ])
 def test_resume_rejects_generic_modality_mismatches(tmp_path, default_recipe, field, value):
     model = default_recipe["model"]["model_config"]
+    if field == "band":
+        # Exercise a valid config mismatch, not rejection of a fixed marker's identity.
+        model["modalities"][0].update(name="custom_band", token_ids=[56, 57, 58])
     saved = copy.deepcopy(model)
     if field == "missing":
         saved["modalities"].pop(0)
     else:
-        name = "legacy_north_g" if field == "band" else "sdss_spectra"
+        name = "custom_band" if field == "band" else "sdss_spectra"
         next(m for m in saved["modalities"] if m["name"] == name)[field] = value
     write_resume(tmp_path, saved)
     with pytest.raises(ValueError, match="Checkpoint modalities differ"):

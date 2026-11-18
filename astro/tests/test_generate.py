@@ -256,10 +256,14 @@ def test_sample_checkpoint_generates_one_south_band(jet_config, tmp_path):
     matched = {**alone, "object_id": "south-match", "spectrum": make_record(3, image_only_fraction=0.0)["spectrum"]}
     with pytest.raises(ValueError, match="no image band"):
         build_template(ObjectSequencer(config), alone, "unconditional", band="legacy_north_g")
-    template = build_template(ObjectSequencer(config), matched, "spectra-to-images", band="legacy_south_i")
-    assert set(template.masks) == {"legacy_south_i", "spectra"}
-    assert template.masks["spectra"].nonzero()[0] < template.masks["legacy_south_i"].nonzero()[0]
-    pngs = sample_checkpoint(ckpt, [alone, matched], modes=["spectra-to-images"],
+    for mode, context, target in (
+        ("spectra-to-images", "spectra", "legacy_south_i"),
+        ("image-to-spectra", "legacy_south_i", "spectra"),
+    ):
+        template = build_template(ObjectSequencer(config), matched, mode, band="legacy_south_i")
+        assert set(template.masks) == {context, target}
+        assert template.masks[context].nonzero()[0] < template.masks[target].nonzero()[0]
+    pngs = sample_checkpoint(ckpt, [alone, matched], modes=["spectra-to-images", "image-to-spectra"],
                              band="legacy_south_i", n=1, out_dir=tmp_path / "samples", device="cpu")
-    assert set(pngs) == {"spectra-to-images/legacy_south_i/south-match"}
+    assert set(pngs) == {"spectra-to-images/legacy_south_i/south-match", "image-to-spectra/spectra/south-match"}
     assert all(Path(p).stat().st_size > 0 for p in pngs.values())

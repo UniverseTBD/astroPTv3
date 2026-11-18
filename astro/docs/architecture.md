@@ -113,13 +113,13 @@ there is no text vocabulary. IDs 2–4, 20–22, and 53–55 are reserved and ne
 assigned to bands. Spectral, scalar, and RGB IDs are unchanged. HF and
 Nanotron checkpoints carry the same modality definitions, including `band`
 and `image_format` where applicable. Each band has its own encoder, position
-embedding, flow and head. Survey-wide image checkpoints cannot resume or be
-converted into this representation; train the band models from scratch.
+embedding, flow and head. Train the band models from scratch; resume requires
+a checkpoint with the same modality definitions.
 
-At 4096 tokens per row, a synthetic next-fit regression with one record of
-each source plus one with all four, repeated three times, uses 4025/4096
-slots per row (98.3%). This checks packing arithmetic, not live-stream
-utilization or throughput.
+The offline packing test puts each Legacy anchor on a separate object, with
+HSC and RGB partners. The two image-only objects use 3000 of 4096 slots when
+packed together. This checks length and packing arithmetic, not utilization
+or throughput of the live training stream.
 
 ## The model
 

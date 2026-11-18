@@ -6,6 +6,7 @@ import pytest
 import torch
 import yaml
 
+from astropt3.configuration_astropt3 import DEFAULT_MODALITIES, AstroPT3Config
 from astropt3.data.band_registry import physical_normalize
 from astropt3.data.nanotron_loader import (
     flatten_packed_batch,
@@ -57,6 +58,14 @@ def test_explicit_spans_follow_labels_not_channel_order(config):
     assert len(set(obj.input_ids.tolist())) == 1 + 3 * len(obj.masks)
 
 
+@pytest.mark.parametrize("label", ["bogus", "rgb-r"])
+def test_unselected_image_channels_are_validated(label):
+    config = AstroPT3Config(modalities=[DEFAULT_MODALITIES[0]])
+    sequencer = ObjectSequencer(config)
+    with pytest.raises(NotImplementedError, match=label):
+        sequencer.build({"image": image(["des-g", label], 152)})
+
+
 def test_image_token_budget_and_packed_utilization(config):
     sequencer = ObjectSequencer(config)
     sources = {
@@ -70,14 +79,15 @@ def test_image_token_budget_and_packed_utilization(config):
     assert set(rgb.masks) == {"galaxies"}
     assert rgb.values["galaxies"].shape == (256, 768)
     assert torch.equal(rgb.values["galaxies"][0, :3], sources["galaxy_image"]["flux"][:, 0, 0])
-    objects = [*by_source, sequencer.build(sources)]
-    # Each calibrated band adds 144 patches + 2 delimiters; RGB adds 256 + 2 once.
-    assert [len(obj) for obj in objects] == [439, 585, 731, 259, 2011]
+    partners = {key: sources[key] for key in ("hsc_image", "galaxy_image")}
+    matched = [sequencer.build({key: sources[key], **partners}) for key in ("image", "legacy_south_image")]
+    # A live object comes from one anchor path, never both Legacy surveys.
+    assert [len(obj) for obj in [*by_source, *matched]] == [439, 585, 731, 259, 1427, 1573]
     collator = PackedCollator(config, seq_len=4096)
-    batch = collator(objects * 3)
+    batch = collator(matched * 3)
     ids = batch["input_ids"]
     assert ids.shape == (3, 4096)
-    assert (ids != PAD_ID).sum().item() / ids.numel() == pytest.approx(4025 / 4096)
+    assert (ids != PAD_ID).sum(dim=1).tolist() == [3000] * 3
     flat = flatten_packed_batch(collator([by_source[0]]), config, 4096)
     assert flat["legacy_north_g_values"].shape == (144, 64)
     assert not flat["legacy_south_g_mask"].any()

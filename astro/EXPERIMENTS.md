@@ -544,6 +544,16 @@ The two v3 runs differ only in loader stalls: non-stalled window time was
 run attributed 19.1 of 62.9 GiB returned payload to DESI, the first live
 check of DESI attribution.
 
+## Source-and-band packing probe (PR #65)
+
+A CPU probe targeted one weighted North → South → South cycle of the 70M
+training recipe (one worker, train split, four partitions per chunk). A
+4 GiB cumulative download cap stopped the first North draw before any
+records were decoded. No object-length percentiles or live packing
+utilization were measured. Before comparing recipes, use the standard
+throughput benchmark with access to the live catalogs and report packing
+utilization together with the realized per-anchor object mix.
+
 ## Open items / not pursued
 
 - **`chunk=2`**: not tested after the section-7 re-tune; the win at 4 was

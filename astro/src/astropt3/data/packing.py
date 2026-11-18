@@ -52,7 +52,7 @@ from ..tokenization import (
     patchify_spectrum,
     spiralise,
 )
-from .band_registry import RGB_CHANNELS, physical_normalize
+from .band_registry import RGB_CHANNELS, physical_normalize, validate_physical_bands
 from .scalar_registry import MISSING_SENTINELS, scalar_normalize
 from .spectral import spectral_normalize
 
@@ -160,6 +160,7 @@ class ObjectSequencer:
                 raise ValueError(f"RGB modality {name!r} requires channels {RGB_CHANNELS}; got {bands}")
             selected = slice(None)
         else:
+            validate_physical_bands(bands)
             band = mod.band
             if band is None or bands.count(band) != 1:
                 raise ValueError(f"image modality {name!r} needs exactly one {band!r} channel; got {bands}")
