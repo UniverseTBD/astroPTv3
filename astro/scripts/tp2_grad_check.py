@@ -109,6 +109,7 @@ def main():
         _use_doc_masking=True,
         log_attn_probs=False,
     )
+    config.modality("images")["pre_flow_noise_max"] = 0.4
     parallel_config = ParallelismArgs(
         dp=1,
         pp=1,
@@ -146,7 +147,7 @@ def main():
     model = cast(AstroPT3ForTraining, model)
     mark_tied_parameters(model=model, parallel_context=parallel_context)
     deterministic_init(model)
-    # frac=0 -> sigma = noise_max: the noise path must stay TP-identical
+    # At frac=0 both noise paths are active and must stay TP-identical.
     model.set_jet_noise_frac(0.0)
 
     replicated = {

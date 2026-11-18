@@ -110,6 +110,65 @@ def test_noise_curriculum_perturbs_train_only(single_band_config, jet_batch):
     assert torch.allclose(eval_a.loss, eval_b.loss)
 
 
+@pytest.mark.parametrize("training, frac, scale", [
+    (True, -0.1, 1.0),
+    (True, 1 / 3, 0.75),
+    (True, 1.0, 0.0),
+    (False, 0.0, 0.0),
+])
+def test_pre_flow_noise_scores_noisy_values(tiny_config, jet_batch, monkeypatch, training, frac, scale):
+    from astropt3 import AstroPT3Config, AstroPT3Model
+
+    modalities = [dict(m) for m in tiny_config.modalities]
+    sigma_max = 0.4
+    next(m for m in modalities if m["name"] == "images")["pre_flow_noise_max"] = sigma_max
+    config = AstroPT3Config.from_dict({
+        **tiny_config.to_dict(), "modalities": modalities, "jetformer_noise_max": 0.0,
+    })
+    model = AstroPT3Model(config).train(training)
+    # Make both the latent and the logdet depend on the flow input.
+    with torch.no_grad():
+        for name, param in model.flows["images"].named_parameters():
+            if name.endswith("out_proj.weight"):
+                param.normal_(std=0.02)
+    model.set_jet_noise_frac(frac)
+    images = jet_batch["modality_values"]["images"]
+    original = images.clone()
+    draws = []
+
+    def fixed_noise(values):
+        draws.append(values)
+        return torch.ones_like(values)
+
+    monkeypatch.setattr(torch, "randn_like", fixed_noise)
+    with torch.no_grad():
+        actual = model(**jet_batch)
+        # Score explicitly perturbed data with the curriculum disabled.
+        model.set_jet_noise_frac(1.0)
+        noisy_batch = {
+            **jet_batch,
+            "modality_values": {**jet_batch["modality_values"], "images": images + sigma_max * scale},
+        }
+        expected = model(**noisy_batch)
+    assert len(draws) == int(scale > 0)
+    if draws:
+        assert draws[0] is images
+    torch.testing.assert_close(actual.last_hidden_state, expected.last_hidden_state)
+    torch.testing.assert_close(actual.modality_losses, expected.modality_losses)
+    torch.testing.assert_close(images, original, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("name, sigma", [
+    ("images", -1.0), ("images", float("nan")), ("images", float("inf")), ("Z", 0.1),
+])
+def test_invalid_pre_flow_noise(tiny_config, name, sigma):
+    from dataclasses import replace
+
+    modality = tiny_config.modality_registry().get_config(name)
+    with pytest.raises(ValueError, match="pre_flow_noise_max"):
+        replace(modality, pre_flow_noise_max=sigma)
+
+
 def test_smoke_training_learns(single_band_config):
     """Local AdamW loop (astropt3.train_smoke is retired, ADR 0015)."""
     from astropt3.modeling_astropt3 import AstroPT3Model

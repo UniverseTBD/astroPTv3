@@ -41,6 +41,8 @@ class ModalityConfig:
         image_format: ``physical`` for one calibrated band, ``rgb`` for a display composite.
         image_crop: central crop side in pixels before patchify (0 keeps the
             whole image); 96 turns 152x152 survey cutouts into 144 patch-8 tokens.
+        pre_flow_noise_max: initial Gaussian sigma in normalized patch units,
+            cosine-annealed to zero during training. Zero disables it.
         ADR 0008 scalar modality (``family == "scalar"``) — a one-token span holding a
             physical quantity (Z, ebv, photometry). Scalars bypass the
             jetformer flow (their dims are odd and a flow buys nothing on a
@@ -67,13 +69,18 @@ class ModalityConfig:
     image_format: str = "physical"
     image_crop: int = 96
     categories: int = 0
+    pre_flow_noise_max: float = 0.0
 
     def __post_init__(self):
         if self.family not in {"image", "spectrum", "scalar"}:
             raise ValueError(
                 f"modality {self.name!r} has invalid family {self.family!r}"
             )
-
+        sigma = self.pre_flow_noise_max
+        if type(sigma) not in (int, float) or not math.isfinite(sigma) or sigma < 0:
+            raise ValueError(f"modality {self.name!r} pre_flow_noise_max must be finite and nonnegative")
+        if sigma and self.scalar:
+            raise ValueError(f"modality {self.name!r} pre_flow_noise_max is only for patch modalities")
         if type(self.input_size) is not int or self.input_size < 1:
             raise ValueError(f"modality {self.name!r} input_size must be a positive integer")
         if self.family != "scalar":
@@ -161,6 +168,7 @@ class ModalityConfig:
             **({"image_format": "rgb"} if self.image_format == "rgb" else {}),
             "image_crop": self.image_crop,
             "categories": self.categories,
+            "pre_flow_noise_max": self.pre_flow_noise_max,
         }
 
 

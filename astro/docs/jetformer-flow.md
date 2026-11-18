@@ -20,6 +20,32 @@ and one per spectrum source. `tests/test_jetformer_flow.py` enforces the
 width rule on every `configs/nanotron/*.yaml`. `scripts/count_params.py`
 reports the HF size configs' flows separately from the nominal-size check.
 
+## Noise curricula
+
+Set `pre_flow_noise_max` on individual entries in `modalities` (HF YAML) or
+`model.model_config.modalities` (Nanotron YAML) to opt in. For example, add
+`pre_flow_noise_max: 0.5` to the existing `hsc_images` entry. Omitted entries
+use zero. Scalars cannot opt in; leave spectra at zero unless using a
+separately calibrated spectral σ (noise also affects zero-filled bins).
+
+During training, independent Gaussian noise is added to normalized patch
+values before the flow, with `σ = pre_flow_noise_max · (1 + cos(π · step / train_steps)) / 2`.
+The same flow pass supplies the latents used for embedding and likelihood
+and the logdet used in the loss. Evaluation and generation always use clean
+inputs. `jetformer_noise_max` and `jetformer_noise_min` still control the
+independent linear latent-input noise; set both to zero for pre-flow only.
+
+Choose σ in each modality's normalized units. For calibrated images, estimate
+per-band noise on held-out blank-sky patches and pick a representative scale
+for the modality (a single σ is shared across bands). Don't reuse that σ
+for RGB scaled to [0, 1] or for spectra.
+
+For the [#52 ablation](https://github.com/UniverseTBD/astroPTv3/issues/52), hold
+the `isqm4s6c` recipe, seed, training horizon, and validation samples fixed.
+Compare latent-only (baseline), both together, and pre-flow-only runs. After
+σ reaches zero, compare clean total NLL, source vs. sky token NLL on fixed
+cutouts, and linear-probe and scalar-head metrics.
+
 ## Limits
 
 - CP=1 (asserted): the flow attends over whole object spans, which context

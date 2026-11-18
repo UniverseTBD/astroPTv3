@@ -44,7 +44,7 @@ from transformers.models.smollm3.modeling_smollm3 import (
 from transformers.utils.generic import ModelOutput
 
 from .configuration_astropt3 import AstroPT3Config
-from .flows import FlowCoupling, JetFormerFlow, flow_object_ids
+from .flows import FlowCoupling, JetFormerFlow, flow_object_ids, pre_flow_noise_scale
 from .modalities import (
     Encoder,
     CategoricalHead,
@@ -103,6 +103,9 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
             if registry.get_config(name).family == "scalar"
         }
         patch_names = [n for n in self.modality_names if n not in self.scalar_names]
+        self.pre_flow_noise_max = {
+            name: registry.get_config(name).pre_flow_noise_max for name in patch_names
+        }
         self.encoders = nn.ModuleDict(
             {
                 name: Encoder(config.hidden_size, registry.get_config(name).input_size)
@@ -230,36 +233,29 @@ class AstroPT3Model(SmolLM3PreTrainedModel):
         modality_masks = modality_masks or {}
         modality_positions = modality_positions or {}
 
-        # values -> flow -> latent z once, up front; z is both the embedded
-        # input and the GMM target, and logdet joins the loss. The noise
-        # curriculum perturbs only the embedded copy (training mode) — the
-        # GMM target z and the logdet stay clean.
+        # Flow the (optionally noisy) normalized values once for both the
+        # GMM target and logdet. Latent noise only affects the embedded copy.
         flow_logdets = {}
         embed_values = modality_values
         if modality_values and not values_are_latents:
-            flowed = {}
-            for name in self.modality_names:
-                # scalars bypass the flow: their raw normalized value is both
-                # the embedded input and the GMM target (ADR 0008)
-                if name not in modality_values or name in self.scalar_names:
+            modality_values = dict(modality_values)
+            embed_values = dict(modality_values)
+            pre_flow_scale = pre_flow_noise_scale(self.jet_noise_frac) if self.training else 0.0
+            latent_sigma = self._jet_noise_sigma() if self.training else 0.0
+            for name, flow in self.flows.items():
+                if name not in modality_values:
                     continue
-                flow = self.flows[name]
-                values = modality_values[name].to(next(flow.parameters()).dtype)
-                flowed[name], flow_logdets[name] = flow(
-                    values, modality_positions[name],
+                values = modality_values[name]
+                sigma = self.pre_flow_noise_max[name] * pre_flow_scale
+                if sigma > 0 and values.numel():
+                    values = values + sigma * torch.randn_like(values)
+                z, flow_logdets[name] = flow(
+                    values.to(next(flow.parameters()).dtype),
+                    modality_positions[name],
                     flow_object_ids(position_ids, modality_masks[name]),
                 )
-            modality_values = {**modality_values, **flowed}
-            embed_values = modality_values
-            sigma = self._jet_noise_sigma()
-            if self.training and sigma > 0:
-                embed_values = {
-                    **modality_values,
-                    **{
-                        name: z + sigma * torch.randn_like(z)
-                        for name, z in flowed.items()
-                    },
-                }
+                modality_values[name] = z
+                embed_values[name] = z + latent_sigma * torch.randn_like(z) if latent_sigma > 0 and z.numel() else z
 
         inputs_embeds = self.assemble_inputs_embeds(
             input_ids, embed_values, modality_masks, modality_positions
