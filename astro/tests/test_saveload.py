@@ -1,16 +1,21 @@
 import torch
 from legacy_fixture import record_stream
+from test_model import single_band_collator as single_band_collator
+from test_model import single_band_config as single_band_config
+from test_model import single_band_model as single_band_model
+from test_model import single_band_sequencer as single_band_sequencer
+from transformers import AutoConfig, AutoModel
 
 
-def test_save_load_roundtrip(tmp_path, tiny_model, sequencer, collator):
-    from transformers import AutoConfig, AutoModel
-
-    batch = collator([sequencer.build(r) for r in record_stream(2)])
+def test_save_load_roundtrip(
+    tmp_path, single_band_model, single_band_sequencer, single_band_collator
+):
+    batch = single_band_collator([single_band_sequencer.build(r) for r in record_stream(2)])
     with torch.no_grad():
-        before = tiny_model(**batch)
+        before = single_band_model(**batch)
 
     save_dir = tmp_path / "ckpt"
-    tiny_model.save_pretrained(save_dir)
+    single_band_model.save_pretrained(save_dir)
 
     config = AutoConfig.from_pretrained(save_dir)
     assert config.model_type == "astropt3"
@@ -20,12 +25,13 @@ def test_save_load_roundtrip(tmp_path, tiny_model, sequencer, collator):
         for modality in config.modalities
     )
     assert [m["name"] for m in config.modalities] == [
-        "images",
+        "legacy_north_g",
         "spectra",
         "Z",
         "ebv",
         "photometry",
     ]
+    assert config.modalities == single_band_model.config.modalities
 
     reloaded = AutoModel.from_pretrained(save_dir)
     reloaded.eval()

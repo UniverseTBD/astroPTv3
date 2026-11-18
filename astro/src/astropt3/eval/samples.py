@@ -10,22 +10,12 @@ Modes:
 - ``unconditional``:      sample every span the template has (jetformer only).
 - ``image-to-spectra``:   teacher-force the image tokens, sample the spectra
                           span (jetformer only).
-- ``spectra-to-images``:  teacher-force the spectra tokens, sample the image
-                          span; the template is built spectra-first so the
-                          image span attends back to the spectrum. Sound for
-                          any checkpoint trained under the always-on ADR 0005
-                          span-order rule; pre-rule fixed-order checkpoints
-                          never saw spectra-first sequences and sample
-                          garbage here.
-- ``reconstruct``:        one-step teacher-forced predictions for every span
-                          (works for affine checkpoints too).
+- ``spectra-to-images``:  teacher-force the spectra, then sample the image bands.
+- ``reconstruct``:        one-step teacher-forced predictions for every span.
 
-Both modalities are rendered through their physical inverse normalization
-(images: band-registry keyed by the record's bands, the checkpoint's own
-``image_norm_divisor`` knee; spectra: the DESI f_ν map with the checkpoint's
-``spectra_norm_divisor`` knee, ADR 0007) — exact for jetformer checkpoints,
-qualitative for affine ones (their sequencer's per-patch standardization
-discards each patch's mean/std).
+Physical image bands are rendered individually using their configured
+inverse normalization; display imagery stays RGB and spectra use the
+source-specific f_ν map.
 """
 
 import math
@@ -34,13 +24,14 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ..data.band_registry import physical_inverse
+from ..data.band_registry import RGB_CHANNELS, physical_inverse
 from ..data.packing import ObjectSequencer
 from ..data.spectral import spectral_inverse
 from ..generation import generate, reconstruct
 from ..tokenization import antispiralise, unpatchify_image, unpatchify_spectrum
 
-MODES = ("unconditional", "image-to-spectra", "spectra-to-images", "reconstruct")
+BAND_MODES = ("unconditional", "image-to-spectra", "spectra-to-images")
+MODES = (*BAND_MODES, "reconstruct")
 
 
 def _present_modalities(sequencer, record):
@@ -48,7 +39,7 @@ def _present_modalities(sequencer, record):
             if m.family != "scalar" and record.get(m.record_keys[0]) is not None]
 
 
-def build_template(sequencer, record: dict, mode: str):
+def build_template(sequencer, record: dict, mode: str, *, band: str | None = None):
     """The mode's template: pinned span order, no scalar spans.
 
     Explicit order (not the sequencer's shuffle) so the conditioning span
@@ -58,9 +49,18 @@ def build_template(sequencer, record: dict, mode: str):
     comparable with pre-0008 runs.
     """
     present = _present_modalities(sequencer, record)
+    if band is not None:
+        if mode not in BAND_MODES:
+            raise ValueError(f"band selection is not supported in {mode!r} mode")
+        if not any(m.name == band and m.band is not None for m in present):
+            raise ValueError(f"template has no image band {band!r}")
+        present = [m for m in present if m.name == band or (
+            mode != "unconditional" and m.family == "spectrum"
+        )]
     first_family = "spectrum" if mode == "spectra-to-images" else "image"
     present.sort(key=lambda m: m.family != first_family)
-    return sequencer.build(record, modality_order=[m.name for m in present], include_scalars=False)
+    order = [m.name for m in present]
+    return sequencer.build(record, modality_order=order, include_scalars=False, only_modalities=order)
 
 
 def save_image_png(
@@ -70,7 +70,7 @@ def save_image_png(
     truth: np.ndarray | None = None,
     truth_label: str = "truth",
 ):
-    """[n, C, H, W] -> one PNG grid (per-image normalized RGB).
+    """[n, C, H, W] -> a grayscale (C=1) or RGB (C=3) PNG grid.
 
     With ``truth`` [C, H, W] the ground-truth panel leads the grid.
     """
@@ -83,11 +83,9 @@ def save_image_png(
         1, len(panels), figsize=(3 * len(panels), 3.2), squeeze=False
     )
     for ax, (label, img) in zip(axes[0], panels, strict=True):
-        # The fourth South band is z, not an alpha channel: display z/r/g as RGB.
-        channels = img[[3, 1, 0]] if img.shape[0] == 4 else img[:3]
-        rgb = np.transpose(channels, (1, 2, 0))
-        lo, hi = np.percentile(rgb, [1, 99])
-        ax.imshow(np.clip((rgb - lo) / (hi - lo + 1e-8), 0, 1))
+        pixels = img[0] if img.shape[0] == 1 else img.transpose(1, 2, 0)
+        lo, hi = np.percentile(pixels, [1, 99])
+        ax.imshow(np.clip((pixels - lo) / (hi - lo + 1e-8), 0, 1), cmap="gray", vmin=0, vmax=1)
         ax.set_title(label, fontsize="small")
         ax.axis("off")
     fig.suptitle(title)
@@ -204,16 +202,14 @@ def render_sampled_tokens(
         mod = registry.get_config(name)
         if mod.family not in ("image", "spectrum"):
             continue  # scalar spans have no panel rendering
-        payload = record[mod.record_keys[0]]
         tokens = tokens.cpu().float()  # bf16 -> f32 so matplotlib/numpy can ingest
         png = out_dir / f"{name}_{tag}.png"
         if mod.family == "image":
-            bands = [str(band) for band in payload["band"]]
+            bands: list[str] = [*RGB_CHANNELS] if mod.band is None else [mod.band]
             patches_per_side = math.isqrt(tokens.shape[1])
             if patches_per_side**2 != tokens.shape[1]:
                 raise ValueError(f"{name} has a non-square patch count")
             side = patches_per_side * mod.patch_size
-            channels = mod.input_size // (mod.patch_size**2)
             # the checkpoint's own arcsinh knee, so the inverse matches
             # the normalization its training data went through
             divisor = model.config.image_norm_divisor
@@ -227,7 +223,7 @@ def render_sampled_tokens(
                 *,
                 spiral=spiral,
                 patch_size=mod.patch_size,
-                channels=channels,
+                channels=len(bands),
                 side=side,
             ):
                 return unpatchify_image(
@@ -246,7 +242,7 @@ def render_sampled_tokens(
                 imgs.numpy(), png, f"{name} {tag}", truth=truth, truth_label=truth_label
             )
         elif mod.family == "spectrum":
-            lam = np.asarray(payload["lambda"])
+            lam = np.asarray(record[mod.record_keys[0]]["lambda"])
             lam_t = torch.as_tensor(lam, dtype=torch.float32)
             # the checkpoint's own arcsinh knee, mirroring the image path
             divisor = model.config.spectra_norm_divisor
@@ -283,6 +279,7 @@ def sample_checkpoint(
     records: list[dict],
     *,
     modes: list[str] | None = None,
+    band: str | None = None,
     n: int = 4,
     temperature: float = 1.0,
     seed: int = 0,
@@ -308,7 +305,7 @@ def sample_checkpoint(
     dtype = torch.bfloat16 if str(device).startswith("cuda") else torch.float32
     model = AutoModel.from_pretrained(checkpoint).to(device=device, dtype=dtype).eval()
     if modes is None:
-        modes = default_modes(model.config)
+        modes = ["unconditional"] if band is not None else default_modes(model.config)
     sequencer = ObjectSequencer(model.config)
 
     pngs = {}
@@ -316,22 +313,14 @@ def sample_checkpoint(
         families = {m.family for m in _present_modalities(sequencer, record)}
         if not families:
             continue
-        # scalar-free, images-first reference template (ADR 0008)
-        template = build_template(sequencer, record, "unconditional")
         for mode in modes:
             if mode in ("image-to-spectra", "spectra-to-images") and not {"image", "spectrum"} <= families:
                 continue
-            # spectra-first skeleton for spectra-to-images; other modes keep
-            # the images-first template
-            mode_template = (
-                build_template(sequencer, record, mode)
-                if mode == "spectra-to-images"
-                else template
-            )
+            template = build_template(sequencer, record, mode, band=band)
             generator = torch.Generator(device=device).manual_seed(seed)
             sampled = sample_template(
                 model,
-                mode_template,
+                template,
                 mode,
                 n=n,
                 temperature=temperature,

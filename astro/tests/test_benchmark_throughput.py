@@ -165,7 +165,7 @@ def test_flop_capture_undoes_world_size_and_records_model_costs(monkeypatch):
     model_config = object()
     def modality_costs(config):
         assert config is model_config
-        return {"images": 123.0}
+        return {"legacy_north_g": 123.0}
     def flops(seconds, sequence, batch):
         assert (seconds, sequence, batch) == (1.0, 8, 1)
         return 2.0, 2.0
@@ -179,7 +179,7 @@ def test_flop_capture_undoes_world_size_and_records_model_costs(monkeypatch):
     )
     assert bench.capture_flop_estimate(trainer) == {
         "dtype": "torch.bfloat16", "backbone_flops_per_token": 1e12,
-        "modality_forward_flops_per_token": {"images": 123.0},
+        "modality_forward_flops_per_token": {"legacy_north_g": 123.0},
     }
 
 

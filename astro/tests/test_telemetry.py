@@ -11,9 +11,10 @@ from legacy_fixture import TINY_CATALOG_STREAM
 
 from astropt3.data import telemetry
 from astropt3.data.nanotron_loader import PackedMicroBatches
-from astropt3.tokenization import BOS_ID, PAD_ID
+from astropt3.tokenization import BOS_ID, PAD_ID, modality_token_ids
 
 MBS, SEQ_LEN = 2, 512
+NORTH_G_ID = modality_token_ids("legacy_north_g")[1]
 
 
 @pytest.fixture(autouse=True)
@@ -44,13 +45,11 @@ def test_source_attribution_covers_the_legacy_anchor():
 
 
 def test_step_counters_match_a_hand_computed_micro_batch():
-    input_ids = torch.tensor([[1, 3, 3, PAD_ID], [1, 3, PAD_ID, PAD_ID]])
+    input_ids = torch.tensor([[BOS_ID, NORTH_G_ID, NORTH_G_ID, PAD_ID], [BOS_ID, NORTH_G_ID, PAD_ID, PAD_ID]])
     flat = {
         "input_ids": input_ids,
-        "images_mask": torch.tensor(
-            [[False, True, True, False], [False, True, False, False]]
-        ),
-        "images_values": torch.zeros((3, 192)),
+        "legacy_north_g_mask": input_ids == NORTH_G_ID,
+        "legacy_north_g_values": torch.zeros((3, 64)),
         "spectra_mask": torch.zeros((2, 4), dtype=torch.bool),
         "spectra_values": torch.empty((0, 256)),
     }
@@ -62,8 +61,8 @@ def test_step_counters_match_a_hand_computed_micro_batch():
     assert record["tokens_total"] == 8
     assert record["tokens_nonpad"] == 5  # three pads
     assert record["utilisation_packing"] == pytest.approx(5 / 8)
-    assert record["loss_tokens"] == {"images": 3}  # absent modality contributes nothing
-    assert record["target_values"] == {"images": 3 * 192}
+    assert record["loss_tokens"] == {"legacy_north_g": 3}  # absent modality contributes nothing
+    assert record["target_values"] == {"legacy_north_g": 3 * 64}
     assert record["rows"] == 2  # one <|bos|> per packed row here
     assert record["rows_per_s"] == pytest.approx(2 / 0.25)
 
@@ -76,9 +75,9 @@ def test_step_counters_match_a_hand_computed_micro_batch():
 
 def test_counters_accumulate_across_the_micro_batches_of_one_step():
     flat = {
-        "input_ids": torch.tensor([[1, 3, PAD_ID, PAD_ID]]),
-        "images_mask": torch.tensor([[False, True, False, False]]),
-        "images_values": torch.zeros((1, 192)),
+        "input_ids": torch.tensor([[BOS_ID, NORTH_G_ID, PAD_ID, PAD_ID]]),
+        "legacy_north_g_mask": torch.tensor([[False, True, False, False]]),
+        "legacy_north_g_values": torch.zeros((1, 64)),
     }
     telemetry.observe_micro_batch(flat, wait_s=0.1)
     telemetry.observe_micro_batch(flat, wait_s=0.4)
@@ -86,14 +85,14 @@ def test_counters_accumulate_across_the_micro_batches_of_one_step():
     assert record["micro_batches"] == 2
     assert record["loader_wait_s"] == pytest.approx(0.5)
     assert record["tokens_nonpad"] == 4
-    assert record["loss_tokens"] == {"images": 2}
+    assert record["loss_tokens"] == {"legacy_north_g": 2}
     assert record["rows"] == 2  # one row per micro-batch, accumulated
     assert record["rows_per_s"] == pytest.approx(2 / 0.5)
 
 
 def test_rows_counts_galaxies_not_tensor_rows():
     """A packed row can hold several objects — ``rows`` must count objects."""
-    input_ids = torch.tensor([[BOS_ID, 3, BOS_ID, 3, PAD_ID]])
+    input_ids = torch.tensor([[BOS_ID, NORTH_G_ID, BOS_ID, NORTH_G_ID, PAD_ID]])
     flat = {"input_ids": input_ids}
     telemetry.observe_micro_batch(flat, wait_s=1.0)
     record = telemetry.drain_step()

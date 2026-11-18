@@ -64,13 +64,29 @@ def test_training_rejects_retired_selection(tmp_path, default_recipe, crossmatch
 
 
 def test_default_recipe_keeps_reserved_modality_tokens(default_recipe):
-    modalities = default_recipe["model"]["model_config"]["modalities"]
-    assert {m["name"]: m["token_ids"] for m in modalities[:5]} == {
-        "images": [2, 3, 4], "spectra": [5, 6, 7],
-        "sdss_spectra": [17, 18, 19], "hsc_images": [20, 21, 22], "galaxies": [23, 24, 25],
-    }
-    assert len(modalities) == 15 and all(m["family"] == "scalar" for m in modalities[5:-1])
-    assert modalities[-1]["token_ids"] == [53, 54, 55]
+    model = default_recipe["model"]["model_config"]
+    modalities = {m["name"]: m for m in model["modalities"]}
+    assert model["vocab_size"] == 256
+    assert modalities["spectra"]["token_ids"] == [5, 6, 7]
+    assert modalities["sdss_spectra"]["token_ids"] == [17, 18, 19]
+    rgb = modalities["galaxies"]
+    assert rgb["image_format"] == "rgb" and "band" not in rgb
+    assert rgb["token_ids"] == [23, 24, 25]
+    assert (rgb["input_size"], rgb["patch_size"], rgb["max_positions"], rgb["image_crop"]) == (768, 16, 256, 0)
+    for source, key, prefix, bands, first_id in (
+        ("legacy_north", "image", "des", "grz", 160),
+        ("legacy_south", "legacy_south_image", "des", "griz", 169),
+        ("hsc", "hsc_image", "hsc", "grizy", 181),
+    ):
+        for index, band in enumerate(bands):
+            modality = modalities[f"{source}_{band}"]
+            begin = first_id + 3 * index
+            assert modality["token_ids"] == [begin, begin + 1, begin + 2]
+            assert modality["source"] == source and modality["record_keys"] == [key]
+            assert modality["band"] == f"{prefix}-{band}"
+            assert (modality["input_size"], modality["patch_size"], modality["max_positions"]) == (64, 8, 144)
+    assert sum(m["family"] == "scalar" for m in modalities.values()) == 9
+    assert len(modalities) == 24
 
 
 def test_training_caps_loader_workers_on_one_gpu(tmp_path, default_recipe):
@@ -84,7 +100,7 @@ def test_prepare_config_preserves_recipe_modalities_horizon_and_workers(tmp_path
     modalities = default_recipe["model"]["model_config"]["modalities"][:count]
     for index, modality in enumerate(modalities):
         modality["name"] = f"survey_{index}"
-        modality["token_ids"] = list(range(23 + 3 * index, 26 + 3 * index))
+        modality.pop("token_ids")
     default_recipe["model"]["model_config"]["modalities"] = modalities
     default_recipe["tokens"]["train_steps"] = 123
     default_recipe["data_stages"][0]["data"]["num_loading_workers"] = 2
@@ -207,7 +223,7 @@ def test_spawned_worker_includes_hsc(monkeypatch, default_recipe):
         }),
         model_config=SimpleNamespace(**config["model"]["model_config"]),
         micro_batch_size=1,
-        sequence_length=512,
+        sequence_length=1536,
         dp_rank=0,
         num_workers=1,
         multiprocessing_context="spawn",
@@ -215,9 +231,10 @@ def test_spawned_worker_includes_hsc(monkeypatch, default_recipe):
     iterator = iter(batches)
     try:
         batch = next(iterator)
-        assert batch["input_ids"].shape == (1, 512)
-        assert batch["hsc_images_values"].shape == (144, 320)
-        assert int((batch["input_ids"] == 21).sum()) == 144
+        assert batch["input_ids"].shape == (1, 1536)
+        for band, token in zip("grizy", range(182, 195, 3), strict=True):
+            assert batch[f"hsc_{band}_values"].shape == (144, 64)
+            assert int((batch["input_ids"] == token).sum()) == 144
         assert all(
             torch.isfinite(value).all()
             for key, value in batch.items()
@@ -301,7 +318,7 @@ def test_resume_normalizes_modalities_and_preserves_legacy_checkpoint(
 ):
     model = default_recipe["model"]["model_config"]
     model["modalities"] = model["modalities"][:count]
-    model["modalities"][0].update(name="legacy_patches", token_ids=[23, 24, 25])
+    model["modalities"][0].update(name="legacy_patches", token_ids=[56, 57, 58])
     saved = copy.deepcopy(model)
     registry = run.loader.hf_config_from_modalities(model["modalities"]).modality_registry()
     saved["modalities"] = list(reversed(registry.to_list()))
@@ -320,15 +337,19 @@ def test_resume_normalizes_modalities_and_preserves_legacy_checkpoint(
 
 @pytest.mark.parametrize("field,value", [
     ("missing", None), ("name", "renamed"), ("token_ids", [56, 57, 58]),
-    ("source", "different-survey"), ("input_size", 384), ("pos_input_size", 2),
+    ("source", "different-survey"), ("input_size", 384), ("pos_input_size", 2), ("band", "des-r"),
 ])
 def test_resume_rejects_generic_modality_mismatches(tmp_path, default_recipe, field, value):
     model = default_recipe["model"]["model_config"]
+    if field == "band":
+        # Exercise a valid config mismatch, not rejection of a fixed marker's identity.
+        model["modalities"][0].update(name="custom_band", token_ids=[56, 57, 58])
     saved = copy.deepcopy(model)
     if field == "missing":
         saved["modalities"].pop(0)
     else:
-        saved["modalities"][2][field] = value
+        name = "custom_band" if field == "band" else "sdss_spectra"
+        next(m for m in saved["modalities"] if m["name"] == name)[field] = value
     write_resume(tmp_path, saved)
     with pytest.raises(ValueError, match="Checkpoint modalities differ"):
         run.validate_resume(tmp_path, model)
@@ -532,7 +553,9 @@ def echo_batch(default_recipe):
     """Multiple objects per row, unequal spans, four surveys and absent modalities."""
     from astropt3.data.packing import ObjectSequencer, PackedCollator
 
-    hf = run.loader.hf_config_from_modalities(default_recipe["model"]["model_config"]["modalities"][:4])
+    names = {"legacy_north_g", "spectra", "sdss_spectra", "hsc_g"}
+    modalities = default_recipe["model"]["model_config"]["modalities"]
+    hf = run.loader.hf_config_from_modalities([m for m in modalities if m["name"] in names])
     full = make_record(1, image_only_fraction=0.0)
     full.update(spectrum_sdss=sdss_spectrum(), hsc_image=hsc_image())
     records = [
@@ -591,7 +614,7 @@ def test_echo_runs_independent_model_optimizer_updates(echo_batch, tiny_config, 
         sequence = ObjectSequencer(config).build({"object_id": "hsc-only", "hsc_image": hsc_image()})
         batch = run.loader.flatten_packed_batch(PackedCollator(config, seq_len=512)([sequence]), config, 512)
     model = AstroPT3Model(AstroPT3Config(**{
-        **tiny_config.to_dict(), "modalities": config.modalities,
+        **tiny_config.to_dict(), "modalities": config.modalities, "vocab_size": config.vocab_size,
     })).train()
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-4)
     snapshots = []
@@ -603,10 +626,10 @@ def test_echo_runs_independent_model_optimizer_updates(echo_batch, tiny_config, 
         optimizer.zero_grad()
         result = model(**run.loader.regroup_micro_batch(moved, config.modality_registry().names()))
         assert torch.isfinite(result.loss)
-        assert set(result.modality_losses) == ({"hsc_images"} if hsc_only else set(config.modality_registry().names()))
+        assert set(result.modality_losses) == ({"hsc_g"} if hsc_only else set(config.modality_registry().names()))
         torch.testing.assert_close(result.loss, torch.stack(list(result.modality_losses.values())).mean())
         result.loss.backward()
-        for module in (model.flows["hsc_images"], model.decoders["hsc_images"]):
+        for module in (model.flows["hsc_g"], model.decoders["hsc_g"]):
             assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in module.parameters())
         optimizer.step()
         snapshots.append(next(model.parameters()).detach().clone())
@@ -685,9 +708,10 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(
     source_record.update(spectrum_sdss=sdss_spectrum(), hsc_image=hsc_image())
     config_args = []
     if custom_config:
-        modalities = default_recipe["model"]["model_config"]["modalities"][:2]
+        modalities = default_recipe["model"]["model_config"]["modalities"]
+        modalities = [m for m in modalities if m["name"] in {"legacy_north_g", "spectra"}]
         for index, name in enumerate(("legacy_patches", "desi_flux")):
-            modalities[index].update(name=name, token_ids=list(range(23 + 3 * index, 26 + 3 * index)))
+            modalities[index].update(name=name, token_ids=list(range(56 + 3 * index, 59 + 3 * index)))
         default_recipe["model"]["model_config"]["modalities"] = modalities
         default_recipe["tokens"]["train_steps"] = 123
         default_recipe["logging"]["iteration_step_info_interval"] = 10
@@ -751,7 +775,7 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(
 
     def get_dataloader(trainer):
         return {"stage": run.loader.build_astropt3_dataloader(
-            trainer.dataset_args, trainer.model_config, 1, 512, 0,
+            trainer.dataset_args, trainer.model_config, 1, 1536, 0,
             num_workers=0, multiprocessing_context=None,
         )}
 

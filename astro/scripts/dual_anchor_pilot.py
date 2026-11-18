@@ -14,7 +14,7 @@ from huggingface_hub import HfFileSystem
 from astropt3.config_io import load_model_config
 from astropt3.configuration_astropt3 import (
     DEFAULT_MODALITIES,
-    LEGACY_SOUTH_IMAGES,
+    LEGACY_SOUTH_MODALITIES,
     AstroPT3Config,
 )
 from astropt3.data import telemetry
@@ -57,7 +57,8 @@ def train(out, arm):
     torch.manual_seed(58)
     tiny, _ = load_model_config(Path(__file__).resolve().parents[1] / 'configs/model/test-tiny.yaml')
     arch = tiny.to_dict()
-    arch.update(modalities=[DEFAULT_MODALITIES[0], LEGACY_SOUTH_IMAGES])
+    north_bands = DEFAULT_MODALITIES[:3]
+    arch.update(modalities=north_bands + LEGACY_SOUTH_MODALITIES, vocab_size=None)
     config = AstroPT3Config.from_dict(arch)
     model = AstroPT3Model(config)
     digest = hashlib.sha256()
@@ -66,14 +67,15 @@ def train(out, arm):
     print('initial_weights_sha256', digest.hexdigest(), 'parameters', sum(p.numel() for p in model.parameters()))
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
     sequencer = ObjectSequencer(config)
-    pack = PackedCollator(config, seq_len=320)
+    pack = PackedCollator(config, seq_len=640)
     objects = {}
     began = perf_counter()
     for side in SAMPLE:
         rows = pq.read_table(out / f'{side}.parquet').slice(0, 10).to_pylist()
         north = side == 'north'
-        source = 'legacy' if north else LEGACY_SOUTH_IMAGES['source']
-        key = 'image' if north else LEGACY_SOUTH_IMAGES['record_keys'][0]
+        modality = north_bands[0] if north else LEGACY_SOUTH_MODALITIES[0]
+        source = modality['source']
+        key, = modality['record_keys']
         decode = decode_legacy_image if north else decode_legacy_south_image
         objects[side] = [sequencer.build({'object_id': f"{source}:{r['object_id']}", key: decode(r['image'])}) for r in rows]
         assert len({o.object_id for o in objects[side]}) == 10
@@ -96,7 +98,7 @@ def train(out, arm):
         start = perf_counter()
         batch = pack(draw)
         wait = perf_counter() - start
-        telemetry.observe_micro_batch(flatten_packed_batch(batch, config, 320), wait)
+        telemetry.observe_micro_batch(flatten_packed_batch(batch, config, pack.seq_len), wait)
         metrics = telemetry.drain_step()
         assert metrics['rows'] == 2 and metrics['tokens_nonpad'] == sum(map(len, draw))
         output = model(**batch)

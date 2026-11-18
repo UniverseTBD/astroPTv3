@@ -1,6 +1,6 @@
 # Legacy Survey DR10 South: decoder contract (#58)
 
-**South has its own image modality.** `legacy_south_images` consumes `legacy_south_image` (decoder `decode_legacy_south_image`, source `legacy_south`), not North's `images` / `image`. South is a DECam **g,r,i,z** cube; the released North block `[2,3,4]` describes **g,r,z**. Identical flux units do not make their fused patch vectors interchangeable. `LEGACY_SOUTH_IMAGES` in `configuration_astropt3.py` gives South `[53,54,55]` (begin, placeholder, end), unused by the 70M recipe at `54b7093`. Both fit a 64-row vocabulary. No existing IDs or default modalities change. HF and nanotron configs must carry the same explicit modality; its new encoder, positions, flow and prediction head require training, not reinterpretation of North weights.
+**South has its own filter categories.** `legacy_south_{g,r,i,z}` select planes from `legacy_south_image` (decoder `decode_legacy_south_image`) by band label. Each has its own token block and model modules, distinct from the corresponding North bands. See [the image token contract](architecture.md#image-categories-and-checkpoints).
 
 ## What is actually on disk?
 
@@ -19,7 +19,7 @@ Row 0 has 13,820 true mask pixels per band out of 25,600, with positive ivar eve
 
 ## Decode and pack
 
-Project `image.{band,flux,mask,ivar,scale}`. Reject unexpected bands/order, shape, nonboolean mask or wrong scale. A usable pixel is `mask & isfinite(flux) & isfinite(ivar) & (ivar > 0)`. Bad values are replaced with zero before normalization and carried in a **separate** `fill_mask` (True = fill); a valid zero or negative flux is a measurement. The sequencer crops flux and mask together (`[32:128,32:128]`), applies the checkpoint's physical band normalization (identity rescale, bright clamp, `asinh(flux / image_norm_divisor)`), and uses the existing deterministic channel-noise fill only on invalid pixels. Ivar gates coverage; it does not reweight the loss. North keeps its existing zero-as-no-data behavior. Fused patch-8 yields 144 tokens of 256 floats plus delimiters and BOS, **147** tokens for a South-only image record; no fourth-band truncation or crop-policy change.
+Project `image.{band,flux,mask,ivar,scale}`. Reject unexpected bands/order, shape, nonboolean mask or wrong scale. A usable pixel is `mask & isfinite(flux) & isfinite(ivar) & (ivar > 0)`. Bad values are replaced with zero before normalization and carried in a **separate** `fill_mask` (True = fill); a valid zero or negative flux is a measurement. The sequencer crops flux and mask together (`[32:128,32:128]`), applies the checkpoint's physical band normalization (identity rescale, bright clamp, `asinh(flux / image_norm_divisor)`), and uses the existing deterministic channel-noise fill only on invalid pixels. Ivar gates coverage; it does not reweight the loss. North keeps its existing zero-as-no-data behavior. Each filter yields 144 patch-8 tokens of 64 floats and two delimiters, for **585** tokens in a South-only image record including BOS.
 
 ## Selection and scalar quality
 

@@ -2,7 +2,7 @@
 
 Per object (only the modalities present):
 
-    <|bos|> <|begin_images|> p0 ... p360 <|end_images|>
+    <|bos|> <|begin_legacy_north_g|> p0 ... p143 <|end_legacy_north_g|>
             <|begin_spectra|> s0 ... s30 <|end_spectra|>
             <|begin_Z|> z <|end_Z|> ...
 
@@ -36,6 +36,7 @@ from __future__ import annotations
 import math
 import random
 import zlib
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
@@ -51,7 +52,7 @@ from ..tokenization import (
     patchify_spectrum,
     spiralise,
 )
-from .band_registry import physical_normalize
+from .band_registry import RGB_CHANNELS, physical_normalize, validate_physical_bands
 from .scalar_registry import MISSING_SENTINELS, scalar_normalize
 from .spectral import spectral_normalize
 
@@ -153,61 +154,43 @@ class ObjectSequencer:
     def _image_tokens(self, name: str, record: dict, seed: int = 0):
         mod = self.registry.get_config(name)
         image = record[mod.record_keys[0]]
-        flux = torch.as_tensor(image["flux"], dtype=torch.float32)
-        # central crop: 152x152 survey cutouts -> 96x96 (144 patch-8 tokens);
-        # JWST cubes are already 96x96 and pass through untouched
+        bands = [str(band) for band in image["band"]]
+        if mod.image_format == "rgb":
+            if tuple(bands) != RGB_CHANNELS:
+                raise ValueError(f"RGB modality {name!r} requires channels {RGB_CHANNELS}; got {bands}")
+            selected = slice(None)
+        else:
+            validate_physical_bands(bands)
+            band = mod.band
+            if band is None or bands.count(band) != 1:
+                raise ValueError(f"image modality {name!r} needs exactly one {band!r} channel; got {bands}")
+            channel = bands.index(band)
+            selected = slice(channel, channel + 1)
+        cube = torch.as_tensor(image["flux"])
+        if cube.ndim != 3 or cube.shape[0] != len(bands):
+            raise ValueError(f"image modality {name!r} has inconsistent flux shape and band labels")
+        flux = cube[selected].to(torch.float32)
+        fill = None
+        if "fill_mask" in image:
+            mask = torch.as_tensor(image["fill_mask"], dtype=torch.bool)
+            if mask.shape != cube.shape:
+                raise ValueError(f"image modality {name!r} has inconsistent flux and fill_mask shapes")
+            fill = mask[selected]
         h, w = flux.shape[-2:]
         crop = mod.image_crop  # 0 keeps the whole image
-        fill = torch.as_tensor(image["fill_mask"]) if "fill_mask" in image else None
         if crop and (h > crop or w > crop):
-            top = (h - crop) // 2
-            left = (w - crop) // 2
+            top = max(0, (h - crop) // 2)
+            left = max(0, (w - crop) // 2)
             region = (..., slice(top, top + crop), slice(left, left + crop))
             flux = flux[region]
             if fill is not None:
                 fill = fill[region]
-        # may arrive as a list or an array after a parquet round-trip
-        bands = [str(b) for b in image["band"]]
-        flux = physical_normalize(
-            flux, bands, divisor=self.image_norm_divisor
-        )
+        flux = physical_normalize(flux, bands[selected], divisor=self.image_norm_divisor)
         # Use the published pixel validity when available; do not erase measured zeros.
         flux = noise_fill(flux, flux == 0 if fill is None else fill, seed)
-        if mod.channel_tokenization == "per_band":
-            return self._per_band_tokens(mod, flux, bands)
         patches = patchify_image(flux, mod.patch_size)
         if self.spiral:
             patches = spiralise(patches)
-        positions = torch.arange(len(patches), dtype=torch.long)
-        return patches, positions
-
-    def _per_band_tokens(self, mod, flux: torch.Tensor, bands: list[str]):
-        """ADR 0014 §8: one token per patch PER band, band-major.
-
-        The same 27,648 target values as the fused path, factorised 3x finer:
-        144 x 192 becomes 432 x 64 for a Legacy crop. Cross-band structure is
-        then learned autoregressively instead of pre-fused, and the position
-        index runs across the whole concatenation, so a token's band is
-        implied by ``position // patches_per_band``.
-
-        Band order is FIXED by config (never shuffled) — one variable at a
-        time, per §8 — and a record missing a named band raises rather than
-        silently shifting every subsequent band's positions.
-        """
-        missing = [band for band in mod.band_order if band not in bands]
-        if missing or sorted(bands) != sorted(mod.band_order):
-            raise ValueError(
-                f"modality {mod.name!r} needs exactly {list(mod.band_order)} for "
-                f"per-band tokenisation; record has {bands} (missing {missing})"
-            )
-        per_band = []
-        for band in mod.band_order:
-            channel = flux[bands.index(band)].unsqueeze(0)
-            patches = patchify_image(channel, mod.patch_size)
-            if self.spiral:
-                patches = spiralise(patches)
-            per_band.append(patches)
-        patches = torch.cat(per_band, dim=0)
         positions = torch.arange(len(patches), dtype=torch.long)
         return patches, positions
 
@@ -275,15 +258,19 @@ class ObjectSequencer:
         epoch: int = 0,
         modality_order: list[str] | None = None,
         include_scalars: bool = True,
+        only_modalities: Collection[str] | None = None,
     ) -> ObjectSeq:
         """``modality_order`` pins an explicit span order (generation
         templates, e.g. spectra-first for spectra-to-images); it must name
-        exactly the modalities the record carries. ``epoch`` seeds the span
+        exactly the modalities selected from the record (all present by default,
+        or restricted by ``only_modalities``). ``epoch`` seeds the span
         shuffle — training loaders pass their live epoch.
         ``include_scalars=False`` omits every scalar span (the linear probe
         must pool over sequences that cannot contain the target, ADR 0008)."""
         parts = {}
         for name in self.registry.names():
+            if only_modalities is not None and name not in only_modalities:
+                continue
             mod = self.registry.get_config(name)
             if mod.family == "scalar":
                 if include_scalars:

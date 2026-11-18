@@ -44,7 +44,7 @@ def test_evaluate_over_provided_batches_is_finite(tiny_model, tiny_config):
     batches = _batches(tiny_config)
     result = val_loss.evaluate(tiny_model, batches=batches)
     assert math.isfinite(result["loss"]) and result["n_batches"] == len(batches)
-    assert "images" in result["modality_losses"]
+    assert {"legacy_north_g", "legacy_north_r", "legacy_north_z"} <= result["modality_losses"].keys()
     with pytest.raises(ValueError, match="no validation batches"):
         val_loss.evaluate(tiny_model, batches=[])
 

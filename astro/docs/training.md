@@ -157,8 +157,8 @@ Resume needs a recipe whose modalities match the checkpoint's. The runner
 reads the checkpoint's saved YAML only for the echo factor; catalogs come from
 the launch YAML.
 
-Watch the logs: `lm_loss`, per-modality `images_loss` and (when DESI is
-included) `spectra_loss`, `tokens_per_sec_per_gpu`, `model_tflops_per_gpu`,
+Watch the logs: `lm_loss`, per-category losses such as `legacy_north_g_loss`
+and `spectra_loss`, `tokens_per_sec_per_gpu`, `model_tflops_per_gpu`,
 and memory lines. Exact-likelihood losses can be negative.
 
 ## 6. Evaluation status
@@ -176,8 +176,12 @@ python astro/scripts/generate.py --checkpoint <hf_dir> \
 ```
 
 The checkpoint's modalities must have compatible outputs in that recipe. One
-configured draw supplies templates, ordered by active modality count; `--rows`
-selects positions in that ordering. Catalogs are never inferred from the model.
+configured draw supplies templates. Ranking counts each image payload once,
+regardless of filter count; `--rows` selects positions in that ordering.
+Catalogs are never inferred from the model. Use `--band hsc_g` for an
+unconditional single-band sample, `--mode spectra-to-images --band hsc_g`
+to generate that band from spectra, or `--mode image-to-spectra --band hsc_g`
+to generate spectra from that band alone. The template must carry the selected source.
 
 ## 7. Verification gates
 

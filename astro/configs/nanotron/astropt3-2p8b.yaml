@@ -37,16 +37,15 @@ model:
     jetformer_flow_depth: 4
     jetformer_flow_heads: 8
     modalities:
-      - name: images
-        family: image
-        source: legacy
-        record_keys: [image]
-        token_ids: [2, 3, 4]
-        input_size: 192
-        patch_size: 8
-        pos_type: index
-        pos_input_size: 1
-        max_positions: 361
+      - {name: legacy_north_g, family: image, source: legacy_north,
+         record_keys: [image], band: des-g, token_ids: [160, 161, 162],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: legacy_north_r, family: image, source: legacy_north,
+         record_keys: [image], band: des-r, token_ids: [163, 164, 165],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: legacy_north_z, family: image, source: legacy_north,
+         record_keys: [image], band: des-z, token_ids: [166, 167, 168],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
       - name: spectra
         family: spectrum
         source: desi
@@ -67,20 +66,26 @@ model:
         pos_type: continuous
         pos_input_size: 1
         max_positions: 1024
-      - name: hsc_images
-        family: image
-        source: hsc
-        record_keys: [hsc_image]
-        token_ids: [20, 21, 22]
-        input_size: 320
-        patch_size: 8
-        pos_type: index
-        pos_input_size: 1
-        max_positions: 144
+      - {name: hsc_g, family: image, source: hsc,
+         record_keys: [hsc_image], band: hsc-g, token_ids: [181, 182, 183],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: hsc_r, family: image, source: hsc,
+         record_keys: [hsc_image], band: hsc-r, token_ids: [184, 185, 186],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: hsc_i, family: image, source: hsc,
+         record_keys: [hsc_image], band: hsc-i, token_ids: [187, 188, 189],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: hsc_z, family: image, source: hsc,
+         record_keys: [hsc_image], band: hsc-z, token_ids: [190, 191, 192],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: hsc_y, family: image, source: hsc,
+         record_keys: [hsc_image], band: hsc-y, token_ids: [193, 194, 195],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
       - name: galaxies
         family: image
         source: galaxies_with_hats
         record_keys: [galaxy_image]
+        image_format: rgb
         token_ids: [23, 24, 25]
         input_size: 768 # 16 * 16 * 3: 8-bit RGB PNG scaled to [0, 1]
         patch_size: 16
@@ -169,16 +174,18 @@ model:
         patch_size: 1
         pos_type: index
         max_positions: 1
-      - name: legacy_south_images
-        family: image
-        source: legacy_south
-        record_keys: [legacy_south_image]
-        token_ids: [53, 54, 55]
-        input_size: 256
-        patch_size: 8
-        image_crop: 96
-        pos_type: index
-        max_positions: 144
+      - {name: legacy_south_g, family: image, source: legacy_south,
+         record_keys: [legacy_south_image], band: des-g, token_ids: [169, 170, 171],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: legacy_south_r, family: image, source: legacy_south,
+         record_keys: [legacy_south_image], band: des-r, token_ids: [172, 173, 174],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: legacy_south_i, family: image, source: legacy_south,
+         record_keys: [legacy_south_image], band: des-i, token_ids: [175, 176, 177],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: legacy_south_z, family: image, source: legacy_south,
+         record_keys: [legacy_south_image], band: des-z, token_ids: [178, 179, 180],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
     spiral: true # center-outward image patch order (ADR 0004)
     hidden_size: 2048
     num_hidden_layers: 36
@@ -193,7 +200,7 @@ model:
     hidden_act: silu
     attention_bias: false
     initializer_range: 0.02
-    vocab_size: 64
+    vocab_size: 256
     pad_token_id: 0
     bos_token_id: 1
     eos_token_id: 1

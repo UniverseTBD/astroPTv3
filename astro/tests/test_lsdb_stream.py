@@ -35,7 +35,7 @@ def test_live_catalog_stream_decodes_and_selects(tiny_config, catalog_count):
     spec["worker_memory_limit"] = f"{WORKER_MEMORY_GIB}GiB"
     modalities = tiny_config.modalities
     if catalog_count == 1:
-        modalities = [m for m in modalities if m["source"] == "legacy"]
+        modalities = [m for m in modalities if m["source"] != "desi"]
     config = AstroPT3Config(modalities=modalities)
     stream = CatalogStream(spec, config)
     sequencer = ObjectSequencer(config)
@@ -54,6 +54,9 @@ def test_live_catalog_stream_decodes_and_selects(tiny_config, catalog_count):
                 assert record["spectrum"]["flux"].shape == (7781,)
             obj = sequencer.build(record)
             assert obj.input_ids[0] == 1
+            if "image" in record:
+                for band in "grz":
+                    assert obj.values[f"legacy_north_{band}"].shape == (144, 64)
             assert all(torch.isfinite(values).all() for values in obj.values.values())
             checked += 1
         assert checked == ROWS_TO_CHECK

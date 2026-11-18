@@ -90,7 +90,8 @@ BAND_REGISTRY: dict[str, tuple[float, float, float]] = {
 # (rgb-*), not by file format, since the encoding (PNG/JPG) is irrelevant once
 # decoded to pixels. Deliberately separate from BAND_REGISTRY: unknown bands
 # (e.g. euclid-*) must still raise, only these pass through.
-RAW_BANDS: frozenset[str] = frozenset({"rgb-r", "rgb-g", "rgb-b"})
+RGB_CHANNELS = ("rgb-r", "rgb-g", "rgb-b")
+RAW_BANDS = frozenset(RGB_CHANNELS)
 
 
 def rescale_factors(band: str) -> tuple[float, float]:
@@ -112,6 +113,15 @@ def clamp_flux(band: str) -> float:
     return 10 ** ((LEGACYSURVEY_REFERENCE_ZP - m_bright) / 2.5)
 
 
+def validate_physical_bands(bands: list[str]) -> None:
+    missing = [band for band in bands if band not in BAND_REGISTRY]
+    if missing:
+        raise NotImplementedError(
+            f"physical normalization not supported for bands {missing!r}; "
+            "add them to band_registry.BAND_REGISTRY"
+        )
+
+
 def physical_factors(
     bands: list[str],
     device: torch.device | None = None,
@@ -125,12 +135,7 @@ def physical_factors(
     ``NotImplementedError`` for any band without a physical entry (e.g.
     ``euclid-*``).
     """
-    missing = [b for b in bands if b not in BAND_REGISTRY]
-    if missing:
-        raise NotImplementedError(
-            f"physical normalization not supported for bands {missing!r}; "
-            "add them to band_registry.BAND_REGISTRY"
-        )
+    validate_physical_bands(bands)
     rescale = []
     clamp = []
     for b in bands:

@@ -18,6 +18,10 @@ from astropt3.configuration_astropt3 import DEFAULT_MODALITIES, AstroPT3Config
 from astropt3.data import catalog_stream as streaming
 from astropt3.data import nanotron_loader as loader
 from astropt3.data.packing import ObjectSequencer
+from astropt3.tokenization import antispiralise, patchify_image
+
+NORTH_BANDS = {f"legacy_north_{band}" for band in "grz"}
+HSC_BANDS = {f"hsc_{band}" for band in "grizy"}
 
 
 @pytest.mark.parametrize("count", [1, 4])
@@ -44,7 +48,7 @@ def test_real_lsdb_stream_decodes_local_catalogs(recipe, monkeypatch, count):
         record, = records
     name = spec['anchors'][0]['name']
     assert record["object_id"] == f"{name}:{name}-1"
-    assert len(ObjectSequencer(config).build(record).values) == count
+    assert set(ObjectSequencer(config).build(record).values) == {m["name"] for m in config.modalities}
 
 
 @pytest.fixture
@@ -103,7 +107,7 @@ def _row(spec, index=1):
         },
         "hsc_image": {
             "band": [f"hsc-{b}" for b in "grizy"],
-            "flux": np.broadcast_to(np.linspace(-0.2, 1, 160), (5, 160, 160)),
+            "flux": np.broadcast_to(np.linspace(-0.2, 1, 160), (5, 160, 160)) + np.arange(5)[:, None, None],
             "scale": np.full(5, 0.168),
         },
         "rgb_png": {"bytes": _png(index), "path": f"{index}.png"},
@@ -261,14 +265,14 @@ def test_configured_loader_preserves_alignment_across_echoes(recipe, offline):
     dataset_args = {**recipe["data_stages"][0]["data"]["dataset"], "catalog_stream": spec}
     batches = loader.build_astropt3_dataloader(
         SimpleNamespace(**dataset_args), config,
-        micro_batch_size=1, sequence_length=1024, dp_rank=0, num_workers=0,
+        micro_batch_size=1, sequence_length=1536, dp_rank=0, num_workers=0,
     )
     stream = batches.dataset.catalog_stream
     assert stream.spec == streaming.CatalogStream(spec, config).spec
     assert batches.dataset.echo_factor == 4
     row = _row(spec)
     expected = ObjectSequencer(config).build(_decode(stream, row))
-    assert len(expected.values) == 6
+    assert set(expected.values) == NORTH_BANDS | HSC_BANDS | {"spectra", "sdss_spectra", "Z", "ebv"}
     frame = nested_frame([row], tuple(stream.stars[0].nested))
     offline.frames = lambda: [frame]
     with closing(iter(batches)) as iterator:
@@ -278,7 +282,8 @@ def test_configured_loader_preserves_alignment_across_echoes(recipe, offline):
             assert batches.echo_factor == 4
             assert "_astropt3_echo" not in flat
             assert flat["input_ids"].device.type == "cpu"
-            assert flat["hsc_images_values"].shape == (144, 320)
+            for name in NORTH_BANDS | HSC_BANDS:
+                assert flat[f"{name}_values"].shape == (144, 64)
             for modality in config.modalities:
                 name = modality["name"]
                 mask = flat[f"{name}_mask"]
@@ -293,10 +298,10 @@ def test_configured_loader_preserves_alignment_across_echoes(recipe, offline):
 def test_recipe_and_shared_builder(recipe, offline):
     dataset_args = recipe["data_stages"][0]["data"]["dataset"]
     assert dataset_args["echo_factor"] == 4
-    assert len(recipe["model"]["model_config"]["modalities"]) == 14
+    assert len(recipe["model"]["model_config"]["modalities"]) == 20
     batches = loader.build_astropt3_dataloader(
         SimpleNamespace(**dataset_args), SimpleNamespace(**recipe["model"]["model_config"]),
-        micro_batch_size=1, sequence_length=1024, dp_rank=0, num_workers=0,
+        micro_batch_size=1, sequence_length=2048, dp_rank=0, num_workers=0,
     )
     expected = streaming.CatalogStream(dataset_args["catalog_stream"], batches.dataset.config).spec
     assert batches.dataset.catalog_stream.spec == expected
@@ -310,7 +315,8 @@ def test_recipe_and_shared_builder(recipe, offline):
             assert batches.echo_index == exposure
             assert batches.echo_factor == 4
             assert "_astropt3_echo" not in batch
-            assert batch["hsc_images_values"].shape == (144, 320)
+            for name in NORTH_BANDS | HSC_BANDS:
+                assert batch[f"{name}_values"].shape == (144, 64)
             assert batch["galaxies_values"].shape == (256, 768)
             assert batch["gwh_redshift_values"].shape == (1, 1)
     assert len(offline.streams) == 1
@@ -372,15 +378,15 @@ def test_optional_catalogs_and_right_only_identity(recipe, catalog_index, missin
     assert record['anchor'] == (None if catalog_index else catalog['name'])
     np.testing.assert_array_equal(record[catalog["record_key"]]["flux"],
                                   np.asarray(row[f"{payload}{suffix}"]["flux"], dtype=np.float32))
-    assert len(ObjectSequencer(config).build(record).values) == 1
+    assert set(ObjectSequencer(config).build(record).values) == {
+        m["name"] for m in config.modalities if m["record_keys"] == [catalog["record_key"]]
+    }
     selected[f"object_id{suffix}"] = missing
     with pytest.raises(ValueError, match="object_id"):
         _decode(stream, selected)
 
 
 def test_stream_retains_matched_and_unpaired_records(recipe, offline):
-    from astropt3.tokenization import antispiralise, patchify_image
-
     spec, config = _case(recipe)
     dataset = loader.PackedMicroBatches(config, 1, 4096, catalog_stream=spec)
     row = _row(spec)
@@ -398,16 +404,18 @@ def test_stream_retains_matched_and_unpaired_records(recipe, offline):
     ]
     sequences = [dataset.sequencer.build(record) for record in decoded]
     assert [set(sequence.values) for sequence in sequences] == [
-        {"images", "spectra", "sdss_spectra", "hsc_images"},
-        {"images"}, {"sdss_spectra"}, {"spectra"}, {"hsc_images"},
+        NORTH_BANDS | HSC_BANDS | {"spectra", "sdss_spectra"},
+        NORTH_BANDS, {"sdss_spectra"}, {"spectra"}, HSC_BANDS,
     ]
     raw = torch.tensor(row["image_hsc"]["flux"], dtype=torch.float32)[:, 32:128, 32:128]
     factor = 10 ** ((22.5 - 27.0) / 2.5) * (0.262 / 0.168) ** 2
-    expected = patchify_image(torch.asinh(raw * factor / 0.01), 8)
-    torch.testing.assert_close(antispiralise(sequences[-1].values["hsc_images"]), expected)
     flat = loader.flatten_packed_batch(dataset.collator(sequences), config, 4096)
-    assert flat["hsc_images_values"].shape == (288, 320)
-    assert int(flat["hsc_images_mask"].sum()) == 288
+    for band, plane in zip("grizy", raw, strict=True):
+        name = f"hsc_{band}"
+        expected = patchify_image(torch.asinh(plane[None] * factor / 0.01), 8)
+        torch.testing.assert_close(antispiralise(sequences[-1].values[name]), expected)
+        assert flat[f"{name}_values"].shape == (288, 64)
+        assert int(flat[f"{name}_mask"].sum()) == 288
     assert all(flat[f"{name}_mask"].any() for name in config.modality_registry().names())
     assert offline.closed == ["client", "cluster"]
 
@@ -422,7 +430,7 @@ def test_redshift_quality_gating(recipe, with_spectrum, flag):
     if not with_spectrum:
         catalog["decoder"] = "scalars"
         del catalog["record_key"]
-    config = AstroPT3Config(modalities=[*modalities, DEFAULT_MODALITIES[2]])
+    config = AstroPT3Config(modalities=[*modalities, *(m for m in DEFAULT_MODALITIES if m["name"] == "Z")])
     stream = streaming.CatalogStream(spec, config)
     row = _row(spec)
     if isinstance(flag, str):
@@ -450,12 +458,12 @@ def test_missing_redshift_catalog_does_not_claim_right_only_row(recipe):
     record = _decode(stream, {"object_id_hsc": "right-only", "image_hsc": row["image_hsc"]})
     assert record is not None
     assert record["object_id"] == "hsc:right-only"
-    assert set(ObjectSequencer(config).build(record).values) == {"hsc_images"}
+    assert set(ObjectSequencer(config).build(record).values) == HSC_BANDS
 
 
 def test_empty_and_no_active_records(recipe, offline):
     spec, config = _case(recipe)
-    config = AstroPT3Config(modalities=[config.modalities[2]])
+    config = AstroPT3Config(modalities=[m for m in config.modalities if m["name"] == "sdss_spectra"])
     stream = streaming.CatalogStream(spec, config)
     row = _row(spec)
     inactive = {"object_id": "inactive", "image": row["image"]}
@@ -500,7 +508,8 @@ def test_empty_and_no_active_records(recipe, offline):
 def test_invalid_configuration_fails_before_opening_catalogs(recipe, offline, target, patch, match):
     spec, config = _case(recipe)
     if target == "model":
-        config = AstroPT3Config(modalities=[{**config.modalities[2], **patch}])
+        sdss = next(m for m in config.modalities if m["name"] == "sdss_spectra")
+        config = AstroPT3Config(modalities=[{**sdss, **patch}])
     else:
         (spec if target == "stream" else spec["anchors"][0]).update(patch)
     with pytest.raises(ValueError, match=match):
@@ -525,10 +534,10 @@ def test_redshift_requires_quality_from_same_catalog(separate_flag):
     if separate_flag:
         catalogs.append({"name": "flags", "repo": "offline/flags", "decoder": "scalars",
                          "scalar_columns": {"ZWARN": "quality"}})
+    config = AstroPT3Config(modalities=[m for m in DEFAULT_MODALITIES if m["name"] == "Z"])
+    root, *partners = catalogs
     with pytest.raises(ValueError, match="ZWARN"):
-        root, *partners = catalogs
-        streaming.CatalogStream({"anchors": [{**root, "draw_weight": 1}], "catalogs": partners},
-                                AstroPT3Config(modalities=[DEFAULT_MODALITIES[2]]))
+        streaming.CatalogStream({"anchors": [{**root, "draw_weight": 1}], "catalogs": partners}, config)
 
 
 def test_per_catalog_join_overrides_stream_join(recipe, offline):
@@ -645,7 +654,9 @@ def test_galaxies_with_hats_png_scalars_and_sentinels(recipe):
     assert offsets.min() > -1e-4 and offsets.max() < 1 + 1e-4  # float32 rounding at the bin top
     assert 0.45 < offsets.mean() < 0.55 and offsets.std() > 0.25
     values = ObjectSequencer(config).build(record).values
-    assert values["galaxies"].shape == (256, 768)  # whole image (image_crop 0), raw [0, 1] pixels
+    tokens = values["galaxies"]
+    assert tokens.shape == (256, 768)
+    torch.testing.assert_close(antispiralise(tokens), patchify_image(torch.from_numpy(image["flux"]), 16))
     torch.testing.assert_close(values["gwh_redshift"], torch.log1p(torch.tensor([[0.1]])))
     assert "gwh_mass_med_photoz" not in values
     assert set(values) == {m["name"] for m in modalities} - {"gwh_mass_med_photoz"}

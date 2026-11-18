@@ -1,13 +1,13 @@
 """Sample a converted checkpoint using the same configured catalogs as training.
 
 Template records come from one draw of the explicit recipe's catalog_stream.
-Rows with more active modalities come first; --rows selects positions in that
-ordering. Sampling only produces spans actually present in the template.
+Rows with more active sources come first; --rows selects positions in that
+ordering. Each image payload counts once, regardless of filter count.
 A split-aware recipe draws validation templates unless --split train is set.
 
 Usage:
     uv run python scripts/generate.py --checkpoint <hf_dir> \
-        --config-file <training.yaml> [--mode reconstruct] [--n 4] \
+        --config-file <training.yaml> [--mode spectra-to-images] [--band hsc_g] [--n 4] \
         [--rows 0,1,2] [--stream-seed 0] [--seed 0] [--out generated] \
         [--wandb] [--wandb-run-id <id>]
 
@@ -36,22 +36,30 @@ def _draw_live_records(config, catalog_stream: dict, rows: list[int], stream_see
         _, records = next(draws)
         records = list(records)
     modalities = config.modality_registry().modalities.values()
-    records.sort(key=lambda record: sum(has_modality(m, record) for m in modalities), reverse=True)
+
+    def active_sources(record):
+        return len({("image", m.record_keys[0]) if m.family == "image" else (m.family, m.name)
+                    for m in modalities if has_modality(m, record)})
+
+    records.sort(key=active_sources, reverse=True)
     if max(rows) >= len(records):
         raise ValueError(f"drew {len(records)} usable rows, but --rows asked for index {max(rows)}")
     return [records[index] for index in rows]
 
 
 def main():
+    from astropt3.eval.samples import BAND_MODES, MODES, sample_checkpoint
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True, help="HF checkpoint dir")
     parser.add_argument("--config-file", required=True, type=Path, help="training YAML with explicit catalog_stream")
     parser.add_argument(
         "--mode",
-        choices=["unconditional", "image-to-spectra", "spectra-to-images", "reconstruct"],
+        choices=MODES,
         default=None,
-        help="default: every mode the checkpoint's tokeniser supports",
+        help="default: unconditional with --band; otherwise all supported sampling modes",
     )
+    parser.add_argument("--band", help="generate or condition on just this calibrated band, e.g. hsc_g")
     parser.add_argument("--n", type=int, default=4, help="samples to draw per mode")
     parser.add_argument("--temperature", type=float, default=1.0, help="scales GMM sigma")
     parser.add_argument("--seed", type=int, default=0, help="sampling RNG seed")
@@ -64,11 +72,10 @@ def main():
     parser.add_argument("--wandb", action="store_true", help="log sample figures to W&B")
     parser.add_argument("--wandb-run-id", default=None, help="append to an existing W&B run")
     args = parser.parse_args()
+    if args.band and args.mode is not None and args.mode not in BAND_MODES:
+        parser.error(f"--band requires one of: {', '.join(BAND_MODES)}")
 
     from transformers import AutoConfig
-
-    import astropt3  # noqa: F401 -- registers the Auto classes
-    from astropt3.eval.samples import sample_checkpoint
 
     try:
         rows = [int(index) for index in args.rows.split(",")]
@@ -88,6 +95,10 @@ def main():
         parser.error(f"Invalid rows or catalog configuration: {error}")
 
     config = AutoConfig.from_pretrained(args.checkpoint)
+    if args.band:
+        band = config.modality_registry().modalities.get(args.band)
+        if band is None or band.band is None:
+            parser.error(f"checkpoint has no image band {args.band!r}")
     records = _draw_live_records(config, spec, rows, args.stream_seed)
 
     out_dir = Path(args.out)
@@ -96,6 +107,7 @@ def main():
         args.checkpoint,
         records,
         modes=[args.mode] if args.mode else None,
+        band=args.band,
         n=args.n,
         temperature=args.temperature,
         seed=args.seed,

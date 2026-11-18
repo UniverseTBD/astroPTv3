@@ -42,6 +42,12 @@ _PROFILES = {
     # 8-bit RGB PNG/JPEG struct {bytes, path} (e.g. galaxies-with-hats); dequantized to (k + U(0,1)) / 255
     "rgb_png": ("image", (), "image"),
 }
+_IMAGE_SOURCE_DECODERS = {
+    "legacy_north": "legacy_image",
+    "legacy_south": "legacy_south_image",
+    "hsc": "hsc_image",
+    "galaxies_with_hats": "rgb_png",
+}
 # Catalogs whose identifier column is not ``object_id``.
 _ID_COLUMNS = {"rgb_png": "dr8_id"}
 # OS-seeded per process, so every DataLoader worker draws independent noise.
@@ -128,11 +134,16 @@ class _Star:
             modality = registry.get_config(name)
             if modality.family == "scalar":
                 _transforms(name)  # Reject uncalibrated scalars before opening catalogs.
+            decoder = None
+            if modality.family == "image":
+                decoder = _IMAGE_SOURCE_DECODERS.get(modality.source or "")
+            elif modality.family == "spectrum":
+                decoder = f"{modality.source}_spectrum"
             for key in modality.record_keys:
                 if key not in outputs or outputs[key][0] != modality.family:
                     raise ValueError(f"modality {name!r} has no compatible catalog output for {key!r}")
-                if modality.family == "spectrum" and outputs[key][1] != f"{modality.source}_spectrum":
-                    raise ValueError(f"modality {name!r} source disagrees with its spectrum decoder")
+                if decoder is not None and outputs[key][1] != decoder:
+                    raise ValueError(f"modality {name!r} source disagrees with its {modality.family} decoder")
             if name == "Z" and ("ZWARN" not in outputs or any(
                 outputs[key][2] != outputs["ZWARN"][2] for key in modality.record_keys
             )):
