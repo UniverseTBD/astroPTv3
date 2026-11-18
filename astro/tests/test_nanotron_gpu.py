@@ -248,11 +248,11 @@ def matched_models(nt):
     from astropt3 import AstroPT3Model
 
     nt_config = tiny_nt_config(nt, jetformer_flow_hidden=32)
-    nt_config.modality("images")["pre_flow_noise_max"] = 0.4
+    nt_config.modality("legacy_north_g")["pre_flow_noise_max"] = 0.4
     hf_config = nt.to_hf.get_hf_config(nt_config)
     assert hf_config.jetformer_flow_hidden == 32
-    assert hf_config.modality_registry().get_config("images").pre_flow_noise_max == 0.4
-    assert nt.from_hf.get_nanotron_config(hf_config).modality("images")["pre_flow_noise_max"] == 0.4
+    assert hf_config.modality_registry().get_config("legacy_north_g").pre_flow_noise_max == 0.4
+    assert nt.from_hf.get_nanotron_config(hf_config).modality("legacy_north_g")["pre_flow_noise_max"] == 0.4
     torch.manual_seed(0)
     hf_model = AstroPT3Model(hf_config)
     nt_model = build_nt_model(nt, nt_config)

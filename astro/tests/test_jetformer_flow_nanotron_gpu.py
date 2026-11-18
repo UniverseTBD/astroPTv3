@@ -40,7 +40,7 @@ def _trainer(tmp_path, resume=None):
         jetformer_noise_min=0.0,
     )
     next(
-        m for m in config["model"]["model_config"]["modalities"] if m["name"] == "hsc_images"
+        m for m in config["model"]["model_config"]["modalities"] if m["name"] == "hsc_g"
     )["pre_flow_noise_max"] = 0.5
     config["data_stages"] = pilot["data_stages"]  # parsed only: catalog streams are required, never opened
     config["tokens"].update(sequence_length=SEQ_LEN, micro_batch_size=2)
@@ -217,8 +217,8 @@ def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt,
     model.train()
     model.set_jet_noise_frac(next_frac)
     with torch.no_grad():
-        uninterrupted = model.model(**batch)["hsc_images_z"]
-    assert not torch.equal(uninterrupted, before["hsc_images_z"])
+        uninterrupted = model.model(**batch)["hsc_g_z"]
+    assert not torch.equal(uninterrupted, before["hsc_g_z"])
 
     # Construction must reconstruct buffers without reading them from checkpoint tensors.
     resumed = _trainer(tmp_path, resume=checkpoint)
@@ -228,7 +228,7 @@ def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt,
     loaded.train()
     loaded.set_jet_noise_frac(next_frac)
     with torch.no_grad():
-        torch.testing.assert_close(loaded.model(**batch)["hsc_images_z"], uninterrupted, rtol=0, atol=0)
+        torch.testing.assert_close(loaded.model(**batch)["hsc_g_z"], uninterrupted, rtol=0, atol=0)
     loaded.eval()
     assert resumed.init_checkpoint_path is not None
     assert resumed.metadata.last_train_step == 2

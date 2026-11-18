@@ -109,7 +109,7 @@ def main():
         _use_doc_masking=True,
         log_attn_probs=False,
     )
-    config.modality("images")["pre_flow_noise_max"] = 0.4
+    config.modality("legacy_north_g")["pre_flow_noise_max"] = 0.4
     parallel_config = ParallelismArgs(
         dp=1,
         pp=1,

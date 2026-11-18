@@ -110,7 +110,7 @@ def test_noise_curriculum_perturbs_train_only(single_band_config, jet_batch):
     assert torch.allclose(eval_a.loss, eval_b.loss)
 
 
-@pytest.mark.parametrize("modality, sigma_max", [("images", 0.4), ("spectra", 0.1)])
+@pytest.mark.parametrize("modality, sigma_max", [("legacy_north_g", 0.4), ("spectra", 0.1)])
 @pytest.mark.parametrize("training, frac, scale", [
     (True, -0.1, 1.0),
     (True, 1 / 3, 0.75),
@@ -118,14 +118,14 @@ def test_noise_curriculum_perturbs_train_only(single_band_config, jet_batch):
     (False, 0.0, 0.0),
 ])
 def test_pre_flow_noise_scores_noisy_values(
-    tiny_config, jet_batch, monkeypatch, modality, sigma_max, training, frac, scale,
+    single_band_config, jet_batch, monkeypatch, modality, sigma_max, training, frac, scale,
 ):
     from astropt3 import AstroPT3Config, AstroPT3Model
 
-    modalities = [dict(m) for m in tiny_config.modalities]
+    modalities = [dict(m) for m in single_band_config.modalities]
     next(m for m in modalities if m["name"] == modality)["pre_flow_noise_max"] = sigma_max
     config = AstroPT3Config.from_dict({
-        **tiny_config.to_dict(), "modalities": modalities, "jetformer_noise_max": 0.0,
+        **single_band_config.to_dict(), "modalities": modalities, "jetformer_noise_max": 0.0,
     })
     model = AstroPT3Model(config).train(training)
     # Make both the latent and the logdet depend on the flow input.
@@ -160,15 +160,18 @@ def test_pre_flow_noise_scores_noisy_values(
     torch.testing.assert_close(patches, original, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("backend", ["hf", "nanotron"])
 @pytest.mark.parametrize("name, sigma", [
-    ("images", -1.0), ("images", float("nan")), ("images", float("inf")), ("Z", 0.1),
+    ("legacy_north_g", -1.0), ("legacy_north_g", float("nan")),
+    ("legacy_north_g", float("inf")), ("Z", 0.1),
 ])
-def test_invalid_pre_flow_noise(tiny_config, name, sigma):
-    from dataclasses import replace
+def test_invalid_pre_flow_noise(single_band_config, backend, name, sigma):
+    from astropt3 import AstroPT3Config
 
-    modality = tiny_config.modality_registry().get_config(name)
+    config_cls = AstroPT3Config if backend == "hf" else pytest.importorskip("nanotron.config").AstroPT3Config
+    modality = next(m for m in single_band_config.modalities if m["name"] == name)
     with pytest.raises(ValueError, match="pre_flow_noise_max"):
-        replace(modality, pre_flow_noise_max=sigma)
+        config_cls(modalities=[{**modality, "pre_flow_noise_max": sigma}], vocab_size=256)
 
 
 def test_smoke_training_learns(single_band_config):
