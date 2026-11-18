@@ -55,7 +55,11 @@ def test_yaml_uses_current_modalities(path):
     raw = yaml.safe_load(path.read_text())
     assert Path(raw["checkpoints"]["checkpoints_path"]).name == f"{path.stem}-dual-anchor"
     model = raw["model"]["model_config"]
-    assert model["modalities"][: len(expected)] == expected
+    # Noise amplitude is a training setting, not part of the data contract.
+    assert [
+        {key: value for key, value in m.items() if key != "pre_flow_noise_max"}
+        for m in model["modalities"][: len(expected)]
+    ] == expected
     assert ModalityRegistry(model["modalities"][len(expected) :]).to_list() == (
         ModalityRegistry(LEGACY_SOUTH_MODALITIES).to_list()
     )
@@ -75,3 +79,13 @@ def test_yaml_uses_current_modalities(path):
         assert south["draw_weight"] == 2 and south["record_key"] == "legacy_south_image"
         assert stream == {**original, "anchors": [north, south]}
         CatalogStream(stream, config)
+
+
+def test_70m_recipe_uses_pre_flow_noise_on_images_and_spectra():
+    config = yaml.safe_load((CONTROL.parent.parent / "nanotron/astropt3-70m.yaml").read_text())["model"]["model_config"]
+    assert config["jetformer_noise_min"] == config["jetformer_noise_max"] == 0.0
+    assert {m["name"]: m["pre_flow_noise_max"] for m in config["modalities"] if "pre_flow_noise_max" in m} == {
+        **{f"legacy_north_{band}": 0.4 for band in "grz"},
+        **{f"hsc_{band}": 0.35 for band in "grizy"},
+        "galaxies": 0.04, "spectra": 0.1, "sdss_spectra": 0.1,
+    }

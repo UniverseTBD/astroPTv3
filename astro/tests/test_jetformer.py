@@ -110,30 +110,32 @@ def test_noise_curriculum_perturbs_train_only(single_band_config, jet_batch):
     assert torch.allclose(eval_a.loss, eval_b.loss)
 
 
+@pytest.mark.parametrize("modality, sigma_max", [("images", 0.4), ("spectra", 0.1)])
 @pytest.mark.parametrize("training, frac, scale", [
     (True, -0.1, 1.0),
     (True, 1 / 3, 0.75),
     (True, 1.0, 0.0),
     (False, 0.0, 0.0),
 ])
-def test_pre_flow_noise_scores_noisy_values(tiny_config, jet_batch, monkeypatch, training, frac, scale):
+def test_pre_flow_noise_scores_noisy_values(
+    tiny_config, jet_batch, monkeypatch, modality, sigma_max, training, frac, scale,
+):
     from astropt3 import AstroPT3Config, AstroPT3Model
 
     modalities = [dict(m) for m in tiny_config.modalities]
-    sigma_max = 0.4
-    next(m for m in modalities if m["name"] == "images")["pre_flow_noise_max"] = sigma_max
+    next(m for m in modalities if m["name"] == modality)["pre_flow_noise_max"] = sigma_max
     config = AstroPT3Config.from_dict({
         **tiny_config.to_dict(), "modalities": modalities, "jetformer_noise_max": 0.0,
     })
     model = AstroPT3Model(config).train(training)
     # Make both the latent and the logdet depend on the flow input.
     with torch.no_grad():
-        for name, param in model.flows["images"].named_parameters():
+        for name, param in model.flows[modality].named_parameters():
             if name.endswith("out_proj.weight"):
                 param.normal_(std=0.02)
     model.set_jet_noise_frac(frac)
-    images = jet_batch["modality_values"]["images"]
-    original = images.clone()
+    patches = jet_batch["modality_values"][modality]
+    original = patches.clone()
     draws = []
 
     def fixed_noise(values):
@@ -147,15 +149,15 @@ def test_pre_flow_noise_scores_noisy_values(tiny_config, jet_batch, monkeypatch,
         model.set_jet_noise_frac(1.0)
         noisy_batch = {
             **jet_batch,
-            "modality_values": {**jet_batch["modality_values"], "images": images + sigma_max * scale},
+            "modality_values": {**jet_batch["modality_values"], modality: patches + sigma_max * scale},
         }
         expected = model(**noisy_batch)
     assert len(draws) == int(scale > 0)
     if draws:
-        assert draws[0] is images
+        assert draws[0] is patches
     torch.testing.assert_close(actual.last_hidden_state, expected.last_hidden_state)
     torch.testing.assert_close(actual.modality_losses, expected.modality_losses)
-    torch.testing.assert_close(images, original, rtol=0, atol=0)
+    torch.testing.assert_close(patches, original, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("name, sigma", [
