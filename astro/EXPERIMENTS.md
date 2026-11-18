@@ -546,13 +546,22 @@ check of DESI attribution.
 
 ## Source-and-band packing probe (PR #65)
 
-A CPU probe targeted one weighted North → South → South cycle of the 70M
-training recipe (one worker, train split, four partitions per chunk). A
-4 GiB cumulative download cap stopped the first North draw before any
-records were decoded. No object-length percentiles or live packing
-utilization were measured. Before comparing recipes, use the standard
-throughput benchmark with access to the live catalogs and report packing
-utilization together with the realized per-anchor object mix.
+The first CPU probe used the 70M recipe's four partitions per draw and hit
+its 4 GiB download cap before decoding a record. A follow-up at `f9d0d3c`
+completed one live draw per anchor path, using one partition per draw, seed
+42, the training split, and the recipe's 16 × 4096 packer. The North draw
+was capped at 512 of 819 joined rows; all 261 South rows were used.
+
+| Anchor path (order-7 pixel) | Records (partner-only) | Nonpad / slots | Fill | Object length p95 / p99 |
+|---|---:|---:|---:|---:|
+| Legacy North (39606) | 512 (248) | 396,187 / 458,752 | 86.36% | 1169 / 1460 |
+| Legacy South (108789) | 261 (9) | 222,494 / 327,680 | 67.90% | 1315 / 1588 |
+
+Pooled fill was 78.67%, including padding in each draw's final batch.
+This is a live spot check, not a weighted production estimate or a
+throughput benchmark. Before merging #65, run a short 70M training pilot
+with the default four partitions per draw. Report packing fill, realized
+anchor mix, useful tokens/sec, and whether loss stays finite and trends down.
 
 ## Open items / not pursued
 
