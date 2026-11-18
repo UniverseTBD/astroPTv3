@@ -53,7 +53,8 @@ def test_dual_ownership_and_realized_cycle(monkeypatch):
 
 def test_healthy_anchor_does_not_reset_south_retries(monkeypatch):
     spec = {'anchors': [survey('north', 'ebv', 1), survey('south', 'south_value', 2)], 'catalogs': []}
-    catalog = stream.CatalogStream(spec, AstroPT3Config(modalities=[DEFAULT_MODALITIES[3]]))
+    config = AstroPT3Config(modalities=[m for m in DEFAULT_MODALITIES if m['name'] == 'ebv'])
+    catalog = stream.CatalogStream(spec, config)
     waits = []
 
     class South:

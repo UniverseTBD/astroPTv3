@@ -90,7 +90,8 @@ BAND_REGISTRY: dict[str, tuple[float, float, float]] = {
 # (rgb-*), not by file format, since the encoding (PNG/JPG) is irrelevant once
 # decoded to pixels. Deliberately separate from BAND_REGISTRY: unknown bands
 # (e.g. euclid-*) must still raise, only these pass through.
-RAW_BANDS: frozenset[str] = frozenset({"rgb-r", "rgb-g", "rgb-b"})
+RGB_CHANNELS = ("rgb-r", "rgb-g", "rgb-b")
+RAW_BANDS = frozenset(RGB_CHANNELS)
 
 
 def rescale_factors(band: str) -> tuple[float, float]:

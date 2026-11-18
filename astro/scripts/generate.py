@@ -7,7 +7,7 @@ A split-aware recipe draws validation templates unless --split train is set.
 
 Usage:
     uv run python scripts/generate.py --checkpoint <hf_dir> \
-        --config-file <training.yaml> [--mode reconstruct] [--n 4] \
+        --config-file <training.yaml> [--mode spectra-to-images] [--band hsc_g] [--n 4] \
         [--rows 0,1,2] [--stream-seed 0] [--seed 0] [--out generated] \
         [--wandb] [--wandb-run-id <id>]
 
@@ -50,8 +50,9 @@ def main():
         "--mode",
         choices=["unconditional", "image-to-spectra", "spectra-to-images", "reconstruct"],
         default=None,
-        help="default: every mode the checkpoint's tokeniser supports",
+        help="default: unconditional with --band; otherwise all supported sampling modes",
     )
+    parser.add_argument("--band", help="generate just this calibrated image band, e.g. hsc_g")
     parser.add_argument("--n", type=int, default=4, help="samples to draw per mode")
     parser.add_argument("--temperature", type=float, default=1.0, help="scales GMM sigma")
     parser.add_argument("--seed", type=int, default=0, help="sampling RNG seed")
@@ -64,6 +65,8 @@ def main():
     parser.add_argument("--wandb", action="store_true", help="log sample figures to W&B")
     parser.add_argument("--wandb-run-id", default=None, help="append to an existing W&B run")
     args = parser.parse_args()
+    if args.band and args.mode not in (None, "unconditional", "spectra-to-images"):
+        parser.error("--band requires unconditional or spectra-to-images mode")
 
     from transformers import AutoConfig
 
@@ -88,6 +91,10 @@ def main():
         parser.error(f"Invalid rows or catalog configuration: {error}")
 
     config = AutoConfig.from_pretrained(args.checkpoint)
+    if args.band:
+        band = config.modality_registry().modalities.get(args.band)
+        if band is None or band.band is None:
+            parser.error(f"checkpoint has no image band {args.band!r}")
     records = _draw_live_records(config, spec, rows, args.stream_seed)
 
     out_dir = Path(args.out)
@@ -96,6 +103,7 @@ def main():
         args.checkpoint,
         records,
         modes=[args.mode] if args.mode else None,
+        band=args.band,
         n=args.n,
         temperature=args.temperature,
         seed=args.seed,

@@ -4,6 +4,7 @@ import math
 
 import pytest
 import torch
+from test_model import single_band_config as single_band_config
 
 from astropt3.data.band_registry import (
     _DIV_FACTOR,
@@ -100,7 +101,7 @@ def test_non_default_divisor_changes_output_and_roundtrips():
     assert torch.allclose(back, flux, atol=1e-9)
 
 
-def test_sequencer_uses_config_divisor(tiny_config):
+def test_sequencer_uses_config_divisor(single_band_config):
     """config.image_norm_divisor must reach the sequencer's normalization."""
     from legacy_fixture import make_record
 
@@ -110,22 +111,18 @@ def test_sequencer_uses_config_divisor(tiny_config):
 
     record = make_record(3)
     moved_config = AstroPT3Config(
-        **{**tiny_config.to_dict(), "image_norm_divisor": 0.5}
+        **{**single_band_config.to_dict(), "image_norm_divisor": 0.5}
     )
     seq = ObjectSequencer(moved_config).build(record)
     flux = torch.as_tensor(record["image"]["flux"])
     h, w = flux.shape[-2:]
     top, left = (h - IMAGE_CROP) // 2, (w - IMAGE_CROP) // 2
-    flux = flux[..., top : top + IMAGE_CROP, left : left + IMAGE_CROP]
-    expected = patchify_image(
-        physical_normalize(flux, record["image"]["band"], divisor=0.5), 8
-    )
+    g = record["image"]["band"].index("des-g")
+    flux = flux[g : g + 1, top : top + IMAGE_CROP, left : left + IMAGE_CROP]
+    expected = patchify_image(physical_normalize(flux, ["des-g"], divisor=0.5), 8)
     # undo the config's spiral patch order before comparing to raster patchify
-    actual = (
-        antispiralise(seq.values["images"])
-        if getattr(moved_config, "spiral", False)
-        else seq.values["images"]
-    )
+    patches = seq.values["legacy_north_g"]
+    actual = antispiralise(patches) if moved_config.spiral else patches
     assert torch.allclose(actual, expected)
-    default_seq = ObjectSequencer(tiny_config).build(record)
-    assert not torch.allclose(seq.values["images"], default_seq.values["images"])
+    default_seq = ObjectSequencer(single_band_config).build(record)
+    assert not torch.allclose(patches, default_seq.values["legacy_north_g"])

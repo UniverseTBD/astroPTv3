@@ -11,7 +11,7 @@ import torch
 from astropt3 import AstroPT3Model
 from astropt3.configuration_astropt3 import (
     DEFAULT_MODALITIES,
-    LEGACY_SOUTH_IMAGES,
+    LEGACY_SOUTH_MODALITIES,
     AstroPT3Config,
 )
 from astropt3.data.nanotron_loader import (
@@ -59,15 +59,26 @@ def test_packed_south_preserves_measured_zeros_and_all_four_bands(tiny_config):
     with pytest.raises(ValueError, match="flux has shape"):
         decode_legacy_image(image)
 
-    config = AstroPT3Config(**{**tiny_config.to_dict(), "modalities": [DEFAULT_MODALITIES[0], LEGACY_SOUTH_IMAGES], "spiral": False})
+    config = AstroPT3Config(**{
+        **tiny_config.to_dict(), "modalities": [DEFAULT_MODALITIES[0], *LEGACY_SOUTH_MODALITIES],
+        "vocab_size": None, "spiral": False,
+    })
     sequencer = ObjectSequencer(config)
     record = {"object_id": "legacy_south:example", "legacy_south_image": decoded}
     obj = sequencer.build(record)
-    assert obj.input_ids.tolist() == [1, 53, *([54] * 144), 55]
-    tokens = obj.values["legacy_south_images"]
-    assert tokens.shape == (144, 256) and tokens.dtype == torch.float32
-    assert torch.equal(tokens, sequencer.build(record).values["legacy_south_images"])
-    pixels = unpatchify_image(tokens, 8, 4, 96)
+    ids = obj.input_ids.tolist()
+    repeat = sequencer.build(record)
+    assert ids[0] == 1 and len(ids) == 1 + 4 * 146
+    planes = []
+    for band, begin in zip("griz", (169, 172, 175, 178), strict=True):
+        name = f"legacy_south_{band}"
+        start = ids.index(begin)
+        assert ids[start:start + 146] == [begin, *([begin + 1] * 144), begin + 2]
+        tokens = obj.values[name]
+        assert tokens.shape == (144, 64) and tokens.dtype == torch.float32
+        assert torch.equal(tokens, repeat.values[name])
+        planes.append(unpatchify_image(tokens, 8, 1, 96))
+    pixels = torch.cat(planes)
     assert torch.isfinite(pixels).all()
     torch.testing.assert_close(pixels[:, -1, -1], torch.arange(4, dtype=torch.float32).asinh())
     assert pixels[1, 1, 1] == torch.asinh(torch.tensor(-1.0))
@@ -76,10 +87,12 @@ def test_packed_south_preserves_measured_zeros_and_all_four_bands(tiny_config):
     assert torch.equal(pixels != expected, torch.from_numpy(decoded["fill_mask"][:, 32:128, 32:128]))
 
     flat = flatten_packed_batch(PackedCollator(config, len(obj))([obj]), config, len(obj))
-    assert config.vocab_size == 64 and flat["images_values"].shape == (0, 192)
+    assert config.vocab_size == 181 and flat["legacy_north_g_values"].shape == (0, 64)
+    assert not flat["legacy_north_g_mask"].any()
     with torch.no_grad():
         out = AstroPT3Model(config).eval()(**regroup_micro_batch(flat, config.modality_registry().names()))
-    assert set(out.modality_losses) == {"legacy_south_images"} and torch.isfinite(out.loss)
+    assert set(out.modality_losses) == {f"legacy_south_{band}" for band in "griz"}
+    assert torch.isfinite(out.loss)
 
 
 @pytest.mark.gpu
@@ -87,21 +100,36 @@ def test_south_conversion_and_forward_parity():
     from test_nanotron_gpu import REL_TOL, build_nt_model, make_nt, tiny_nt_config
 
     nt = make_nt()
-    config = tiny_nt_config(nt, modalities=[DEFAULT_MODALITIES[0], LEGACY_SOUTH_IMAGES],
+    config = tiny_nt_config(nt, modalities=[DEFAULT_MODALITIES[0], *LEGACY_SOUTH_MODALITIES],
                             jetformer_flow_steps=2, jetformer_flow_hidden=32)
     hf_config = nt.to_hf.get_hf_config(config)
+    nt_back = nt.from_hf.get_nanotron_config(hf_config)
+    for name, band in {
+        "legacy_north_g": "des-g", **{f"legacy_south_{b}": f"des-{b}" for b in "griz"},
+    }.items():
+        assert hf_config.modality_registry().get_config(name).band == band
+        assert nt_back.modality(name)["band"] == band
     hf = AstroPT3Model(hf_config)
     torch.nn.Module.cuda(hf)
     hf.bfloat16().eval()
     model = build_nt_model(nt, config).eval()
     nt.from_hf.convert_hf_to_nt(hf, model, config)
     obj = ObjectSequencer(hf_config).build({"legacy_south_image": decode_legacy_south_image(_payload())})
-    flat = flatten_packed_batch(PackedCollator(hf_config, 160)([obj]), hf_config, 160)
+    seq_len = 640
+    flat = flatten_packed_batch(PackedCollator(hf_config, seq_len)([obj]), hf_config, seq_len)
     flat = {k: v.cuda() for k, v in flat.items()}
+    assert flat["legacy_north_g_mask"].shape == (1, seq_len)
+    assert not flat["legacy_north_g_mask"].any()
+    assert flat["legacy_north_g_values"].shape == (0, 64)
+    assert flat["legacy_north_g_positions"].shape == (0,)
     with torch.no_grad():
         out = model(**flat)
         ref = hf(**regroup_micro_batch(flat, config.modality_names()))
-    assert out["legacy_south_images_loss"].item() == pytest.approx(ref.loss.item(), rel=REL_TOL)
+    assert out["legacy_north_g_loss"].item() == 0.0
+    assert set(ref.modality_losses) == {f"legacy_south_{band}" for band in "griz"}
+    for name, loss in ref.modality_losses.items():
+        assert out[f"{name}_loss"].item() == pytest.approx(loss.item(), rel=REL_TOL)
+    assert out["loss"].item() == pytest.approx(ref.loss.item(), rel=REL_TOL)
     back = AstroPT3Model(hf_config)
     torch.nn.Module.cuda(back)
     back.bfloat16()

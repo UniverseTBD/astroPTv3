@@ -1,10 +1,11 @@
 """JetFormer flow GPU gates: real trainer init, checkpoint reconstruction, HF parity, DP=2.
 
-Uses tiny conditioners/backbone with all four recipe patch dimensions, including
-HSC's 320-wide integer permutations. Batches are local tensors, never LSDB reads.
+Uses tiny conditioners/backbone with all recipe patch dimensions, including
+fused RGB's 768-wide integer permutations. Batches are local tensors, never LSDB reads.
 Run only on an explicitly reserved device: pytest -m gpu tests/test_jetformer_flow_nanotron_gpu.py
 """
 
+from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +16,7 @@ from test_nanotron_gpu import REL_TOL, build_nt_model, make_nt, regroup
 
 pytestmark = pytest.mark.gpu
 ASTRO_DIR = Path(__file__).resolve().parents[1]
-SEQ_LEN = 128  # fits two objects carrying every recipe modality
+SEQ_LEN = 256  # fits two objects carrying every recipe modality
 
 
 @pytest.fixture(scope="module")
@@ -24,12 +25,13 @@ def nt():
 
 
 def _trainer(tmp_path, resume=None):
-    from nanotron.trainer import DistributedTrainer
+    DistributedTrainer = import_module("nanotron.trainer").DistributedTrainer
 
     config = yaml.safe_load((ASTRO_DIR / "tests/fixtures/astropt3-test-tiny.yaml").read_text())
     pilot = yaml.safe_load((ASTRO_DIR / "configs/nanotron/astropt3-70m.yaml").read_text())
     config["model"]["model_config"].update(
         modalities=pilot["model"]["model_config"]["modalities"],
+        vocab_size=pilot["model"]["model_config"]["vocab_size"],
         jetformer_flow_steps=2,
         jetformer_flow_hidden=32,
         jetformer_flow_depth=1,
@@ -77,7 +79,7 @@ def _flat_batch(config):
                 values[name].append(torch.randn(length, modality["input_size"], generator=generator) * 0.1)
                 positions[name].append(
                     torch.arange(length)
-                    if modality["pos_type"] == "index"
+                    if modality.get("pos_type", "index") == "index"
                     else torch.linspace(0.2, 0.8, length).unsqueeze(-1)
                 )
             batch["input_ids"][row, cursor : cursor + len(tokens)] = torch.tensor(tokens)
@@ -106,13 +108,13 @@ def _assert_permutations(flows):
             assert block.permutation.device.type == "cuda"
             assert torch.equal(block.permutation.cpu(), expected)
             assert torch.equal(block.inverse_permutation.cpu(), expected.argsort())
-    hsc = flows["hsc_images"].blocks[0].permutation
-    assert hsc.numel() == hsc.unique().numel() == 320
-    assert hsc.max().item() == 319  # bf16 would round this and corrupt indexing.
+    rgb = flows["galaxies"].blocks[0].permutation
+    assert rgb.numel() == rgb.unique().numel() == 768
+    assert rgb.max().item() == 767  # bf16 would round this and corrupt indexing.
 
 
 def test_full_trainer_initializes_zero_outputs_and_integer_buffers(nt, tmp_path):
-    from nanotron.models.astropt3 import modality_flops_per_token
+    modality_flops_per_token = import_module("nanotron.models.astropt3").modality_flops_per_token
 
     trainer = _trainer(tmp_path)
     model = trainer.unwrapped_model
@@ -151,16 +153,17 @@ def test_full_trainer_initializes_zero_outputs_and_integer_buffers(nt, tmp_path)
 
 @pytest.mark.parametrize("dtype", [torch.int64, torch.int32, torch.bool, torch.complex64, torch.float32])
 def test_init_context_moves_buffers_without_casting_nonfloat(nt, dtype):
-    from nanotron.models import init_on_device_and_dtype
+    init_on_device_and_dtype = import_module("nanotron.models").init_on_device_and_dtype
 
     original = torch.tensor([0, 1], dtype=dtype)
     with init_on_device_and_dtype(device=torch.device("cuda"), dtype=torch.bfloat16):
         module = torch.nn.Module()
         module.register_buffer("value", original, persistent=False)
     expected_dtype = torch.bfloat16 if original.is_floating_point() else dtype
-    assert module.value.device.type == "cuda"
-    assert module.value.dtype == expected_dtype
-    assert torch.equal(module.value.cpu(), original.to(expected_dtype))
+    value = module.get_buffer("value")
+    assert value.device.type == "cuda"
+    assert value.dtype == expected_dtype
+    assert torch.equal(value.cpu(), original.to(expected_dtype))
     assert not module.state_dict()
 
 
@@ -189,9 +192,9 @@ def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt,
     )
     trainer.iteration_step = trainer.metadata.last_train_step = 2
     trainer.metadata.consumed_train_samples = 4
-    trainer.metadata.consumed_tokens_total = 256
+    trainer.metadata.consumed_tokens_total = 4 * SEQ_LEN
     trainer.metadata.current_stage.consumed_train_samples = 4
-    trainer.metadata.current_stage.consumed_tokens_per_dataset_folder = {"synthetic": 256}
+    trainer.metadata.current_stage.consumed_tokens_per_dataset_folder = {"synthetic": 4 * SEQ_LEN}
     model.eval()
     with torch.no_grad():
         before = model.model(**regroup(flat, model.config.modality_names()))
@@ -218,7 +221,7 @@ def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt,
 
 def test_hf_nanotron_parity_and_exact_conversion(nt, tmp_path):
     from astropt3 import AstroPT3Model
-    from astropt3.flows import flow_object_ids
+    from astropt3.flows import JetFormerFlow, flow_object_ids
 
     trainer = _trainer(tmp_path)
     model = trainer.unwrapped_model.eval()
@@ -227,15 +230,18 @@ def test_hf_nanotron_parity_and_exact_conversion(nt, tmp_path):
     for field in ("jetformer_flow_depth", "jetformer_flow_heads"):
         assert getattr(hf_config, field) == getattr(config, field)
         assert getattr(nt.from_hf.get_nanotron_config(hf_config), field) == getattr(config, field)
-    hf_model = AstroPT3Model(hf_config).cuda().bfloat16().eval()
-    for flow in hf_model.flows.values():
-        assert all(torch.count_nonzero(block.out_proj.weight) == 0 for block in flow.blocks)
+    hf_model = AstroPT3Model(hf_config)
+    torch.nn.Module.cuda(hf_model).bfloat16().eval()
     # Nontrivial conditioners catch missing coupling weights, not just initial permutations.
     with torch.no_grad():
         for flow in hf_model.flows.values():
+            assert isinstance(flow, JetFormerFlow)
             for block in flow.blocks:
-                block.out_proj.weight.normal_(std=0.01)
-                block.out_proj.bias.fill_(0.01)
+                projection = block.get_submodule("out_proj")
+                assert isinstance(projection, torch.nn.Linear) and projection.bias is not None
+                assert torch.count_nonzero(projection.weight) == 0
+                projection.weight.normal_(std=0.01)
+                projection.bias.fill_(0.01)
     nt.from_hf.convert_hf_to_nt(hf_model, model, config)
     mapping = nt.convert_weights.get_weight_mapping(config, nt_to_hf=False)
     assert set(mapping) == set(dict(hf_model.named_parameters()))
@@ -264,14 +270,20 @@ def test_hf_nanotron_parity_and_exact_conversion(nt, tmp_path):
     for family, loss in hf_output.family_losses.items():
         assert nt_output[f"{family}_family_loss"].item() == pytest.approx(loss.item(), rel=REL_TOL)
 
-    hf_back = AstroPT3Model(hf_config).cuda().bfloat16().eval()
+    hf_back = AstroPT3Model(hf_config)
+    torch.nn.Module.cuda(hf_back).bfloat16().eval()
     nt.to_hf.convert_nt_to_hf(model, hf_back, config)
     for name, parameter in hf_back.state_dict().items():
         assert torch.equal(parameter, hf_model.state_dict()[name]), name
     hf_back.save_pretrained(tmp_path / "hf")
-    hf_loaded = AstroPT3Model.from_pretrained(tmp_path / "hf", dtype=torch.bfloat16).cuda().eval()
+    hf_loaded = AstroPT3Model.from_pretrained(tmp_path / "hf", dtype=torch.bfloat16)
+    torch.nn.Module.cuda(hf_loaded).eval()
     _assert_permutations(hf_loaded.flows)
-    nt_back = build_nt_model(nt, nt.from_hf.get_nanotron_config(hf_loaded.config)).eval()
+    back_config = nt.from_hf.get_nanotron_config(hf_loaded.config)
+    for name in config.modality_names():
+        assert back_config.modality(name).get("band") == config.modality(name).get("band")
+    assert back_config.modality("galaxies")["image_format"] == "rgb"
+    nt_back = build_nt_model(nt, back_config).eval()
     nt.from_hf.convert_hf_to_nt(hf_loaded, nt_back, config)
     for name, parameter in nt_back.named_parameters():
         assert torch.equal(parameter, dict(model.named_parameters())[name]), name

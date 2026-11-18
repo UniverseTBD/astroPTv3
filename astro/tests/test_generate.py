@@ -10,9 +10,10 @@ import torch
 from legacy_fixture import make_record
 
 from astropt3.config_io import load_model_config
-from astropt3.configuration_astropt3 import LEGACY_SOUTH_IMAGES, AstroPT3Config
+from astropt3.configuration_astropt3 import LEGACY_SOUTH_MODALITIES, AstroPT3Config
 from astropt3.data.packing import ObjectSequencer
 from astropt3.eval.samples import (
+    build_template,
     render_sampled_tokens,
     sample_checkpoint,
     sample_template,
@@ -26,6 +27,8 @@ CONFIG = Path(__file__).resolve().parents[1] / "configs" / "model" / "test-tiny.
 @pytest.fixture(scope="module")
 def jet_config():
     config, _ = load_model_config(CONFIG)
+    # Keep sampling tests small; recipe-level packing covers all image bands.
+    config.modalities = [m for m in config.modalities if m.get("band") in (None, "des-g")]
     return config
 
 
@@ -66,8 +69,7 @@ def smoke_model(jet_config, tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def template(jet_config):
-    # image_only_fraction=0 so the template has both spans
-    return ObjectSequencer(jet_config).build(make_record(3, image_only_fraction=0.0))
+    return build_template(ObjectSequencer(jet_config), make_record(3, image_only_fraction=0.0), "unconditional")
 
 
 def test_sample_gmm_argmax_is_mixture_mean():
@@ -82,9 +84,9 @@ def test_sample_gmm_argmax_is_mixture_mean():
 
 def test_unconditional_shapes(smoke_model, template):
     g = torch.Generator().manual_seed(0)
-    out = generate(smoke_model, template, {"images", "spectra"}, n=2, generator=g)
-    assert set(out) == {"images", "spectra"}
-    assert out["images"].shape == (2, 144, 192)
+    out = generate(smoke_model, template, {"legacy_north_g", "spectra"}, n=2, generator=g)
+    assert set(out) == {"legacy_north_g", "spectra"}
+    assert out["legacy_north_g"].shape == (2, 144, 64)
     assert out["spectra"].shape == (2, 31, 256)
     assert all(torch.isfinite(v).all() for v in out.values())
 
@@ -123,14 +125,14 @@ def test_generate_rejects_missing_span(smoke_model, jet_config):
 
 def test_reconstruct_shapes(smoke_model, template):
     preds = reconstruct(smoke_model, template)
-    assert preds["images"].shape == (144, 192)
+    assert preds["legacy_north_g"].shape == (144, 64)
     assert preds["spectra"].shape == (31, 256)
     assert all(torch.isfinite(v).all() for v in preds.values())
 
 
 def test_sample_template_modes(smoke_model, template):
     recon = sample_template(smoke_model, template, "reconstruct")
-    assert recon["images"].shape == (1, 144, 192)
+    assert recon["legacy_north_g"].shape == (1, 144, 64)
     assert recon["spectra"].shape == (1, 31, 256)
 
     # spectra-only draws: the full-span unconditional cost is already paid
@@ -163,7 +165,7 @@ def test_render_sampled_tokens_writes_pngs(smoke_model, template, tmp_path):
             tag="t",
             show_truth=show_truth,
         )
-        assert set(pngs) == {"images", "spectra"}
+        assert set(pngs) == {"legacy_north_g", "spectra"}
         assert all(p.exists() and p.stat().st_size > 0 for p in pngs.values())
 
 
@@ -186,11 +188,11 @@ def test_spiral_checkpoint_decodes_pixel_identical_to_raster(jet_config, tmp_pat
     raster_template = ObjectSequencer(raster_config).build(record)
     # forward half: the sequencer spiralises image tokens iff config.spiral
     assert not torch.equal(
-        spiral_template.values["images"], raster_template.values["images"]
+        spiral_template.values["legacy_north_g"], raster_template.values["legacy_north_g"]
     )
     assert torch.equal(
-        antispiralise(spiral_template.values["images"]),
-        raster_template.values["images"],
+        antispiralise(spiral_template.values["legacy_north_g"]),
+        raster_template.values["legacy_north_g"],
     )
     assert torch.equal(
         spiral_template.values["spectra"], raster_template.values["spectra"]
@@ -207,12 +209,12 @@ def test_spiral_checkpoint_decodes_pixel_identical_to_raster(jet_config, tmp_pat
             SimpleNamespace(config=config),  # render only reads model.config
             record,
             template,
-            {"images": template.values["images"].unsqueeze(0)},
+            {"legacy_north_g": template.values["legacy_north_g"].unsqueeze(0)},
             out_dir=tmp_path / label,
             tag="t",
             show_truth=True,
         )
-        pixels[label] = plt.imread(pngs["images"])
+        pixels[label] = plt.imread(pngs["legacy_north_g"])
     assert np.array_equal(pixels["spiral"], pixels["raster"])
 
 
@@ -238,23 +240,26 @@ def test_sample_checkpoint_end_to_end(smoke_model, tmp_path):
         device="cpu",
     )
     assert set(pngs) == {
-        f"reconstruct/images/{oid}",
+        f"reconstruct/legacy_north_g/{oid}",
         f"reconstruct/spectra/{oid}",
         f"image-to-spectra/spectra/{oid}",
     }
     assert all(Path(p).exists() and Path(p).stat().st_size > 0 for p in pngs.values())
 
 
-def test_sample_checkpoint_accepts_south_templates(jet_config, tmp_path):
-    config = AstroPT3Config(**{**jet_config.to_dict(), "modalities": [*jet_config.modalities, LEGACY_SOUTH_IMAGES]})
+def test_sample_checkpoint_generates_one_south_band(jet_config, tmp_path):
+    config = AstroPT3Config(**{**jet_config.to_dict(), "modalities": [*jet_config.modalities, *LEGACY_SOUTH_MODALITIES], "vocab_size": None})
     ckpt = tmp_path / "south"
     AstroPT3Model(config).save_pretrained(ckpt)
     image = {"band": ["des-g", "des-r", "des-i", "des-z"], "flux": np.ones((4, 160, 160), dtype=np.float32)}
     alone = {"object_id": "south-only", "legacy_south_image": image}
     matched = {**alone, "object_id": "south-match", "spectrum": make_record(3, image_only_fraction=0.0)["spectrum"]}
-    pngs = sample_checkpoint(ckpt, [alone, matched], modes=["reconstruct", "spectra-to-images"],
-                             n=1, out_dir=tmp_path / "samples", device="cpu")
-    assert set(pngs) == {
-        "reconstruct/legacy_south_images/south-only", "reconstruct/legacy_south_images/south-match",
-        "reconstruct/spectra/south-match", "spectra-to-images/legacy_south_images/south-match",
-    }
+    with pytest.raises(ValueError, match="no image band"):
+        build_template(ObjectSequencer(config), alone, "unconditional", band="legacy_north_g")
+    template = build_template(ObjectSequencer(config), matched, "spectra-to-images", band="legacy_south_i")
+    assert set(template.masks) == {"legacy_south_i", "spectra"}
+    assert template.masks["spectra"].nonzero()[0] < template.masks["legacy_south_i"].nonzero()[0]
+    pngs = sample_checkpoint(ckpt, [alone, matched], modes=["spectra-to-images"],
+                             band="legacy_south_i", n=1, out_dir=tmp_path / "samples", device="cpu")
+    assert set(pngs) == {"spectra-to-images/legacy_south_i/south-match"}
+    assert all(Path(p).stat().st_size > 0 for p in pngs.values())

@@ -50,8 +50,16 @@ def offline(monkeypatch):
 
 
 @pytest.fixture
+def tiny_config(tiny_config):
+    # Echo tests need one span per payload to keep the expected packing fixed.
+    return type(tiny_config)(**{
+        **tiny_config.to_dict(),
+        "modalities": [m for m in tiny_config.modalities if m["name"] in {"legacy_north_g", "spectra"}],
+    })
+
+
+@pytest.fixture
 def records():
-    # Drop catalog scalars explicitly: the shared tiny config enables them.
     return [
         {key: record[key] for key in ("object_id", "image", "spectrum")}
         for record in (make_record(i, image_only_fraction=0.0) for i in range(10))
@@ -189,7 +197,7 @@ def test_empty_and_tiny_draws_emit_only_nonempty_padded_tails(tiny_config, recor
         assert int((batch["input_ids"] == BOS_ID).sum()) == 1
         assert (batch["input_ids"][1] == PAD_ID).all()
         assert (batch["position_ids"][1] == 0).all()
-    assert sum(bool(batch["images_mask"].any()) for batch in batches) == 2
+    assert sum(bool(batch["legacy_north_g_mask"].any()) for batch in batches) == 2
     assert sum(bool(batch["spectra_mask"].any()) for batch in batches) == 2
     assert list(FiniteDraws(
         tiny_config, 2, 200, catalog_stream=TINY_CATALOG_STREAM, draws=[[], []], echo_factor=3
@@ -308,7 +316,7 @@ def test_dp_ranks_echo_their_draws_independently(tiny_config, records, monkeypat
         )
         delivered = list(dataset)
         # payload identity: echoes reorder spans in input_ids but never touch values
-        exposures[rank] = [float(batch["images_values"].sum()) for batch in delivered]
+        exposures[rank] = [float(batch["legacy_north_g_values"].sum()) for batch in delivered]
         assert len(set(exposures[rank])) == len(delivered) // 3 > 1
         assert set(Counter(exposures[rank]).values()) == {3}  # each batch exactly N times per rank
     assert sorted(exposures[0]) == sorted(exposures[1])

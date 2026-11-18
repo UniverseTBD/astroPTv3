@@ -50,15 +50,17 @@ and echoing constraints.
 ## From measurements to predictions
 
 Legacy Survey North images are 3×152×152 flux cubes; DR10 South images are
-4×160×160. The sequencer crops to 96×96, physically normalizes each band,
-and forms 144 patch tokens (192 values for North, 256 for South). DESI spectra are normalized onto an AB-flux scale and form
+4×160×160. The sequencer crops calibrated images to 96×96 and creates
+one independently addressable span per source and filter, with 144 patch
+tokens of 64 values per span. Display composites such as galaxies-with-hats
+stay RGB in one span. DESI spectra are normalized onto an AB-flux scale and form
 31 patches of 256 bins with wavelength positions. There is **no per-patch
 standardization**: the flow-based likelihood needs the record-to-token
 mapping to retain patch information. Optional catalog scalars can become
 one-token spans when included in the config.
 
-A small 64-id vocabulary marks modality spans; it is **not** a text
-vocabulary. The SmolLM3 decoder predicts the next continuous patch using a
+The training recipes use a 200-id vocabulary for modality markers; it is
+**not** a text vocabulary. The SmolLM3 decoder predicts the next continuous patch using a
 per-modality JetFormer flow and Gaussian-mixture likelihood head. Whole
 astronomical sources are packed into training sequences without splitting an
 object. The nanotron fork (`../nanotron`) runs pretraining; the transformers
@@ -93,7 +95,8 @@ bash astro/scripts/run_train.bash GPU_INDEX
 See [training.md](docs/training.md) for custom recipes, echo overrides, resource
 limits, and resume instructions. There is no source-backed evaluation sweep;
 model-side evaluation and sample rendering are in `src/astropt3/eval/` and
-`scripts/generate.py`.
+`scripts/generate.py`. Use `--band hsc_g` to generate one calibrated band,
+or add `--mode spectra-to-images` to condition that band on the template's spectra.
 
 For a bounded, YAML-based training benchmark with standard JSON results, see
 [throughput benchmarking](docs/training.md#8-standard-throughput-benchmark).

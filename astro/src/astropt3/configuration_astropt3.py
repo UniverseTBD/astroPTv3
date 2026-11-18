@@ -7,29 +7,36 @@ from transformers.models.smollm3.configuration_smollm3 import SmolLM3Config
 from .data.band_registry import _DIV_FACTOR
 from .data.spectral import _DIV_FACTOR as _SPECTRA_DIV_FACTOR
 from .modalities import ModalityRegistry
-from .tokenization import assign_modality_token_ids, required_vocab_size
+from .tokenization import (
+    assign_modality_token_ids,
+    modality_token_ids,
+    required_vocab_size,
+)
 
-# Pilot modalities, pinned to the verified MMU schemas (see plan):
-# - images:  (3, 152, 152) flux cubes, center crop 96x96, patch 8 -> 144
-#   tokens of 8*8*3 = 192 (max_positions 361 is a harmless ceiling)
-# - spectra: 7781-bin DESI spectra, patch 256 -> 31 tokens; position = per-patch
-#   mean wavelength, normalized, projected by an affine PositionEmbedder
-# - Z / ebv / photometry: ADR 0008 scalar modalities — one-token spans over
-#   the catalog scalars the records already carry, GMM-headed like every
-#   other modality. The family loss collectively caps all present
-#   scalar modalities at weight 0.1.
+
+def _legacy_bands(source: str, record_key: str, bands: str) -> list[dict]:
+    return [
+        {
+            "name": name,
+            "family": "image",
+            "source": source,
+            "record_keys": [record_key],
+            "band": f"des-{band}",
+            "token_ids": list(modality_token_ids(name)),
+            "input_size": 64,
+            "patch_size": 8,
+            "pos_type": "index",
+            "max_positions": 144,
+        }
+        for band in bands
+        for name in [f"{source}_{band}"]
+    ]
+
+
+LEGACY_SOUTH_MODALITIES = _legacy_bands("legacy_south", "legacy_south_image", "griz")
+
 DEFAULT_MODALITIES = [
-    {
-        "name": "images",
-        "input_size": 192,
-        "patch_size": 8,
-        "pos_type": "index",
-        "max_positions": 361,
-        "family": "image",
-        "source": "legacy",
-        "record_keys": ["image"],
-        "token_ids": [2, 3, 4],
-    },
+    *_legacy_bands("legacy_north", "image", "grz"),
     {
         "name": "spectra",
         "input_size": 256,
@@ -79,29 +86,14 @@ DEFAULT_MODALITIES = [
 ]
 
 
-# Opt-in DR10 South contract; never give North's released 192-wide tokens a fourth band.
-LEGACY_SOUTH_IMAGES = {
-    "name": "legacy_south_images",
-    "family": "image",
-    "source": "legacy_south",
-    "record_keys": ["legacy_south_image"],
-    "token_ids": [53, 54, 55],
-    "input_size": 256,
-    "patch_size": 8,
-    "image_crop": 96,
-    "pos_type": "index",
-    "max_positions": 144,
-}
-
-
 def _complete_modalities(modalities: list[dict]) -> list[dict]:
-    """Backfill only the five released modalities; new ones self-describe."""
+    """Backfill metadata for default modalities."""
     legacy = {modality["name"]: modality for modality in DEFAULT_MODALITIES}
     completed = []
     for raw in modalities:
         modality = dict(raw)
         defaults = legacy.get(modality.get("name"), {})
-        for key in ("family", "source", "record_keys", "token_ids"):
+        for key in ("family", "source", "record_keys", "band", "token_ids"):
             if key not in modality and key in defaults:
                 modality[key] = defaults[key]
         if (
@@ -112,6 +104,8 @@ def _complete_modalities(modalities: list[dict]) -> list[dict]:
             raise ValueError(
                 f"new modality {modality.get('name')!r} must declare family, source, and record_keys"
             )
+        if {"channel_tokenization", "band_order"} & modality.keys():
+            raise ValueError(f"modality {modality['name']!r} must declare one image band per span")
         completed.append(modality)
     return assign_modality_token_ids(completed)
 
@@ -151,6 +145,7 @@ class AstroPT3Config(SmolLM3Config):
     ):
         raw_modalities = modalities if modalities is not None else DEFAULT_MODALITIES
         self.modalities = _complete_modalities(raw_modalities)
+        self.modality_registry()  # validate modality contracts when loading the config
         required_vocab = required_vocab_size(self.modalities)
         if vocab_size is None:
             vocab_size = required_vocab
