@@ -8,6 +8,8 @@ of the training RNG. Like RoPE tables they are nonpersistent buffers: identical
 configurations reconstruct identical permutations in HF and Nanotron.
 """
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -15,7 +17,12 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.checkpoint import checkpoint
 
 
-def flow_object_ids(position_ids: torch.Tensor, modality_mask: torch.Tensor) -> torch.Tensor:
+def pre_flow_noise_scale(frac: float) -> float:
+    """JetFormer cosine decay over the clamped training fraction [0, 1]."""
+    return 0.5 * (1.0 + math.cos(math.pi * frac))
+
+
+def flow_object_ids(position_ids: torch.Tensor | None, modality_mask: torch.Tensor) -> torch.Tensor:
     """Map row-major modality values to their packed objects, not batch rows."""
     if position_ids is None or position_ids.shape != modality_mask.shape:
         raise ValueError("JetFormer flows require packed position_ids matching the modality mask")

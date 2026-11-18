@@ -37,6 +37,9 @@ def _trainer(tmp_path, resume=None):
         jetformer_noise_max=0.0,
         jetformer_noise_min=0.0,
     )
+    next(
+        m for m in config["model"]["model_config"]["modalities"] if m["name"] == "hsc_images"
+    )["pre_flow_noise_max"] = 0.5
     config["data_stages"] = pilot["data_stages"]  # parsed only: catalog streams are required, never opened
     config["tokens"].update(sequence_length=SEQ_LEN, micro_batch_size=2)
     config["optimizer"]["learning_rate_scheduler"].update(lr_warmup_steps=0, lr_warmup_style="linear")
@@ -165,13 +168,18 @@ def test_init_context_moves_buffers_without_casting_nonfloat(nt, dtype):
 
 
 def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt, tmp_path):
+    from nanotron.models.astropt3 import AstroPT3ForTraining
+
     trainer = _trainer(tmp_path)
     model = trainer.unwrapped_model
+    assert isinstance(model, AstroPT3ForTraining)
+    assert trainer.config.tokens is not None
     flat = _flat_batch(model.config)
     # The baseline scheduler starts at LR=0; the second update exercises nonzero outputs.
     model.train()
     trainer.optimizer.zero_grad()
-    for _ in range(2):
+    for step in (1, 2):
+        model.set_jet_noise_frac(step / trainer.config.tokens.train_steps)
         loss = model(**flat)["loss"]
         assert torch.isfinite(loss)
         trainer.grad_accumulator.backward(loss)

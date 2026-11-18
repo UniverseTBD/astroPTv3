@@ -242,8 +242,11 @@ def matched_models(nt):
     from astropt3 import AstroPT3Model
 
     nt_config = tiny_nt_config(nt, jetformer_flow_hidden=32)
+    nt_config.modality("images")["pre_flow_noise_max"] = 0.4
     hf_config = nt.to_hf.get_hf_config(nt_config)
     assert hf_config.jetformer_flow_hidden == 32
+    assert hf_config.modality_registry().get_config("images").pre_flow_noise_max == 0.4
+    assert nt.from_hf.get_nanotron_config(hf_config).modality("images")["pre_flow_noise_max"] == 0.4
     torch.manual_seed(0)
     hf_model = AstroPT3Model(hf_config)
     nt_model = build_nt_model(nt, nt_config)
@@ -255,13 +258,23 @@ def matched_models(nt):
     return hf_model, nt_model, nt_config, hf_config
 
 
-def test_forward_loss_parity(nt, matched_models):
-    hf_model, nt_model, nt_config, hf_config = matched_models
+@pytest.mark.parametrize("training", [False, True])
+def test_forward_loss_parity(nt, matched_models, training):
+    hf_model, nt_model, _, hf_config = matched_models
     flat = micro_batch(hf_config)
     names = hf_config.modality_registry().names()
-    with torch.no_grad():
-        nt_out = nt_model(**flat)
-        hf_out = hf_model(**regroup(flat, names))
+    for model in (hf_model, nt_model):
+        model.train(training)
+        model.set_jet_noise_frac(1 / 3)
+    try:
+        with torch.no_grad():
+            torch.manual_seed(17)
+            nt_out = nt_model(**flat)
+            torch.manual_seed(17)
+            hf_out = hf_model(**regroup(flat, names))
+    finally:
+        hf_model.eval()
+        nt_model.eval()
 
     nt_loss = nt_out["loss"].item()
     hf_loss = hf_out.loss.item()

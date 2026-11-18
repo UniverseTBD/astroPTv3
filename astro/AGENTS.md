@@ -114,9 +114,11 @@ stages is implicit and easy to break, so understand it before editing:
    patch-space likelihood `mean(NLL_GMM(z) - logdet)` at positions one left
    of each modality token (`<|begin_m|>` predicts patch 0 — astroPT's
    `starts-1` alignment), via `left_shift_mask`; the loss can go negative;
-   weighted mean over modalities present. A noise curriculum
-   (`jetformer_noise_max` -> `_min`, driven via `set_jet_noise_frac`)
-   perturbs only the embedded z copy in training mode. Scalar modalities
+   weighted mean over modalities present. Training can add cosine-decayed
+   pre-flow noise (`pre_flow_noise_max` per modality), so the embedded z,
+   target z and logdet use the same noisy input. Separate linear latent noise
+   (`jetformer_noise_max` -> `_min`) perturbs only the embedded z copy.
+   Both schedules use `set_jet_noise_frac`. Scalar modalities
    (`Z`, `ebv`, `photometry`) bypass the flow and go straight to a
    `GMMHead` on the raw normalized value. The nanotron fork mirrors all of
    it (flows/GMM heads on the embedding/head blocks, z+logdet routed to

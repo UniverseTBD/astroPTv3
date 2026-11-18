@@ -43,6 +43,8 @@ class ModalityConfig:
             information. ``E_values`` is unchanged either way.
         image_crop: central crop side in pixels before patchify (0 keeps the
             whole image); 96 turns 152x152 survey cutouts into 144 patch-8 tokens.
+        pre_flow_noise_max: initial Gaussian sigma in normalized patch units,
+            cosine-annealed to zero during training. Zero disables it.
         band_order: fixed band serialization order for ``per_band``, in
             record band names (``des-g``, ``des-r``, ``des-z``). Fixed, not
             shuffled: band order as an ADR 0008 ordering decision is a
@@ -67,12 +69,18 @@ class ModalityConfig:
     channel_tokenization: str = "fused"
     band_order: tuple[str, ...] = ()
     image_crop: int = 96
+    pre_flow_noise_max: float = 0.0
 
     def __post_init__(self):
         if self.family not in {"image", "spectrum", "scalar"}:
             raise ValueError(
                 f"modality {self.name!r} has invalid family {self.family!r}"
             )
+        sigma = self.pre_flow_noise_max
+        if type(sigma) not in (int, float) or not math.isfinite(sigma) or sigma < 0:
+            raise ValueError(f"modality {self.name!r} pre_flow_noise_max must be finite and nonnegative")
+        if sigma and self.scalar:
+            raise ValueError(f"modality {self.name!r} pre_flow_noise_max is only for patch modalities")
         if self.channel_tokenization not in {"fused", "per_band"}:
             raise ValueError(
                 f"modality {self.name!r} has invalid channel_tokenization "
@@ -135,6 +143,7 @@ class ModalityConfig:
             "channel_tokenization": self.channel_tokenization,
             "band_order": list(self.band_order),
             "image_crop": self.image_crop,
+            "pre_flow_noise_max": self.pre_flow_noise_max,
         }
 
 
