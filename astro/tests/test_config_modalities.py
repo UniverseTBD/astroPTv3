@@ -85,7 +85,7 @@ def test_70m_recipe_uses_pre_flow_noise_on_images_and_spectra():
     config = yaml.safe_load((CONTROL.parent.parent / "nanotron/astropt3-70m.yaml").read_text())["model"]["model_config"]
     assert config["jetformer_noise_min"] == config["jetformer_noise_max"] == 0.0
     assert {m["name"]: m["pre_flow_noise_max"] for m in config["modalities"] if "pre_flow_noise_max" in m} == {
-        **{f"legacy_north_{band}": 0.4 for band in "grz"},
-        **{f"hsc_{band}": 0.35 for band in "grizy"},
+        "legacy_north_g": 0.21, "legacy_north_r": 0.37, "legacy_north_z": 1.08,
+        "hsc_g": 0.15, "hsc_r": 0.20, "hsc_i": 0.32, "hsc_z": 0.49, "hsc_y": 0.93,
         "galaxies": 0.04, "spectra": 0.1, "sdss_spectra": 0.1,
     }

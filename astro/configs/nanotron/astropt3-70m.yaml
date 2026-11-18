@@ -42,13 +42,13 @@ model:
     modalities:
       - {name: legacy_north_g, family: image, source: legacy_north,
          record_keys: [image], band: des-g, token_ids: [160, 161, 162],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.4}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.21}
       - {name: legacy_north_r, family: image, source: legacy_north,
          record_keys: [image], band: des-r, token_ids: [163, 164, 165],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.4}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.37}
       - {name: legacy_north_z, family: image, source: legacy_north,
          record_keys: [image], band: des-z, token_ids: [166, 167, 168],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.4}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 1.08}
       - name: spectra
         family: spectrum
         source: desi
@@ -73,19 +73,19 @@ model:
         pre_flow_noise_max: 0.1
       - {name: hsc_g, family: image, source: hsc,
          record_keys: [hsc_image], band: hsc-g, token_ids: [181, 182, 183],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.35}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.15}
       - {name: hsc_r, family: image, source: hsc,
          record_keys: [hsc_image], band: hsc-r, token_ids: [184, 185, 186],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.35}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.20}
       - {name: hsc_i, family: image, source: hsc,
          record_keys: [hsc_image], band: hsc-i, token_ids: [187, 188, 189],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.35}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.32}
       - {name: hsc_z, family: image, source: hsc,
          record_keys: [hsc_image], band: hsc-z, token_ids: [190, 191, 192],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.35}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.49}
       - {name: hsc_y, family: image, source: hsc,
          record_keys: [hsc_image], band: hsc-y, token_ids: [193, 194, 195],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.35}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.93}
       - name: galaxies
         family: image
         source: galaxies_with_hats
