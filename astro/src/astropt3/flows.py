@@ -18,8 +18,9 @@ from torch.utils.checkpoint import checkpoint
 
 
 def pre_flow_noise_scale(frac: float) -> float:
-    """JetFormer cosine decay over the clamped training fraction [0, 1]."""
-    return 0.5 * (1.0 + math.cos(math.pi * frac))
+    """Cosine decay over [0, 1], with JetFormer's image–text floor ratio."""
+    floor = 3.0 / 64.0
+    return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * frac))
 
 
 def flow_object_ids(position_ids: torch.Tensor | None, modality_mask: torch.Tensor) -> torch.Tensor:

@@ -24,15 +24,18 @@ reports the HF size configs' flows separately from the nominal-size check.
 
 Set `pre_flow_noise_max` on individual patch modalities in `modalities`
 (HF YAML) or `model.model_config.modalities` (Nanotron YAML). Omitted entries
-use zero; scalars cannot use pre-flow noise. The [70M Nanotron recipe](../configs/nanotron/astropt3-70m.yaml)
-uses pre-flow noise only, for both images and spectra.
+use zero; scalars cannot use pre-flow noise. During training, Gaussian noise
+is added to normalized patch values before the flow. Its standard deviation
+cosine-decays from `pre_flow_noise_max` to `pre_flow_noise_max · 3/64`,
+using the floor-to-peak ratio from [JetFormer's image–text recipe](https://arxiv.org/html/2411.19722v2#S4).
+The noised flow pass supplies the latents and logdet for the likelihood.
 
-During training, independent Gaussian noise is added to normalized patch
-values before the flow, with `σ = pre_flow_noise_max · (1 + cos(π · step / train_steps)) / 2`.
-The same flow pass supplies the latents used for embedding and likelihood
-and the logdet used in the loss. Evaluation and generation always use clean
-inputs. `jetformer_noise_max` and `jetformer_noise_min` still control the
-independent linear latent-input noise; set both to zero for pre-flow only.
+The [70M Nanotron recipe](../configs/nanotron/astropt3-70m.yaml) also adds
+Gaussian noise with constant σ = 0.1 to the patch latents fed into the
+causal decoder. This second draw does not alter the likelihood targets
+or logdet. `jetformer_noise_max` and `jetformer_noise_min` control the
+linear latent-input schedule; 70M sets them equal. Neither curriculum
+adds noise during evaluation or generation.
 
 Choose σ in the normalized units each flow sees. The 70M recipe starts
 Legacy North at `(0.21, 0.37, 1.08)` for `g, r, z` and HSC at
@@ -48,9 +51,9 @@ bins and tail padding during training.
 
 For the [#52 ablation](https://github.com/UniverseTBD/astroPTv3/issues/52), hold
 the `isqm4s6c` recipe, seed, training horizon, and validation samples fixed.
-Compare latent-only (baseline) and pre-flow-only runs. After
-σ reaches zero, compare clean total NLL, source vs. sky token NLL on fixed
-cutouts, and linear-probe and scalar-head metrics.
+To isolate pre-flow noise, keep the latent-noise settings identical and set
+`pre_flow_noise_max` to zero in the control. Compare clean total NLL,
+source vs. sky token NLL on fixed cutouts, and linear-probe and scalar-head metrics.
 
 ## Limits
 
