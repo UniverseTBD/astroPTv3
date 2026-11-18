@@ -9,15 +9,22 @@ import math
 import re
 import time
 from contextlib import suppress
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 from dask.distributed import Client, LocalCluster
-from PIL import Image
 from lsdb.loaders.hats.read_hats import open_catalog
-from lsdb.streams.catalog_streams import CrossMatchStream, InfiniteStream, _restrict_to_footprint
+from lsdb.streams.catalog_streams import (
+    CrossMatchStream,
+    InfiniteStream,
+    _data_coverage,
+    _restrict_to_footprint,
+)
+from mocpy import MOC
+from PIL import Image
 
 from . import nanotron_loader as loader
 from . import telemetry
@@ -27,6 +34,7 @@ from .scalar_registry import CATEGORICAL, QUALITY_GATES, _transforms
 # Decoder names describe verified payload contracts, not arbitrary calibrations.
 _PROFILES = {
     "legacy_image": ("image", ("band", "flux"), "image"),
+    "legacy_south_image": ("image", ("band", "flux", "ivar", "mask", "scale"), "image"),
     "hsc_image": ("image", ("band", "flux", "scale"), "image"),
     "desi_spectrum": ("spectrum", ("flux", "lambda", "mask"), "spectrum"),
     "sdss_spectrum": ("spectrum", ("flux", "lambda", "mask"), "spectrum"),
@@ -35,6 +43,13 @@ _PROFILES = {
     "rgb_png": ("image", (), "image"),
     # Galaxy10 DECaLS: the same 256x256 RGB PNG struct, stored as ``rgb_image``
     "gz10_png": ("rgb_image", (), "image"),
+}
+_IMAGE_SOURCE_DECODERS = {
+    "legacy_north": "legacy_image",
+    "legacy_south": "legacy_south_image",
+    "hsc": "hsc_image",
+    "galaxies_with_hats": "rgb_png",
+    "gz10": "gz10_png",
 }
 # Catalogs whose identifier column is not ``object_id``.
 _ID_COLUMNS = {"rgb_png": "dr8_id"}
@@ -60,25 +75,16 @@ def _unregister_hf_array2d_extension() -> None:
         pa.unregister_extension_type("datasets.features.features.Array2DExtensionType")
 
 
-class CatalogStream:
-    """Validate a saved stream specification, then decode its optional modalities.
+class _Star:
+    """One anchor + partners: LSDB column projection and row decoder."""
 
-    The first catalog is the anchor. Right-only rows remain separate objects;
-    right catalogs are not crossmatched to each other without an anchor match.
-    """
-
-    def __init__(self, spec: dict, config):
-        if not isinstance(spec, dict) or set(spec) - {*_DEFAULTS, "catalogs", "min_catalogs"}:
-            raise ValueError("catalog_stream has unknown settings or is not a mapping")
-        catalogs = spec.get("catalogs")
-        if not isinstance(catalogs, list) or not catalogs:
-            raise ValueError("catalog_stream.catalogs must be a nonempty list")
-        self.spec = {**_DEFAULTS, "min_catalogs": 1, **copy.deepcopy(spec)}
-        self.catalogs = self.spec["catalogs"]
-        self.registry = config.modality_registry()
+    def __init__(self, catalogs, registry):
+        self.catalogs = catalogs
+        self.registry = registry
         self.nested: dict[str, tuple[str, ...]] = {}
         self.columns = []
-        outputs = {}
+        self.outputs = outputs = {}
+        reserved = {"object_id", "anchor", "anchor_path", "source_ids"}
         names = set()
         for index, catalog in enumerate(self.catalogs):
             if not isinstance(catalog, dict) or set(catalog) - {
@@ -100,7 +106,7 @@ class CatalogStream:
             self.columns.append(f"{_ID_COLUMNS.get(decoder, 'object_id')}{suffix}")
             if payload:
                 key = catalog.get("record_key")
-                if not isinstance(key, str) or not key or key == "object_id" or key in outputs:
+                if not isinstance(key, str) or not key or key in reserved or key in outputs:
                     raise ValueError("catalog record keys must be nonempty and unique")
                 outputs[key] = (family, decoder, name)
                 column = f"{payload}{suffix}"
@@ -115,56 +121,50 @@ class CatalogStream:
             if not isinstance(scalars, dict) or (not payload and not scalars):
                 raise ValueError("scalar_columns must map record keys to flat catalog columns")
             for key, column in scalars.items():
-                if (not isinstance(key, str) or not key or key == "object_id" or key in outputs
+                if (not isinstance(key, str) or not key or key in reserved or key in outputs
                         or not isinstance(column, str) or not column or "." in column
                         or column in {"image", "spectrum"}):
                     raise ValueError("scalar_columns needs unique record keys and flat column names")
                 outputs[key] = ("scalar", decoder, name)
                 self.columns.append(f"{column}{suffix}")
-        if not self.registry.names():
+        self.columns = list(dict.fromkeys(self.columns))
+
+    @staticmethod
+    def validate_outputs(registry, outputs):
+        if not registry.names():
             raise ValueError("at least one model modality is required")
-        for name in self.registry.names():
-            modality = self.registry.get_config(name)
+        for name in registry.names():
+            modality = registry.get_config(name)
             if modality.family == "scalar":
                 _transforms(name)  # Reject uncalibrated scalars before opening catalogs.
                 if modality.categories != CATEGORICAL.get(name, 0):
                     raise ValueError(f"modality {name!r} categories disagree with scalar_registry.CATEGORICAL")
+            decoder = None
+            if modality.family == "image":
+                decoder = _IMAGE_SOURCE_DECODERS.get(modality.source or "")
+            elif modality.family == "spectrum":
+                decoder = f"{modality.source}_spectrum"
             for key in modality.record_keys:
                 if key not in outputs or outputs[key][0] != modality.family:
                     raise ValueError(f"modality {name!r} has no compatible catalog output for {key!r}")
-                if modality.family == "spectrum" and outputs[key][1] != f"{modality.source}_spectrum":
-                    raise ValueError(f"modality {name!r} source disagrees with its spectrum decoder")
+                if decoder is not None and outputs[key][1] != decoder:
+                    raise ValueError(f"modality {name!r} source disagrees with its {modality.family} decoder")
             for flag in QUALITY_GATES.get(name, ()):
                 if flag not in outputs or any(
                     outputs[key][2] != outputs[flag][2] for key in modality.record_keys
                 ):
                     raise ValueError(f"{name} requires an explicit {flag} scalar column from the same catalog")
-        minimum = self.spec["min_catalogs"]
-        if type(minimum) is not int or not 1 <= minimum <= len(self.catalogs):
-            raise ValueError("min_catalogs must be an integer in 1..number of catalogs")
-        # A catalog's own `how` overrides the stream's: outer joins need a HATS margin
-        # cache on both sides, so a margin-less catalog can still join left.
-        if any(c.get("how", self.spec["how"]) not in ("left", "outer") for c in self.catalogs):
-            raise ValueError("catalog_stream.how must be left or outer")
-        radius = self.spec["radius_arcsec"]
-        if type(radius) not in (int, float) or not math.isfinite(radius) or radius <= 0:
-            raise ValueError("radius_arcsec must be a positive finite number")
-        if type(self.spec["partitions_per_chunk"]) is not int or self.spec["partitions_per_chunk"] < 1:
-            raise ValueError("partitions_per_chunk must be a positive integer")
-        if not isinstance(self.spec["worker_memory_limit"], str) or not self.spec["worker_memory_limit"]:
-            raise ValueError("worker_memory_limit must be a Dask memory-limit string")
-        self.columns = list(dict.fromkeys(self.columns))
-        # Fail at config time, before train.py creates outputs or a W&B run.
-        if len(self.catalogs) > 1 and "min_catalogs" not in inspect.signature(CrossMatchStream).parameters:
-            raise ValueError("configured catalog streams require LSDB's multi-catalog/min_catalogs API")
 
     def decode_row(self, mapped):
         row = loader._row_from_map_rows(mapped, self.nested)
-        record = {}
+        record, source_ids = {}, {}
         for index, catalog in enumerate(self.catalogs):
             name, decoder = catalog["name"], catalog["decoder"]
             payload, _, _ = _PROFILES[decoder]
             suffix = "" if index == 0 else f"_{name}"
+            object_id = row.get(f"{_ID_COLUMNS.get(decoder, 'object_id')}{suffix}")
+            if not bool(pd.isna(object_id)):
+                source_ids[name] = str(object_id)
             value = row.get(f"{payload}{suffix}") if payload else None
             if value is not None and not isinstance(value, dict) and pd.isna(value):
                 value = None  # a left-joined struct column with no match arrives as NA
@@ -175,16 +175,15 @@ class CatalogStream:
             scalars = {key: number for key, number in scalars.items() if number is not None}
             if value is None and not scalars:
                 continue
-            if "object_id" not in record:
-                object_id = row.get(f"{_ID_COLUMNS.get(decoder, 'object_id')}{suffix}")
-                if bool(pd.isna(object_id)):
-                    raise ValueError(f"{name} row has no object_id")
-                record["object_id"] = str(object_id) if index == 0 else f"{name}:{object_id}"
+            if name not in source_ids:
+                raise ValueError(f"{name} row has no object_id")
             record.update(scalars)
             if value is None:
                 continue
             if decoder == "legacy_image":
                 result = loader.decode_legacy_image(value)
+            elif decoder == "legacy_south_image":
+                result = loader.decode_legacy_south_image(value)
             elif decoder == "hsc_image":
                 flux = loader._stack_nested(value.get("flux")).astype(np.float32, copy=False)
                 bands = [str(band) for band in value.get("band", ())]
@@ -210,22 +209,136 @@ class CatalogStream:
                     keep = ~(result["lambda"] <= 0)
                     result = {key: values[keep] for key, values in result.items()}
             record[catalog["record_key"]] = result
-        if not record:
-            if any(not bool(pd.isna(row.get(
-                    f"{_ID_COLUMNS.get(cat['decoder'], 'object_id')}{'' if i == 0 else '_' + cat['name']}")))
-                   for i, cat in enumerate(self.catalogs)):
-                return {"record": None}
+        if not source_ids:
             raise ValueError("crossmatched row has no supported data or object_id")
         if any(has_modality(self.registry.get_config(name), record) for name in self.registry.names()):
+            first = next(iter(source_ids))
+            path = self.catalogs[0]["name"]
+            record.update(object_id=f"{first}:{source_ids[first]}", source_ids=source_ids,
+                          anchor=path if path in source_ids else None, anchor_path=path)
             return {"record": record}
         return {"record": None}
+
+
+@lru_cache(maxsize=2)
+def _split_sky(split):
+    # A fixed all-sky holdout, independent of catalog IDs and the training seed.
+    pixels = np.random.default_rng(58).permutation(12 * 4**4)[:154].astype(np.uint64)
+    validation = MOC.from_healpix_cells(pixels, np.full(len(pixels), 4, dtype=np.uint8), 4)
+    # One order-10 pixel collar (a few arcmin) separates cutouts across the split.
+    return validation if split == "validation" else validation.to_order(10).extended().complement()
+
+
+def _draw_paths(weights, offset):
+    while True:
+        for turn in range(max(weights)):
+            for index in range(len(weights)):
+                path = (index + offset) % len(weights)
+                if turn < weights[path]:
+                    yield path
+
+
+class CatalogStream:
+    """Compose LSDB stars in disjoint sky, with a deterministic weighted draw cycle."""
+
+    def __init__(self, spec, config):
+        if not isinstance(spec, dict) or set(spec) - {*_DEFAULTS, "anchors", "catalogs", "min_catalogs", "split"}:
+            raise ValueError("catalog_stream has unknown settings or is not a mapping")
+        self.spec = spec = {**_DEFAULTS, "min_catalogs": 1, **copy.deepcopy(spec)}
+        anchors = spec.get("anchors")
+        if not isinstance(anchors, list) or not anchors or not all(isinstance(c, dict) for c in anchors):
+            raise ValueError("catalog_stream.anchors must be a nonempty list of catalogs with draw_weight")
+        self.weights = [c.get("draw_weight") for c in anchors]
+        if any(type(w) is not int or w < 1 for w in self.weights):
+            raise ValueError("draw_weight must be a positive integer for every anchor")
+        anchors = [{k: v for k, v in c.items() if k != "draw_weight"} for c in anchors]
+        partners = spec.get("catalogs")
+        if not isinstance(partners, list):
+            raise ValueError("catalog_stream.catalogs must be a list of partner catalogs")
+        self.catalogs = [*anchors, *partners]
+        registry = config.modality_registry()
+        self.stars = [_Star([anchor, *partners], registry) for anchor in anchors]
+        if len({c['name'] for c in self.catalogs}) != len(self.catalogs):
+            raise ValueError("catalog names must be unique identifiers")
+        outputs = {}
+        for star in self.stars:
+            for key, contract in star.outputs.items():
+                if key in outputs and outputs[key] != contract:
+                    raise ValueError(f"ambiguous catalog output {key!r}; use source-distinct record keys")
+                outputs[key] = contract
+        _Star.validate_outputs(registry, outputs)
+        if spec['how'] not in ('left', 'outer') or any(c.get('how', spec['how']) not in ('left', 'outer') for c in self.catalogs):
+            raise ValueError("catalog_stream.how must be left or outer")
+        minimum = spec['min_catalogs']
+        outer = sum(c.get('how', spec['how']) == 'outer' for c in partners)
+        if type(minimum) is not int or not 1 <= minimum <= 1 + outer:
+            raise ValueError("min_catalogs must be in 1..number of anchor + outer catalogs")
+        radius = spec['radius_arcsec']
+        if type(radius) not in (int, float) or not math.isfinite(radius) or radius <= 0:
+            raise ValueError("radius_arcsec must be a positive finite number")
+        if 'split' in spec and spec['split'] not in ('train', 'validation'):
+            raise ValueError("split must be train or validation")
+        if (len(anchors) > 1 or 'split' in spec) and radius > 1:
+            raise ValueError("buffered footprints require radius_arcsec <= 1")
+        if type(spec['partitions_per_chunk']) is not int or spec['partitions_per_chunk'] < 1:
+            raise ValueError("partitions_per_chunk must be a positive integer")
+        if not isinstance(spec['worker_memory_limit'], str) or not spec['worker_memory_limit']:
+            raise ValueError("worker_memory_limit must be a Dask memory-limit string")
+        if partners and 'min_catalogs' not in inspect.signature(CrossMatchStream).parameters:
+            raise ValueError("configured catalog streams require LSDB's multi-catalog/min_catalogs API")
+
+    def _streams(self, opened, client, seed):
+        claimed = None
+        streams = []
+        minimum = self.spec['min_catalogs']
+        for i, star in enumerate(self.stars):
+            root, *rights = star.catalogs
+            anchor = opened[root['name']]
+            joins = [{'other': opened[c['name']], 'how': c.get('how', self.spec['how']),
+                      'suffixes': ('', f"_{c['name']}"), 'radius_arcsec': self.spec['radius_arcsec']}
+                     for c in rights]
+            outer = [j['other'] for j in joins if j['how'] == 'outer']
+            footprint = None
+            if minimum > 1 and len(outer) != len(rights):
+                _, footprint = _restrict_to_footprint(anchor, None, outer, minimum)
+            if len(self.stars) > 1 or 'split' in self.spec:
+                if footprint is None:
+                    if minimum > 1:
+                        _, footprint = _restrict_to_footprint(anchor, None, outer, minimum)
+                    else:
+                        footprint = _data_coverage(anchor)
+                if claimed is not None:
+                    footprint = footprint.difference(claimed)
+                if i < len(self.stars) - 1:
+                    # A one-cell collar is wider than two 1-arcsec matches, so a partner
+                    # cannot attach on both sides of an ownership seam.
+                    guard = footprint.to_order(14).extended()
+                    claimed = guard if claimed is None else claimed.union(guard)
+                if 'split' in self.spec:
+                    footprint = footprint.intersection(_split_sky(self.spec['split']))
+                if footprint.empty():
+                    raise ValueError(f"The selected {root['name']} footprint contains no partitions")
+            kwargs: dict[str, Any] = {'client': client, 'partitions_per_chunk': self.spec['partitions_per_chunk'],
+                                      'seed': (seed + i) % 2**32}
+            if joins:
+                if footprint is not None:
+                    kwargs['footprint'] = footprint
+                stream = CrossMatchStream(anchor, *joins, min_catalogs=minimum, **kwargs)
+            else:
+                stream = InfiniteStream(anchor if footprint is None else anchor.moc_search(footprint), **kwargs)
+            if not stream.npartitions:
+                raise ValueError("The selected catalog footprint contains no partitions")
+            streams.append(stream)
+        return streams
 
     def draws(self, *, seed, rank, worker_id):
         """Yield (epoch, finite records) with bounded transport retries, no cursor."""
         _unregister_hf_array2d_extension()
         telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in self.catalogs})
-        failures = generation = draw = 0
+        failures: dict[int | None, int] = {}
+        generation = draw = 0
         while True:
+            star_index = None  # Startup has its own retry budget.
             try:
                 with LocalCluster(
                     processes=False, n_workers=1,
@@ -233,63 +346,47 @@ class CatalogStream:
                     dashboard_address=None,  # pyright: ignore[reportArgumentType] -- documented disable value
                     protocol="inproc", memory_limit=self.spec["worker_memory_limit"],
                 ) as cluster, Client(cluster) as client:
-                    catalogs = []
+                    opened = {}
                     for catalog in self.catalogs:
                         payload = _PROFILES[catalog["decoder"]][0]
                         columns = [_ID_COLUMNS.get(catalog["decoder"], "object_id"), "ra", "dec",
                                    *([payload] if payload else []),
                                    *catalog["scalar_columns"].values()]
-                        catalogs.append(open_catalog(
+                        opened[catalog['name']] = open_catalog(
                             f"hf://datasets/{catalog['repo']}", columns=list(dict.fromkeys(columns)),
-                        ))
-                    kwargs = {
-                        "client": client, "partitions_per_chunk": self.spec["partitions_per_chunk"],
-                        "seed": loader.consumer_seed(seed, rank, worker_id, generation),
-                    }
-                    stream: Any
-                    if len(catalogs) == 1:
-                        stream = InfiniteStream(catalogs[0], **kwargs)
-                    else:
-                        minimum = self.spec["min_catalogs"]
-                        outer = [catalog for catalog, spec in zip(catalogs[1:], self.catalogs[1:], strict=True)
-                                 if spec.get("how", self.spec["how"]) == "outer"]
-                        if minimum > 1 and len(outer) < len(catalogs) - 1:
-                            # Left-joined catalogs only decorate anchor rows: select sky from the
-                            # anchor and outer catalogs alone, so they cannot widen min_catalogs.
-                            _, kwargs["footprint"] = _restrict_to_footprint(catalogs[0], None, outer, minimum)
-                        stream = CrossMatchStream(
-                            catalogs[0], *[
-                                {"other": catalog, "how": spec.get("how", self.spec["how"]),
-                                 "suffixes": ("", f"_{spec['name']}"),
-                                 "radius_arcsec": self.spec["radius_arcsec"]}
-                                for catalog, spec in zip(catalogs[1:], self.catalogs[1:], strict=True)
-                            ],
-                            min_catalogs=self.spec["min_catalogs"], **kwargs,
                         )
-                    if not stream.npartitions:
-                        raise ValueError("The selected catalog footprint contains no partitions")
-                    print(f"[catalog-stream] worker={worker_id} pixels={stream.npartitions} "
-                          f"generation={generation} catalogs={len(catalogs)} "
+                    reader_seed = loader.consumer_seed(seed, rank, worker_id, generation)
+                    streams = self._streams(opened, client, reader_seed)
+                    failures.pop(None, None)
+                    print(f"[catalog-stream] worker={worker_id} pixels={[s.npartitions for s in streams]} "
+                          f"generation={generation} catalogs={len(opened)} "
                           f"min_catalogs={self.spec['min_catalogs']}", flush=True)
-                    for frame in stream:
-                        failures = 0
+                    readers = {}
+                    for star_index in _draw_paths(self.weights, reader_seed % len(streams)):
+                        if star_index not in readers:
+                            readers[star_index] = iter(streams[star_index])
+                        frame = next(readers[star_index], None)
+                        if frame is None:
+                            raise RuntimeError("Infinite catalog stream ended unexpectedly")
+                        failures.pop(star_index, None)
                         epoch = draw
                         draw += 1
                         if frame.empty:
                             continue
-                        decoded = frame.map_rows(self.decode_row, columns=self.columns, infer_nesting=False)
+                        star = self.stars[star_index]
+                        decoded = frame.map_rows(star.decode_row, columns=star.columns, infer_nesting=False)
                         records = filter(None, decoded["record"].tolist())
                         del decoded, frame
                         yield epoch, records
-                raise RuntimeError("Infinite catalog stream ended unexpectedly")
             except Exception as error:
                 if not loader._retryable(error):
                     raise
-                failures += 1
-                if failures > loader._MAX_NET_RETRIES:
+                attempts = failures[star_index] = failures.get(star_index, 0) + 1
+                if attempts > loader._MAX_NET_RETRIES:
                     raise
-                wait = min(5 * 2 ** (failures - 1), loader._MAX_NET_RETRY_WAIT)
-                print(f"[catalog-stream] worker={worker_id} retry={failures} "
+                wait = min(5 * 2 ** (attempts - 1), loader._MAX_NET_RETRY_WAIT)
+                anchor = 'startup' if star_index is None else self.stars[star_index].catalogs[0]['name']
+                print(f"[catalog-stream] worker={worker_id} anchor={anchor} retry={attempts} "
                       f"error={type(error).__name__} wait_s={wait}", flush=True)
                 time.sleep(wait)
                 generation += 1

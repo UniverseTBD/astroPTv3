@@ -20,7 +20,7 @@ import torch
 from ..configuration_astropt3 import AstroPT3Config
 from .echo import echo_draw, validate_echo_factor
 from .packing import ObjectSequencer, PackedCollator
-from .telemetry import install_byte_probe, instrument
+from .telemetry import ANCHOR_METADATA, install_byte_probe, instrument, telemetry_dir
 
 IMAGE_SHAPE = (3, 152, 152)
 _MAX_NET_RETRIES = 60
@@ -89,12 +89,10 @@ def regroup_micro_batch(flat: dict, names) -> dict:
 
 
 def _as_mapping(value: Any) -> Mapping:
+    if hasattr(value, "as_py"):
+        value = value.as_py()  # Arrow StructScalar is also a Mapping of boxed scalars.
     if isinstance(value, Mapping):
         return value
-    if hasattr(value, "as_py"):
-        value = value.as_py()
-        if isinstance(value, Mapping):
-            return value
     if hasattr(value, "to_dict"):
         try:
             value = value.to_dict(orient="list")
@@ -156,6 +154,33 @@ def decode_legacy_image(value: Any) -> dict:
     if len(bands) != IMAGE_SHAPE[0]:
         raise ValueError(f"image has {len(bands)} bands, expected {IMAGE_SHAPE[0]}")
     return {"flux": flux, "band": bands}
+
+
+def decode_legacy_south_image(value: Any) -> dict:
+    """Decode the DR10 South griz cube. MMU's boolean mask is True for clean pixels."""
+    image = _as_mapping(value)
+    bands = list(image.get("band", ()))
+    if bands != ["des-g", "des-r", "des-i", "des-z"]:
+        raise ValueError(f"Legacy South bands must be ordered des-g/r/i/z, got {bands}")
+    scale = np.asarray(image.get("scale"), dtype=np.float32)
+    if scale.shape != (4,) or not np.allclose(scale, 0.262, rtol=1e-6, atol=0):
+        raise ValueError("Legacy South pixel scale must be 0.262 arcsec/pixel in every band")
+
+    def cube(field):
+        if image.get(field) is None:
+            raise ValueError(f"Legacy South image is missing {field}")
+        array = _stack_nested(image[field])
+        if array.shape != (4, 160, 160):
+            raise ValueError(f"Legacy South {field} has shape {array.shape}, expected (4, 160, 160)")
+        return array
+
+    flux = cube("flux").astype(np.float32, copy=False)
+    clean = cube("mask")
+    if clean.dtype != np.bool_:
+        raise ValueError("Legacy South mask must be boolean (True = clean)")
+    ivar = cube("ivar")
+    good = clean & np.isfinite(flux) & np.isfinite(ivar) & (ivar > 0)
+    return {"flux": np.where(good, flux, np.float32(0)), "band": bands, "fill_mask": ~good}
 
 
 def _decode_spectrum(value: Any) -> dict:
@@ -257,6 +282,14 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
     def _pack_records(self, records, *, flush_tail=False):
         rows: list[list] = [[] for _ in range(self.micro_batch_size)]
         used = [0] * self.micro_batch_size
+        track_anchors = telemetry_dir() is not None
+        by_anchor: dict[str, dict[str, int]] = {}
+
+        def flatten(batch):
+            flat = flatten_packed_batch(batch, self.config, self.seq_len)
+            if by_anchor:
+                flat[ANCHOR_METADATA] = by_anchor
+            return flat
 
         for record in records:
             obj = self.sequencer.build(record, epoch=self._epoch)
@@ -272,14 +305,19 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
                     raise AssertionError(
                         f"packing mismatch: {batch['input_ids'].shape} != {expected_shape}"
                     )
-                yield flatten_packed_batch(batch, self.config, self.seq_len)
+                yield flatten(batch)
+                by_anchor = {}
                 rows = [[] for _ in range(self.micro_batch_size)]
                 used = [0] * self.micro_batch_size
                 row_index = 0
             rows[row_index].append(obj)
             used[row_index] += len(obj)
+            if track_anchors and (anchor := record.get("anchor_path")) is not None:
+                counts = by_anchor.setdefault(anchor, {"objects": 0, "tokens_nonpad": 0})
+                counts["objects"] += 1
+                counts["tokens_nonpad"] += len(obj)
         if flush_tail and any(used):
-            yield flatten_packed_batch(self.collator.collate_rows(rows), self.config, self.seq_len)
+            yield flatten(self.collator.collate_rows(rows))
 
 
 def build_astropt3_dataloader(

@@ -3,6 +3,10 @@
 import pytest
 import torch
 from legacy_fixture import make_record
+from test_model import single_band_collator as single_band_collator
+from test_model import single_band_config as single_band_config
+from test_model import single_band_model as single_band_model
+from test_model import single_band_sequencer as single_band_sequencer
 
 from astropt3.data.scalar_registry import scalar_inverse, scalar_normalize
 from astropt3.modalities import gmm_nll
@@ -85,7 +89,8 @@ def test_hsc_shape_keeps_the_sign_of_the_cross_moment():
     assert torch.allclose(scalar_inverse("hsc_shape", out), signed, atol=1e-5)
 
 
-def test_scalar_spans_and_gating(sequencer, full_record):
+def test_scalar_spans_and_gating(single_band_sequencer, full_record):
+    sequencer = single_band_sequencer
     obj = sequencer.build(full_record)
     assert {"Z", "ebv", "photometry"} <= set(obj.masks)
     assert obj.values["Z"].shape == (1, 1)
@@ -101,54 +106,54 @@ def test_scalar_spans_and_gating(sequencer, full_record):
     assert "photometry" not in sequencer.build(partial).masks
     # include_scalars=False strips every scalar span (probe sequences)
     assert set(sequencer.build(full_record, include_scalars=False).masks) == {
-        "images",
+        "legacy_north_g",
         "spectra",
     }
 
 
 def test_scalar_loss_matches_manual_gmm_nll(
-    tiny_model, sequencer, collator, full_record
+    single_band_model, single_band_sequencer, single_band_collator, full_record
 ):
     """Scalar losses are gmm_nll on the raw normalized value, no logdet."""
-    batch = collator(
+    batch = single_band_collator(
         [
-            sequencer.build(
+            single_band_sequencer.build(
                 full_record,
-                modality_order=["images", "spectra", "Z", "ebv", "photometry"],
+                modality_order=["legacy_north_g", "spectra", "Z", "ebv", "photometry"],
             )
         ]
     )
     with torch.no_grad():
-        out = tiny_model(**batch)
+        out = single_band_model(**batch)
         from astropt3.modeling_astropt3 import left_shift_mask
 
         for name in ("Z", "ebv", "photometry"):
             mask = batch["modality_masks"][name]
             hidden = out.last_hidden_state[left_shift_mask(mask)]
-            logits_pi, mu, log_sigma = tiny_model.decoders[name](hidden)
+            logits_pi, mu, log_sigma = single_band_model.decoders[name](hidden)
             manual = gmm_nll(
                 batch["modality_values"][name], logits_pi, mu, log_sigma
             ).mean()
             assert torch.allclose(out.modality_losses[name], manual, atol=1e-6), name
 
 
-def test_scalar_heads_are_gmm_and_never_flow(tiny_config):
+def test_scalar_heads_are_gmm_and_never_flow(single_band_config):
     from astropt3 import AstroPT3Model
     from astropt3.modalities import GMMHead
 
-    model = AstroPT3Model(tiny_config)
+    model = AstroPT3Model(single_band_config)
     for name in ("Z", "ebv", "photometry"):
         assert isinstance(model.decoders[name], GMMHead)
-        assert model.decoders[name].k == tiny_config.scalar_gmm_k
+        assert model.decoders[name].k == single_band_config.scalar_gmm_k
         assert name not in model.flows  # scalars never flow
 
 
-def test_unconditional_generation_covers_scalars(tiny_config):
+def test_unconditional_generation_covers_scalars(single_band_config):
     from astropt3 import AstroPT3Model
     from astropt3.data.packing import ObjectSequencer
     from astropt3.generation import generate
 
-    config = tiny_config
+    config = single_band_config
     torch.manual_seed(0)
     model = AstroPT3Model(config).eval()
     template = ObjectSequencer(config).build(make_record(3, image_only_fraction=0.0))
@@ -165,14 +170,13 @@ def test_unconditional_generation_covers_scalars(tiny_config):
     assert all(torch.isfinite(v).all() for v in sampled.values())
 
 
-def test_scalar_head_metrics(tiny_model):
+def test_scalar_head_metrics(single_band_model, single_band_sequencer):
     """Model-side: given objects whose Z span is pinned last, score the head."""
     from legacy_fixture import record_stream
 
-    from astropt3.data.packing import ObjectSequencer
     from astropt3.eval.scalar_head import scalar_head_metrics
 
-    sequencer = ObjectSequencer(tiny_model.config)
+    sequencer = single_band_sequencer
     objects, targets = [], []
     for record in record_stream(64):
         if record.get("Z") is None or "spectrum" not in record:
@@ -192,7 +196,7 @@ def test_scalar_head_metrics(tiny_model):
         assert int(obj.masks["Z"].nonzero()[0]) > max(
             int(obj.masks[m].nonzero()[-1]) for m in obj.masks if m != "Z"
         )
-    result = scalar_head_metrics(tiny_model, objects, targets, target="Z")
+    result = scalar_head_metrics(single_band_model, objects, targets, target="Z")
     assert result["n_objects"] == 16
     for key in ("nmad", "outlier_frac", "coverage_1sig", "bias", "r2"):
         assert torch.isfinite(torch.tensor(result[key])), key
@@ -255,8 +259,7 @@ GZ10_LABEL = {
 def categorical_model(tiny_config):
     from astropt3 import AstroPT3Config, AstroPT3Model
 
-    config = AstroPT3Config(**{**tiny_config.to_dict(), "modalities": [*tiny_config.modalities, GZ10_LABEL],
-                               "vocab_size": 67})
+    config = AstroPT3Config(**{**tiny_config.to_dict(), "modalities": [*tiny_config.modalities, GZ10_LABEL]})
     torch.manual_seed(0)
     return AstroPT3Model(config).eval()
 
@@ -293,17 +296,17 @@ def test_categorical_generation_samples_one_hot_classes(categorical_model, full_
     from astropt3.data.packing import ObjectSequencer
     from astropt3.generation import generate
 
-    template = ObjectSequencer(categorical_model.config).build(
-        {**full_record, "gz10_label": 3}, modality_order=["images", "gz10_label"] if "spectrum" not in full_record
-        else ["images", "spectra", "Z", "ebv", "photometry", "gz10_label"],
-    )
+    sequencer = ObjectSequencer(categorical_model.config)
+    record = {**full_record, "gz10_label": 3}
+    order = list(sequencer.build(full_record).masks)
+    template = sequencer.build(record, modality_order=[*order, "gz10_label"])
     sampled = generate(categorical_model, template, {"gz10_label"}, n=4,
                        generator=torch.Generator().manual_seed(0))["gz10_label"]
     assert sampled.shape == (4, 1, 10)
     assert torch.equal(sampled.sum(-1), torch.ones(4, 1)) and set(sampled.unique().tolist()) <= {0.0, 1.0}
 
 
-@pytest.mark.parametrize("patch", [{"categories": 10, "family": "image"}, {"categories": 10, "input_size": 9},
+@pytest.mark.parametrize("patch", [{"categories": 10, "family": "spectrum"}, {"categories": 10, "input_size": 9},
                                    {"categories": 1, "input_size": 1}])
 def test_categorical_config_is_validated(patch):
     from astropt3.modalities import ModalityConfig

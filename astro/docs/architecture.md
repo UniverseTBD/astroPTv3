@@ -4,9 +4,10 @@
 [`training.md`](training.md).*
 
 Training uses live LSDB access to YAML-configured catalogs and modality lists.
-Every recipe combines LegacySurvey North, HSC and galaxies-with-hats images with
-DESI and SDSS spectra and nine galaxies-with-hats scalars. This document focuses
-on the survey-to-model contract.
+The training recipes combine Legacy Survey North, Legacy Survey South and HSC
+image bands, galaxies-with-hats and Galaxy10 RGB images, DESI and SDSS spectra,
+and 42 scalar modalities including PROVABGS and the Galaxy10 morphology label.
+This document focuses on the survey-to-model contract.
 
 ## What this is
 
@@ -64,9 +65,12 @@ survey data to model input (using LegacySurvey and DESI as examples):
    is unchanged.
 
 3. **Patchify** (`tokenization.py`):
-   - images → central 96×96 crop (`packing.IMAGE_CROP`; JWST cubes are
-     already 96×96) → **144 patches of 192 floats** (8×8×3), integer
-     patch-index positions;
+   - calibrated images → select a channel by its configured `band` label,
+     crop to 96×96, then form **144 patches of 64 floats per band** (8×8),
+     with integer positions restarting at zero for each band;
+   - display RGB (`image_format: rgb`) → keep all three channels together.
+     Galaxies-with-hats and Galaxy10 each use the whole 256×256 image:
+     **256 patches of 768 floats** (16×16×3);
    - spectra → pad 7781→7936 → **31 patches of 256 floats**, each with a
      *continuous* position: the patch's mean wavelength, normalized
      `(λ−3000)/7000`.
@@ -76,12 +80,12 @@ survey data to model input (using LegacySurvey and DESI as examples):
    each patch's mean and variance would break the flow's likelihood in patch
    space. Present modality spans are wrapped in frozen special tokens and
    shuffled in a deterministic order based on the source id and stream draw.
-   An image contributes 144 patches and a spectrum 31; optional scalar
-   modalities each contribute a one-token span when configured and present.
-   For the image+spectrum-only config, that is 180 tokens per paired source
-   or 147 per image-only source, including span markers and `<|bos|>`.
-   `tokenization.py` defines the frozen 64-id marker vocabulary; there is no
-   text vocabulary or lm_head.
+   Each calibrated band is a span with its own begin, placeholder and end IDs.
+   `legacy_north_g`, `legacy_south_g` and `hsc_g` are separate categories
+   regardless of patch index or span order. Absent sources contribute no spans;
+   a present cube must contain each configured band exactly once. A DESI
+   spectrum contributes 31 patches and an optional scalar contributes one token.
+   See [image categories](#image-categories-and-checkpoints) for the token budget.
 
 5. **Packing** (`PackedCollator`): whole objects (never split) are packed
    greedily into fixed rows of `sequence_length` (4096);
@@ -96,12 +100,37 @@ survey data to model input (using LegacySurvey and DESI as examples):
      row-major (batch, time) order — exactly the order boolean-mask indexing
      produces — so the model aligns values to slots without index tensors.
 
+### Image categories and checkpoints
+
+| Source | Categories, in ID-block order | Marker IDs | Tokens with BOS, image only |
+|---|---|---|---:|
+| Legacy North | `legacy_north_{g,r,z}` | 160–168 | 439 |
+| Legacy South | `legacy_south_{g,r,i,z}` | 169–180 | 585 |
+| HSC | `hsc_{g,r,i,z,y}` | 181–195 | 731 |
+| Galaxies-with-hats | `galaxies` (display RGB) | 23–25 | 259 |
+| Galaxy10 | `gz10_images` (display RGB) | 145–147 | 259 |
+
+Each row's IDs are assigned in consecutive triplets per category. Training
+recipes use a 256-row vocabulary; there is no text vocabulary. The
+survey-wide image blocks at 2–4, 20–22, and 53–55 stay reserved. The ladder
+leaves 38–52 unassigned and uses 196–213 for its six additional survey scalar
+blocks, preserving marker meanings across recipes. HF and
+Nanotron checkpoints carry the same modality definitions, including `band`
+and `image_format` where applicable. Each band has its own encoder, position
+embedding, flow and head. Train the band models from scratch; resume requires
+a checkpoint with the same modality definitions.
+
+The offline packing test puts each Legacy anchor on a separate object, with
+HSC and RGB partners. The two image-only objects use 3000 of 4096 slots when
+packed together. This checks length and packing arithmetic, not utilization
+or throughput of the live training stream.
+
 ## The model
 
 Both implementations share this spec (`modeling_astropt3.py` is the readable
 reference):
 
-- **Input assembly**: `embed_tokens(input_ids)` over the 64-id vocab, plus an
+- **Input assembly**: `embed_tokens(input_ids)` over the modality vocabulary, plus an
   *additive* delta at each modality-placeholder slot:
   `embed(<|m|>) + encoder_m(value) + pos_embed_m(position)`. The placeholder
   embedding acts as a learned modality-type embedding; nothing is overwritten
@@ -112,8 +141,9 @@ reference):
   modality also has a per-modality normalizing flow (`JetFormerFlow`, ViT
   conditioners over each object's modality span; `docs/jetformer-flow.md`)
   that maps its raw patch values to latents z — z is both what gets embedded and what
-  the `GMMHead` decoder predicts; scalar modalities (`Z`, `ebv`, `photometry`)
-  skip the flow and feed a `GMMHead` directly on the raw normalized value.
+  the `GMMHead` decoder predicts. Scalars bypass the flow: continuous values
+  use a `GMMHead` on the normalized value; categorical values are one-hot on
+  input and use a `CategoricalHead` with cross-entropy.
 - **Body**: the stock SmolLM3 decoder stack, consuming `inputs_embeds`.
   RoPE θ=100k, **NoPE every 4th layer** (`no_rope_layer: 4` /
   `no_rope_layer_interval: 4`), GQA, RMSNorm ε=1e-6, SwiGLU, bf16 training.
@@ -142,7 +172,7 @@ completed training or scientific scaling study at every size.
 - **nanotron fork** (`Smith42/nanotron`, branch `astropt3`, git submodule at
   repo root `nanotron/`): the *training* implementation.
   `src/nanotron/models/astropt3.py` is the branch's Qwen2/SmolLM3 stack with
-  the vocab-embedding block replaced by the 64-id + modality assembly, and
+  the vocab-embedding block replaced by modality markers and continuous payloads, and
   the lm_head + sharded-CE loss replaced by modality flows/GMM heads +
   masked exact-likelihood loss.
   `run_train.py` gains an `astropt3_streaming` dataset type that calls back

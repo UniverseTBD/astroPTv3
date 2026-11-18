@@ -22,12 +22,16 @@ def recipe():
 @pytest.mark.parametrize("count", [1, 2, 4])
 def test_templates_use_selected_catalogs_and_close_after_one_draw(monkeypatch, recipe, count):
     # Start with SDSS so single-modality generation cannot fall back to Legacy.
-    modalities = recipe["model"]["model_config"]["modalities"]
-    modalities = [modalities[2], modalities[1], modalities[3], modalities[0]][:count]
+    modalities = {m["name"]: m for m in recipe["model"]["model_config"]["modalities"]}
+    names = ["sdss_spectra", "spectra", "hsc_g", "legacy_north_g"]
+    modalities = [modalities[name] for name in names[:count]]
     config = hf_config_from_modalities(modalities)
     keys = [modality["record_keys"][0] for modality in modalities]
     spec = recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
-    spec["catalogs"] = [next(cat for cat in spec["catalogs"] if cat["record_key"] == key) for key in keys]
+    available = spec["anchors"] + spec["catalogs"]
+    selected = [next(cat for cat in available if cat["record_key"] == key).copy() for key in keys]
+    spec["anchors"] = [{**selected[0], "draw_weight": 1}]
+    spec["catalogs"] = [{k: v for k, v in cat.items() if k != "draw_weight"} for cat in selected[1:]]
     spec["min_catalogs"] = min(count, 3)
     before = copy.deepcopy(spec)
     sparse = {"object_id": "sparse", keys[0]: {}}
@@ -35,7 +39,7 @@ def test_templates_use_selected_catalogs_and_close_after_one_draw(monkeypatch, r
     closed = []
 
     def draws(stream, **kwargs):
-        assert [cat["record_key"] for cat in stream.catalogs] == keys
+        assert [cat["record_key"] for cat in stream.spec["anchors"] + stream.spec["catalogs"]] == keys
         assert kwargs == {"seed": 17, "rank": 0, "worker_id": 0}
         try:
             yield 0, iter([sparse, full])
@@ -53,13 +57,26 @@ def test_templates_use_selected_catalogs_and_close_after_one_draw(monkeypatch, r
     assert closed == [True, True]
 
 
+def test_template_ranking_counts_image_sources_not_bands(monkeypatch, recipe):
+    config = hf_config_from_modalities(recipe["model"]["model_config"]["modalities"])
+    spec = recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
+    hsc_only = {"object_id": "hsc", "hsc_image": {}}
+    north_and_spectrum = {"object_id": "north", "image": {}, "spectrum": {}}
+
+    def draws(*args, **kwargs):
+        yield 0, [hsc_only, north_and_spectrum]
+
+    monkeypatch.setattr(cli.CatalogStream, "draws", draws)
+    assert cli._draw_live_records(config, spec, [0, 1], 17) == [north_and_spectrum, hsc_only]
+
+
 @pytest.mark.parametrize("rows", [[], [-1], [0, -2]])
 def test_invalid_template_indices_fail_before_opening_catalogs(rows):
     with pytest.raises(ValueError, match="nonnegative"):
         cli._draw_live_records(None, {}, rows, 0)
 
 
-@pytest.mark.parametrize("invalid", ["missing", "legacy", "multiple"])
+@pytest.mark.parametrize("invalid", ["missing", "legacy", "multiple", "split"])
 def test_cli_rejects_old_or_ambiguous_recipes_before_loading_checkpoint(monkeypatch, tmp_path, recipe, invalid):
     from transformers import AutoConfig
 
@@ -67,6 +84,8 @@ def test_cli_rejects_old_or_ambiguous_recipes_before_loading_checkpoint(monkeypa
         del recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
     elif invalid == "legacy":
         recipe["data_stages"][0]["data"]["dataset"]["crossmatch_desi"] = False
+    elif invalid == "split":
+        recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]["split"] = "typo"
     else:
         recipe["data_stages"] *= 2
     path = tmp_path / "recipe.yaml"
@@ -80,11 +99,19 @@ def test_cli_rejects_old_or_ambiguous_recipes_before_loading_checkpoint(monkeypa
     assert not output.exists()
 
 
-def test_cli_forwards_explicit_stream_to_template_selection(monkeypatch, tmp_path, recipe):
+@pytest.mark.parametrize("configured,override,expected", [
+    ("train", [], "validation"), ("train", ["--split", "train"], "train"), (None, [], None),
+])
+def test_cli_forwards_explicit_stream_to_template_selection(monkeypatch, tmp_path, recipe, configured, override, expected):
     from transformers import AutoConfig
 
     from astropt3.eval import samples
 
+    training_stream = recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
+    if configured is None:
+        training_stream.pop("split", None)
+    else:
+        training_stream["split"] = configured
     path = tmp_path / "recipe.yaml"
     path.write_text(yaml.safe_dump(recipe))
     config = hf_config_from_modalities(recipe["model"]["model_config"]["modalities"])
@@ -93,16 +120,19 @@ def test_cli_forwards_explicit_stream_to_template_selection(monkeypatch, tmp_pat
 
     def draw(actual_config, spec, rows, seed):
         assert actual_config is config
-        assert spec == recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
+        assert spec == (training_stream if expected is None else {**training_stream, "split": expected})
         assert rows == [1, 0] and seed == 17
         return records
 
     def sample(checkpoint, actual_records, **kwargs):
         assert checkpoint == "unused" and actual_records is records
+        assert kwargs["band"] == "hsc_g" and kwargs["modes"] == ["image-to-spectra"]
         return {}
 
     monkeypatch.setattr(cli, "_draw_live_records", draw)
     monkeypatch.setattr(samples, "sample_checkpoint", sample)
     monkeypatch.setattr(sys, "argv", ["generate.py", "--checkpoint", "unused", "--config-file", str(path),
-                                     "--rows", "1,0", "--stream-seed", "17", "--out", str(tmp_path / "output")])
+                                     "--rows", "1,0", "--stream-seed", "17", "--band", "hsc_g",
+                                     "--mode", "image-to-spectra",
+                                     *override, "--out", str(tmp_path / "output")])
     cli.main()

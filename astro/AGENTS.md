@@ -46,9 +46,10 @@ stages is implicit and easy to break, so understand it before editing:
    live from the HF hub inside each DataLoader worker** by
    `data/catalog_stream.py` via merged LSDB main (commit pinned in
    `uv.lock`): `InfiniteStream` for one catalog, `CrossMatchStream` for several.
-   Explicit YAML `catalog_stream` lists define the sources and join policy.
-   Generation uses
-   this same stream. Upstream owns footprint and boundary-match semantics;
+   Explicit YAML `catalog_stream.anchors` and `catalog_stream.catalogs`
+   define anchors and shared partners. Generation uses the same stream.
+   AstroPT composes the sky masks for anchor ownership and evaluation splits;
+   LSDB handles catalog coverage, footprint filtering and boundary matching.
    AstroPT retains decoding, calibration, quality gates and bounded retries.
    `min_catalogs` selects sky coverage, not a per-record modality count;
    unknown settings are rejected.
@@ -81,8 +82,9 @@ stages is implicit and easy to break, so understand it before editing:
    modality, spans serialized in a **uniform random order seeded on
    `crc32(object_id) ^ epoch`** (resume-exact, always on — every
    conditional among the present spans lands in training; ADR 0008,
-   generalizing 0005's bimodal 50/50 flip). Images → 144 patch-8 tokens
-   (192 floats); spectra → 31 patch-256 tokens with normalized per-patch
+   generalizing 0005's bimodal 50/50 flip). Calibrated images have separate
+   source-and-band spans, each with 144 patch-8 tokens (64 floats); display
+   RGB stays one span. DESI spectra → 31 patch-256 tokens with normalized per-patch
    mean wavelength as a continuous position; ADR 0008 adds one-token
    **scalar modalities** (`Z` gated on ZWARN==0, `ebv`, joint 3-band
    `photometry`; `data/scalar_registry.py` fixed transforms; the scalar family
@@ -101,7 +103,7 @@ stages is implicit and easy to break, so understand it before editing:
      row-major (batch, time) order — exactly the order boolean-mask
      indexing produces. The model relies on this to align values without
      indices.
-4. **`AstroPT3Model`** (`modeling_astropt3.py`): 64-id `embed_tokens` (no
+4. **`AstroPT3Model`** (`modeling_astropt3.py`): marker-only `embed_tokens` (no
    text vocab, no lm_head) + additive deltas
    `encoder_m(value) + pos_embed_m(position)` at placeholder slots →
    `SmolLM3Model(inputs_embeds=…)` → per-modality regression heads. The

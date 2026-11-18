@@ -1,0 +1,713 @@
+# North-only anchor control: original partner catalogs and join policy.
+# AstroPT3 70M multimodal pretraining (Pythia-mirrored size; recipe: 32 GPUs,
+# TP=1, DP=32, ZeRO-1, no recompute — see astro/EXPERIMENTS.md Part I
+# parallelism table).
+#
+#   sbatch --nodes=4 astro/scripts/launch_slurm.sbatch \
+#       astro/configs/controls/astropt3-70m-north.yaml
+#
+# GBS = dp(32) x mbs(16) x seq(4096) = 2.10M tokens/step.
+# Dry-run 100 steps at the target topology first (see the sbatch header).
+# For a smaller box, scale `parallelism.dp` down and
+# `batch_accumulation_per_replica` up to keep GBS.
+# TP=1 sizes also run on one GPU: astro/scripts/run_train.bash sets DP=1.
+general:
+  project: astropt3
+  run: astropt3-70m-north
+  seed: 42
+  step: null
+  consumed_train_samples: null
+  benchmark_csv_path: null
+  # must stay true: flattened modality tensors differ in shape across DP
+  # ranks, which the DP input sanity check cannot handle
+  ignore_sanity_checks: true
+logging:
+  iteration_step_info_interval: 1
+  log_level: info
+  log_level_replica: info
+model:
+  ddp_bucket_cap_mb: 25
+  dtype: bfloat16
+  init_method:
+    std: 0.02
+  make_vocab_size_divisible_by: 1
+  model_config:
+    is_astropt3_config: true
+    # JetFormer flow width = min(hidden_size // 4, 512).
+    jetformer_flow_steps: 8
+    jetformer_flow_hidden: 128
+    jetformer_flow_depth: 4
+    jetformer_flow_heads: 8
+    modalities:
+      - {name: legacy_north_g, family: image, source: legacy_north,
+         record_keys: [image], band: des-g, token_ids: [160, 161, 162],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: legacy_north_r, family: image, source: legacy_north,
+         record_keys: [image], band: des-r, token_ids: [163, 164, 165],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: legacy_north_z, family: image, source: legacy_north,
+         record_keys: [image], band: des-z, token_ids: [166, 167, 168],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - name: spectra
+        family: spectrum
+        source: desi
+        record_keys: [spectrum]
+        token_ids: [5, 6, 7]
+        input_size: 256
+        patch_size: 256
+        pos_type: continuous
+        pos_input_size: 1
+        max_positions: 1024
+      - name: sdss_spectra
+        family: spectrum
+        source: sdss
+        record_keys: [spectrum_sdss]
+        token_ids: [17, 18, 19]
+        input_size: 256
+        patch_size: 256
+        pos_type: continuous
+        pos_input_size: 1
+        max_positions: 1024
+      - {name: hsc_g, family: image, source: hsc,
+         record_keys: [hsc_image], band: hsc-g, token_ids: [181, 182, 183],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: hsc_r, family: image, source: hsc,
+         record_keys: [hsc_image], band: hsc-r, token_ids: [184, 185, 186],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: hsc_i, family: image, source: hsc,
+         record_keys: [hsc_image], band: hsc-i, token_ids: [187, 188, 189],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: hsc_z, family: image, source: hsc,
+         record_keys: [hsc_image], band: hsc-z, token_ids: [190, 191, 192],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - {name: hsc_y, family: image, source: hsc,
+         record_keys: [hsc_image], band: hsc-y, token_ids: [193, 194, 195],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - name: galaxies
+        family: image
+        source: galaxies_with_hats
+        record_keys: [galaxy_image]
+        image_format: rgb
+        token_ids: [23, 24, 25]
+        input_size: 768 # 16 * 16 * 3: 8-bit RGB PNG scaled to [0, 1]
+        patch_size: 16
+        pos_type: index
+        pos_input_size: 1
+        max_positions: 256 # whole 256x256 image, (256 / 16)^2 patches
+        image_crop: 0 # keep the whole image (the galaxy fills the frame)
+      - name: Z
+        family: scalar
+        source: desi
+        record_keys: [Z]
+        token_ids: [8, 9, 10]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: ebv
+        family: scalar
+        source: legacy
+        record_keys: [ebv]
+        token_ids: [11, 12, 13]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: photometry
+        family: scalar
+        source: legacy
+        record_keys: [flux_g, flux_r, flux_z]
+        token_ids: [14, 15, 16]
+        input_size: 3
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_redshift
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_redshift]
+        token_ids: [26, 27, 28]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_mass_med_photoz
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_mass_med_photoz]
+        token_ids: [29, 30, 31]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_total_sfr_median
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_total_sfr_median]
+        token_ids: [32, 33, 34]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_total_ssfr_median
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_total_ssfr_median]
+        token_ids: [35, 36, 37]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: fiberflux
+        family: scalar
+        source: legacy
+        record_keys: [fiberflux_g, fiberflux_r, fiberflux_z]
+        token_ids: [196, 197, 198]
+        input_size: 3
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: psfdepth
+        family: scalar
+        source: legacy
+        record_keys: [psfdepth_g, psfdepth_r, psfdepth_z]
+        token_ids: [199, 200, 201]
+        input_size: 3
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: sdss_Z
+        family: scalar
+        source: sdss
+        record_keys: [sdss_Z]
+        token_ids: [202, 203, 204]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: sdss_vdisp
+        family: scalar
+        source: sdss
+        record_keys: [sdss_VDISP]
+        token_ids: [205, 206, 207]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: hsc_cmodel_mag
+        family: scalar
+        source: hsc
+        record_keys: [hsc_g_cmodel_mag, hsc_r_cmodel_mag, hsc_i_cmodel_mag, hsc_z_cmodel_mag, hsc_y_cmodel_mag]
+        token_ids: [208, 209, 210]
+        input_size: 5
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: hsc_extendedness
+        family: scalar
+        source: hsc
+        record_keys: [hsc_i_extendedness_value]
+        token_ids: [211, 212, 213]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: hsc_shape
+        family: scalar
+        source: hsc
+        record_keys: [hsc_i_sdssshape_shape11, hsc_i_sdssshape_shape22, hsc_i_sdssshape_shape12]
+        token_ids: [56, 57, 58]
+        input_size: 3
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: hsc_psf_shape
+        family: scalar
+        source: hsc
+        record_keys: [hsc_i_sdssshape_psf_shape11, hsc_i_sdssshape_psf_shape22, hsc_i_sdssshape_psf_shape12]
+        token_ids: [59, 60, 61]
+        input_size: 3
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_gz_smooth-or-featured
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_smooth-or-featured_smooth_fraction, gwh_smooth-or-featured_featured-or-disk_fraction]
+        token_ids: [64, 65, 66]
+        input_size: 2
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_gz_disk-edge-on
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_disk-edge-on_yes_fraction]
+        token_ids: [67, 68, 69]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_gz_has-spiral-arms
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_has-spiral-arms_yes_fraction]
+        token_ids: [70, 71, 72]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_gz_bar
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_bar_strong_fraction, gwh_bar_weak_fraction]
+        token_ids: [73, 74, 75]
+        input_size: 2
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_gz_bulge-size
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_bulge-size_dominant_fraction, gwh_bulge-size_large_fraction, gwh_bulge-size_moderate_fraction, gwh_bulge-size_small_fraction]
+        token_ids: [76, 77, 78]
+        input_size: 4
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_gz_how-rounded
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_how-rounded_round_fraction, gwh_how-rounded_in-between_fraction]
+        token_ids: [79, 80, 81]
+        input_size: 2
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_gz_edge-on-bulge
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_edge-on-bulge_boxy_fraction, gwh_edge-on-bulge_rounded_fraction]
+        token_ids: [82, 83, 84]
+        input_size: 2
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_gz_spiral-winding
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_spiral-winding_tight_fraction, gwh_spiral-winding_medium_fraction]
+        token_ids: [85, 86, 87]
+        input_size: 2
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_gz_spiral-arm-count
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_spiral-arm-count_1_fraction, gwh_spiral-arm-count_2_fraction, gwh_spiral-arm-count_3_fraction, gwh_spiral-arm-count_4_fraction, gwh_spiral-arm-count_more-than-4_fraction]
+        token_ids: [88, 89, 90]
+        input_size: 5
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_gz_merging
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_merging_minor-disturbance_fraction, gwh_merging_major-disturbance_fraction, gwh_merging_merger_fraction]
+        token_ids: [91, 92, 93]
+        input_size: 3
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_est_petro_th50
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_est_petro_th50]
+        token_ids: [94, 95, 96]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_sersic_n
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_sersic_n]
+        token_ids: [97, 98, 99]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_sersic_ba
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_sersic_ba]
+        token_ids: [100, 101, 102]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_petro_radius
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_petro_th50, gwh_petro_th90]
+        token_ids: [103, 104, 105]
+        input_size: 2
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_nsa_mag
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_mag_f, gwh_mag_n, gwh_mag_u, gwh_mag_i]
+        token_ids: [106, 107, 108]
+        input_size: 4
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_logMH
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_logMH]
+        token_ids: [109, 110, 111]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_W50
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_W50]
+        token_ids: [112, 113, 114]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_fibre_sfr_median
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_fibre_sfr_median]
+        token_ids: [115, 116, 117]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_fibre_ssfr_median
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_fibre_ssfr_median]
+        token_ids: [118, 119, 120]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_ssfr_med_photoz
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_ssfr_med_photoz]
+        token_ids: [121, 122, 123]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: provabgs_LOG_MSTAR
+        family: scalar
+        source: provabgs
+        record_keys: [provabgs_LOG_MSTAR]
+        token_ids: [124, 125, 126]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: provabgs_Z_MW
+        family: scalar
+        source: provabgs
+        record_keys: [provabgs_Z_MW]
+        token_ids: [127, 128, 129]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: provabgs_TAGE_MW
+        family: scalar
+        source: provabgs
+        record_keys: [provabgs_TAGE_MW]
+        token_ids: [130, 131, 132]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: provabgs_AVG_SFR
+        family: scalar
+        source: provabgs
+        record_keys: [provabgs_AVG_SFR]
+        token_ids: [133, 134, 135]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: provabgs_MAG_W1
+        family: scalar
+        source: provabgs
+        record_keys: [provabgs_MAG_W1]
+        token_ids: [136, 137, 138]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gwh_petro_ba
+        family: scalar
+        source: galaxies_with_hats
+        record_keys: [gwh_petro_ba50, gwh_petro_ba90]
+        token_ids: [139, 140, 141]
+        input_size: 2
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: gz10_label
+        family: scalar
+        source: gz10
+        record_keys: [gz10_label]
+        token_ids: [142, 143, 144]
+        input_size: 10
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+        categories: 10 # one-hot in, softmax/cross-entropy head out
+      - name: gz10_images
+        family: image
+        source: gz10
+        record_keys: [gz10_image]
+        token_ids: [145, 146, 147]
+        input_size: 768 # 16 * 16 * 3: 8-bit RGB PNG scaled to [0, 1], as galaxies
+        patch_size: 16
+        pos_type: index
+        pos_input_size: 1
+        max_positions: 256
+        image_format: rgb
+        image_crop: 0
+    spiral: true # center-outward image patch order (ADR 0004)
+    hidden_size: 512
+    num_hidden_layers: 23
+    num_attention_heads: 8
+    num_key_value_heads: 2
+    intermediate_size: 1536
+    max_position_embeddings: 4096
+    rope_theta: 100000.0
+    no_rope_layer: 4
+    rms_norm_eps: 1.0e-06
+    rope_interleaved: false
+    hidden_act: silu
+    attention_bias: false
+    initializer_range: 0.02
+    vocab_size: 256
+    pad_token_id: 0
+    bos_token_id: 1
+    eos_token_id: 1
+    tie_word_embeddings: false
+    use_cache: false
+    _attn_implementation: flash_attention_2
+    _use_qkv_packed: true
+    _use_doc_masking: true
+    _fused_rms_norm: true
+    _fused_rotary_emb: true
+    log_attn_probs: false
+parallelism:
+  dp: 32
+  pp: 1 # PP=1 everywhere by design
+  tp: 1
+  context_parallel_size: 1
+  expert_parallel_size: 1
+  pp_engine: 1f1b
+  tp_mode: ALL_REDUCE # required: modality modules are TP-replicated
+  tp_linear_async_communication: false
+  recompute_layer: false
+data_stages:
+  - name: multimodal
+    start_training_step: 1
+    data:
+      dataset:
+        is_astropt3_streaming: true
+        echo_factor: 4
+        catalog_stream:
+          split: train
+          anchors:
+            - name: legacy
+              draw_weight: 1
+              repo: >-
+                UniverseTBD/mmu_ssl_legacysurvey_north@f634744d3c44dd4fde0dee3172d4887c5e3c31c0
+              decoder: legacy_image
+              record_key: image
+              scalar_columns:
+                ebv: ebv
+                flux_g: flux_g
+                flux_r: flux_r
+                flux_z: flux_z
+                fiberflux_g: fiberflux_g
+                fiberflux_r: fiberflux_r
+                fiberflux_z: fiberflux_z
+                psfdepth_g: psfdepth_g
+                psfdepth_r: psfdepth_r
+                psfdepth_z: psfdepth_z
+          catalogs:
+            - name: sdss
+              repo: >-
+                UniverseTBD/mmu_sdss_sdss@da175ca9bb931f4301ab950431922ba9f99089ba
+              decoder: sdss_spectrum
+              record_key: spectrum_sdss
+              scalar_columns:
+                sdss_Z: Z
+                sdss_ZWARNING: ZWARNING
+                sdss_VDISP: VDISP
+            - name: desi
+              repo: >-
+                UniverseTBD/mmu_desi_edr_sv3@9fd88ba48233cb9857701ce802a7eade2d4c4a88
+              decoder: desi_spectrum
+              record_key: spectrum
+              scalar_columns:
+                Z: Z
+                ZWARN: ZWARN
+            - name: hsc
+              repo: >-
+                hugging-science/mmu_hsc_pdr3_wide_21@7de6b92fd99097207a00b9c42f2d2862d62662bf
+              decoder: hsc_image
+              record_key: hsc_image
+              scalar_columns:
+                hsc_g_cmodel_mag: g_cmodel_mag
+                hsc_r_cmodel_mag: r_cmodel_mag
+                hsc_i_cmodel_mag: i_cmodel_mag
+                hsc_z_cmodel_mag: z_cmodel_mag
+                hsc_y_cmodel_mag: y_cmodel_mag
+                hsc_g_cmodel_magerr: g_cmodel_magerr
+                hsc_r_cmodel_magerr: r_cmodel_magerr
+                hsc_i_cmodel_magerr: i_cmodel_magerr
+                hsc_z_cmodel_magerr: z_cmodel_magerr
+                hsc_y_cmodel_magerr: y_cmodel_magerr
+                hsc_i_extendedness_value: i_extendedness_value
+                hsc_i_sdssshape_shape11: i_sdssshape_shape11
+                hsc_i_sdssshape_shape22: i_sdssshape_shape22
+                hsc_i_sdssshape_shape12: i_sdssshape_shape12
+                hsc_i_sdssshape_psf_shape11: i_sdssshape_psf_shape11
+                hsc_i_sdssshape_psf_shape22: i_sdssshape_psf_shape22
+                hsc_i_sdssshape_psf_shape12: i_sdssshape_psf_shape12
+            - name: galaxies
+              repo: >-
+                Smith42/galaxies-with-hats@c0188b776c4ce6312a805a04cbc25c891a075933/train
+              decoder: rgb_png
+              record_key: galaxy_image
+              how: left # no HATS margin cache, which outer joins require
+              scalar_columns:
+                gwh_redshift: redshift
+                gwh_mass_med_photoz: mass_med_photoz
+                gwh_total_sfr_median: total_sfr_median
+                gwh_total_sfr_flag: total_sfr_flag
+                gwh_total_ssfr_median: total_ssfr_median
+                gwh_total_ssfr_flag: total_ssfr_flag
+                gwh_smooth-or-featured_smooth_fraction: smooth-or-featured_smooth_fraction
+                gwh_smooth-or-featured_featured-or-disk_fraction: smooth-or-featured_featured-or-disk_fraction
+                gwh_disk-edge-on_yes_fraction: disk-edge-on_yes_fraction
+                gwh_has-spiral-arms_yes_fraction: has-spiral-arms_yes_fraction
+                gwh_bar_strong_fraction: bar_strong_fraction
+                gwh_bar_weak_fraction: bar_weak_fraction
+                gwh_bulge-size_dominant_fraction: bulge-size_dominant_fraction
+                gwh_bulge-size_large_fraction: bulge-size_large_fraction
+                gwh_bulge-size_moderate_fraction: bulge-size_moderate_fraction
+                gwh_bulge-size_small_fraction: bulge-size_small_fraction
+                gwh_how-rounded_round_fraction: how-rounded_round_fraction
+                gwh_how-rounded_in-between_fraction: how-rounded_in-between_fraction
+                gwh_edge-on-bulge_boxy_fraction: edge-on-bulge_boxy_fraction
+                gwh_edge-on-bulge_rounded_fraction: edge-on-bulge_rounded_fraction
+                gwh_spiral-winding_tight_fraction: spiral-winding_tight_fraction
+                gwh_spiral-winding_medium_fraction: spiral-winding_medium_fraction
+                gwh_spiral-arm-count_1_fraction: spiral-arm-count_1_fraction
+                gwh_spiral-arm-count_2_fraction: spiral-arm-count_2_fraction
+                gwh_spiral-arm-count_3_fraction: spiral-arm-count_3_fraction
+                gwh_spiral-arm-count_4_fraction: spiral-arm-count_4_fraction
+                gwh_spiral-arm-count_more-than-4_fraction: spiral-arm-count_more-than-4_fraction
+                gwh_merging_minor-disturbance_fraction: merging_minor-disturbance_fraction
+                gwh_merging_major-disturbance_fraction: merging_major-disturbance_fraction
+                gwh_merging_merger_fraction: merging_merger_fraction
+                gwh_est_petro_th50: est_petro_th50
+                gwh_sersic_n: sersic_n
+                gwh_sersic_ba: sersic_ba
+                gwh_petro_th50: petro_th50
+                gwh_petro_th90: petro_th90
+                gwh_petro_ba50: petro_ba50
+                gwh_petro_ba90: petro_ba90
+                gwh_mag_f: mag_f
+                gwh_mag_n: mag_n
+                gwh_mag_u: mag_u
+                gwh_mag_i: mag_i
+                gwh_logMH: logMH
+                gwh_W50: W50
+                gwh_fibre_sfr_median: fibre_sfr_median
+                gwh_fibre_ssfr_median: fibre_ssfr_median
+                gwh_ssfr_med_photoz: ssfr_med_photoz
+            - name: provabgs
+              repo: >-
+                UniverseTBD/mmu_desi_provabgs@a50ea5c2baacfea8d88c48baf78bd9c507c2f525
+              decoder: scalars
+              how: left # decorates anchored objects; scalar-only rows would be label-only objects
+              scalar_columns:
+                provabgs_LOG_MSTAR: LOG_MSTAR
+                provabgs_Z_MW: Z_MW
+                provabgs_TAGE_MW: TAGE_MW
+                provabgs_AVG_SFR: AVG_SFR
+                provabgs_MAG_W1: MAG_W1
+            - name: gz10
+              repo: >-
+                UniverseTBD/mmu_gz10@e99918709f5c6bccf496bebbc2790cb69c51851c
+              decoder: gz10_png
+              record_key: gz10_image
+              how: left # decorates anchored objects; outer would let it widen the min_catalogs footprint
+              scalar_columns:
+                gz10_label: gz10_label
+          how: outer
+          min_catalogs: 3
+          radius_arcsec: 1.0
+          partitions_per_chunk: 4
+          worker_memory_limit: 64GiB
+      seed: 42
+      # Each worker owns a catalog stream; size for available CPU/RAM.
+      num_loading_workers: 8
+optimizer:
+  accumulate_grad_in_fp32: true
+  clip_grad: 1.0
+  learning_rate_scheduler:
+    learning_rate: 0.001 # Pythia 70M peak LR
+    lr_warmup_steps: 2000 # min(2000, 1% of train_steps)
+    lr_warmup_style: linear
+    lr_decay_style: cosine # cosine to 0.1x peak
+    lr_decay_steps: null # defaults to train_steps - warmup
+    lr_decay_starting_step: null
+    min_decay_lr: 0.0001
+  optimizer_factory:
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    name: adamW
+    torch_adam_is_fused: true
+  weight_decay: 0.1 # on >=2D params; norms excluded below
+  weight_decay_exclude_named_params:
+    - .*layernorm.*
+    - .*layer_norm.*
+  zero_stage: 1
+tokens:
+  sequence_length: 4096
+  train_steps:
+    10000 # placeholder ~21B tokens (~4 pilot epochs);
+    # token budget finalized at launch (Phase 5)
+  micro_batch_size: 16
+  batch_accumulation_per_replica: 1
+  val_check_interval: 100
+  limit_val_batches: 0 # eval never runs in the trainer (ADR 0015 defers
+  limit_test_batches: 0 # source-backed val/probe sweeps)
+checkpoints:
+  checkpoints_path: ../astroPTv3_checkpoints/astropt3-70m-north
+  checkpoint_schedule: pythia # steps 1,2,4,...,512 + every interval
+  checkpoint_interval: 1000
+  save_initial_state: false
+  save_final_state: true
+tokenizer:
+  tokenizer_name_or_path: null
+profiler: null

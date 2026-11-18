@@ -544,6 +544,25 @@ The two v3 runs differ only in loader stalls: non-stalled window time was
 run attributed 19.1 of 62.9 GiB returned payload to DESI, the first live
 check of DESI attribution.
 
+## Source-and-band packing probe (PR #65)
+
+The first CPU probe used the 70M recipe's four partitions per draw and hit
+its 4 GiB download cap before decoding a record. A follow-up at `f9d0d3c`
+completed one live draw per anchor path, using one partition per draw, seed
+42, the training split, and the recipe's 16 × 4096 packer. The North draw
+was capped at 512 of 819 joined rows; all 261 South rows were used.
+
+| Anchor path (order-7 pixel) | Records (partner-only) | Nonpad / slots | Fill | Object length p95 / p99 |
+|---|---:|---:|---:|---:|
+| Legacy North (39606) | 512 (248) | 396,187 / 458,752 | 86.36% | 1169 / 1460 |
+| Legacy South (108789) | 261 (9) | 222,494 / 327,680 | 67.90% | 1315 / 1588 |
+
+Pooled fill was 78.67%, including padding in each draw's final batch.
+This is a live spot check, not a weighted production estimate or a
+throughput benchmark. Before merging #65, run a short 70M training pilot
+with the default four partitions per draw. Report packing fill, realized
+anchor mix, useful tokens/sec, and whether loss stays finite and trends down.
+
 ## Open items / not pursued
 
 - **`chunk=2`**: not tested after the section-7 re-tune; the win at 4 was
