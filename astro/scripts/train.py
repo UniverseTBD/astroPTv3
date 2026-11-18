@@ -19,7 +19,6 @@ import sys
 from collections import deque
 from pathlib import Path
 
-import numpy as np
 import torch
 import yaml
 
@@ -208,8 +207,6 @@ def main():
 
     sys.path.insert(0, str(REPO / "nanotron"))
     from benchmark_throughput import revision
-    from nanotron.random import RandomState, RandomStates
-    from nanotron.serialize.random import load_random_states
     from run_train import (  # pyright: ignore[reportMissingImports] -- nanotron added above
         DistributedTrainer,
         get_dataloader,
@@ -261,15 +258,7 @@ def main():
         trainer = LoggedTrainer(str(effective), benchmark=True)
         if args.resume_from and trainer.init_checkpoint_path is None:
             raise ValueError("Explicit resume did not load; refusing random initialization")
-        if trainer.init_checkpoint_path is not None:
-            with torch.serialization.safe_globals([
-                RandomState, RandomStates, np.ndarray, np.dtype, type(np.dtype(np.uint32)),
-                np._core.multiarray._reconstruct,  # pyright: ignore[reportAttributeAccessIssue] -- checkpoint's NumPy pickle type
-            ]):
-                restored = load_random_states(trainer.parallel_context, trainer.init_checkpoint_path)
-            for name, random_state in restored.items():
-                trainer.random_states[name] = random_state
-            assert trainer.random_states == restored
+        if trainer.rng_restored:
             state["rng_restored"] = True
         trainer.config.save_as_yaml(output / "resolved.yaml")
         dataloaders = get_dataloader(trainer)

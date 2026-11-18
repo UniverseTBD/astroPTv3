@@ -738,8 +738,7 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(
             assert config["tokens"] == default_recipe["tokens"]
             self.init_checkpoint_path = config["checkpoints"]["resume_checkpoint_path"]
             self.metadata = SimpleNamespace(last_train_step=2 if self.init_checkpoint_path else 0)
-            self.parallel_context = None
-            self.random_states = {}
+            self.rng_restored = bool(self.init_checkpoint_path)
             self.num_params = {"total": 1}
             self.dataset_args = SimpleNamespace(**config["data_stages"][0]["data"]["dataset"])
             self.model_config = SimpleNamespace(**config["model"]["model_config"])
@@ -791,8 +790,6 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(
         "run_train": {"DistributedTrainer": FakeTrainer, "get_dataloader": get_dataloader},
         "benchmark_throughput": {"revision": lambda path: {}},
         "wandb": {"init": init, "Settings": lambda **kwargs: kwargs},
-        "nanotron.random": {"RandomState": dict, "RandomStates": dict},
-        "nanotron.serialize.random": {"load_random_states": lambda *args: {"test": 42}},
     }.items():
         module = ModuleType(name)
         vars(module).update(attributes)
