@@ -36,6 +36,9 @@ import torch
 import yaml
 from legacy_fixture import TINY_CATALOG_STREAM, make_record
 
+from astropt3.configuration_astropt3 import DEFAULT_MODALITIES
+from astropt3.tokenization import required_vocab_size
+
 pytestmark = pytest.mark.gpu
 
 ASTRO_DIR = Path(__file__).resolve().parents[1]
@@ -151,7 +154,9 @@ def nt():
     return make_nt()
 
 
-def tiny_nt_config(nt, **overrides):
+def tiny_nt_config(nt, modalities=None, vocab_size=None, **overrides):
+    if modalities is None:
+        modalities = [DEFAULT_MODALITIES[0], *DEFAULT_MODALITIES[3:]]
     return nt.config_cls(
         hidden_size=64,
         num_hidden_layers=4,  # crosses one NoPE layer (idx 3)
@@ -162,7 +167,8 @@ def tiny_nt_config(nt, **overrides):
         rope_theta=100000.0,
         no_rope_layer=4,
         rms_norm_eps=1e-6,
-        vocab_size=64,
+        modalities=modalities,
+        vocab_size=required_vocab_size(modalities) if vocab_size is None else vocab_size,
         pad_token_id=0,
         bos_token_id=1,
         eos_token_id=1,
@@ -182,7 +188,7 @@ def smoke_config(nt, workdir):
     config["general"]["run"] = "test-tiny"
     model = config["model"]["model_config"]
     model.update(asdict(tiny_nt_config(
-        nt, modalities=model["modalities"], use_cache=False,
+        nt, modalities=model["modalities"], vocab_size=model["vocab_size"], use_cache=False,
         _fused_rms_norm=False, _fused_rotary_emb=False,
     )))
     stage = config["data_stages"][0]
@@ -192,7 +198,7 @@ def smoke_config(nt, workdir):
     config["parallelism"]["dp"] = 1  # the recipe's cluster DP; the smoke run uses one GPU
     config["optimizer"]["zero_stage"] = 0
     config["optimizer"]["learning_rate_scheduler"].update(lr_warmup_steps=10, lr_decay_steps=40)
-    config["tokens"].update(train_steps=50, micro_batch_size=4, sequence_length=SEQ_LEN)
+    config["tokens"].update(train_steps=50, micro_batch_size=4)
     config["checkpoints"].update(
         checkpoints_path=str(workdir / "checkpoints"), checkpoint_interval=50,
         checkpoint_schedule=None,
@@ -242,11 +248,11 @@ def matched_models(nt):
     from astropt3 import AstroPT3Model
 
     nt_config = tiny_nt_config(nt, jetformer_flow_hidden=32)
-    nt_config.modality("images")["pre_flow_noise_max"] = 0.4
+    nt_config.modality("legacy_north_g")["pre_flow_noise_max"] = 0.4
     hf_config = nt.to_hf.get_hf_config(nt_config)
     assert hf_config.jetformer_flow_hidden == 32
-    assert hf_config.modality_registry().get_config("images").pre_flow_noise_max == 0.4
-    assert nt.from_hf.get_nanotron_config(hf_config).modality("images")["pre_flow_noise_max"] == 0.4
+    assert hf_config.modality_registry().get_config("legacy_north_g").pre_flow_noise_max == 0.4
+    assert nt.from_hf.get_nanotron_config(hf_config).modality("legacy_north_g")["pre_flow_noise_max"] == 0.4
     torch.manual_seed(0)
     hf_model = AstroPT3Model(hf_config)
     nt_model = build_nt_model(nt, nt_config)

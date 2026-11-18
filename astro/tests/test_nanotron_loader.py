@@ -127,7 +127,7 @@ def test_image_only_records_ship_empty_spectra_tensors(tiny_config, tiny_model, 
     with torch.no_grad():
         out = tiny_model(**regroup(flat, tiny_config.modality_registry().names()))
     assert torch.isfinite(out.loss)
-    assert set(out.modality_losses) == {"images", "ebv", "photometry"}
+    assert set(out.modality_losses) == {"legacy_north_g", "legacy_north_r", "legacy_north_z", "ebv", "photometry"}
 
 
 def test_open_draws_delegates_identity_and_epoch(tiny_config, fake_lsdb):
@@ -136,7 +136,7 @@ def test_open_draws_delegates_identity_and_epoch(tiny_config, fake_lsdb):
         for epoch in range(2):
             records = list(next(draws))
             assert len(records) == 6
-            assert records[0]["object_id"] == "synth_00000000"
+            assert records[0]["object_id"] == "legacy:synth_00000000"
             assert stream._epoch == epoch
     assert len(fake_lsdb.streams) == 1
     assert fake_lsdb.streams[0].seed == consumer_seed(19, 2, 3, 0)
@@ -246,7 +246,7 @@ def test_swallowed_hub_error_signature_matches_real_fsspec_message():
 
 def test_non_retryable_error_fails_immediately(tiny_config, fake_lsdb):
     def frames():
-        yield _frame()
+        yield _frame().iloc[:1]  # Not enough records to emit a batch before the error.
         raise ValueError("decode blew up")
 
     fake_lsdb.frames = frames
@@ -278,6 +278,10 @@ def test_packing_keeps_each_record_once_and_preserves_base_shuffle(tiny_config):
 
 
 def test_unequal_objects_keep_emptiest_first_placement_across_flushes(tiny_config):
+    config = type(tiny_config)(**{
+        **tiny_config.to_dict(),
+        "modalities": [m for m in tiny_config.modalities if m["name"] in {"legacy_north_g", "spectra"}],
+    })
     full = make_record(1, image_only_fraction=0.0)
     kinds = ["image", "spectrum", "image", "both", "spectrum", "both",
              "image", "spectrum", "both", "image", "spectrum"]
@@ -286,7 +290,7 @@ def test_unequal_objects_keep_emptiest_first_placement_across_flushes(tiny_confi
                                 if kind == "both" or key == kind}}
         for i, kind in enumerate(kinds)
     ]
-    stream = PackedMicroBatches(tiny_config, 2, 360, catalog_stream=TINY_CATALOG_STREAM)
+    stream = PackedMicroBatches(config, 2, 360, catalog_stream=TINY_CATALOG_STREAM)
     objects = [stream.sequencer.build(record, epoch=7) for record in records]
     assert [len(obj) for obj in objects[:4]] == [147, 34, 147, 180]
     stream._epoch = 7
@@ -296,7 +300,7 @@ def test_unequal_objects_keep_emptiest_first_placement_across_flushes(tiny_confi
     assert len(batches) == len(expected_rows)
     for batch, rows in zip(batches, expected_rows, strict=True):
         packed = stream.collator.collate_rows([[objects[i] for i in row] for row in rows])
-        expected = nanotron_loader.flatten_packed_batch(packed, tiny_config, 360)
+        expected = nanotron_loader.flatten_packed_batch(packed, config, 360)
         for key in batch:
             assert torch.equal(batch[key], expected[key])
 

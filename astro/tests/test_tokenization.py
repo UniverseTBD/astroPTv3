@@ -5,7 +5,6 @@ from astropt3 import AstroPT3Config
 from astropt3.tokenization import (
     BOS_ID,
     PAD_ID,
-    VOCAB_SIZE,
     antispiralise,
     modality_token_ids,
     patchify_image,
@@ -20,7 +19,9 @@ from astropt3.tokenization import (
 def test_special_token_ids_frozen():
     assert PAD_ID == 0 and BOS_ID == 1
     expected_blocks = {
-        "images": (2, 3, 4),
+        "legacy_north_g": (160, 161, 162),
+        "legacy_north_r": (163, 164, 165),
+        "legacy_north_z": (166, 167, 168),
         "spectra": (5, 6, 7),
         "Z": (8, 9, 10),
         "ebv": (11, 12, 13),
@@ -29,18 +30,24 @@ def test_special_token_ids_frozen():
     assert {
         name: modality_token_ids(name) for name in expected_blocks
     } == expected_blocks
-    ids = set(special_token_map().values())
-    assert len(ids) == 17 and max(ids) < VOCAB_SIZE
     config = AstroPT3Config()
+    assert config.vocab_size == 169
     assert all(
         {"family", "source", "record_keys", "token_ids"} <= set(modality)
         for modality in config.modalities
     )
-    assert special_token_map(config.modalities) == special_token_map()
+    assert {m["name"]: tuple(m["token_ids"]) for m in config.modalities} == expected_blocks
+    active_tokens = special_token_map(config.modalities)
+    assert len(set(active_tokens.values())) == 23
+    frozen_tokens = special_token_map()
+    assert all(frozen_tokens[name] == token_id for name, token_id in active_tokens.items())
+    assert modality_token_ids("galaxies") == (23, 24, 25)
+    for name in ("images", "hsc_images", "legacy_south_images"):
+        assert f"<|{name}|>" not in frozen_tokens
 
 
 def test_new_token_blocks_fill_reservation_then_enlarge_vocab():
-    modalities = AstroPT3Config().modalities + [
+    modalities = [m for m in AstroPT3Config().modalities if m["family"] != "image"] + [
         {
             "name": f"extra_{index}",
             "input_size": 1,
@@ -49,19 +56,21 @@ def test_new_token_blocks_fill_reservation_then_enlarge_vocab():
             "source": "test",
             "record_keys": [f"extra_{index}"],
         }
-        for index in range(16)
+        for index in range(13)
     ]
     config = AstroPT3Config(modalities=modalities)
     by_name = {modality["name"]: modality for modality in config.modalities}
     assert by_name["extra_0"]["token_ids"] == [17, 18, 19]
-    assert by_name["extra_14"]["token_ids"] == [59, 60, 61]
-    assert by_name["extra_15"]["token_ids"] == [64, 65, 66]
+    assert by_name["extra_1"]["token_ids"] == [26, 27, 28]
+    assert by_name["extra_11"]["token_ids"] == [59, 60, 61]
+    assert by_name["extra_12"]["token_ids"] == [64, 65, 66]
     assert config.vocab_size == 67
     with pytest.raises(ValueError, match="vocab_size=64"):
         AstroPT3Config(modalities=modalities, vocab_size=64)
 
 
-def test_new_token_block_collision_raises():
+@pytest.mark.parametrize("base", [2, 20, 53, 160])
+def test_new_token_block_collision_raises(base):
     modalities = AstroPT3Config().modalities + [
         {
             "name": "bad",
@@ -70,7 +79,7 @@ def test_new_token_block_collision_raises():
             "family": "scalar",
             "source": "test",
             "record_keys": ["bad"],
-            "token_ids": [2, 3, 4],
+            "token_ids": list(range(base, base + 3)),
         }
     ]
     with pytest.raises(ValueError, match="collide"):

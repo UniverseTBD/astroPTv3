@@ -1,19 +1,45 @@
+import pytest
 import torch
 from legacy_fixture import record_stream
 
+from astropt3 import AstroPT3Config, AstroPT3Model
+from astropt3.data.packing import ObjectSequencer, PackedCollator
 from astropt3.flows import flow_object_ids
 
 
-def test_forward_backward(tiny_config, sequencer, collator):
-    from astropt3 import AstroPT3Model
+@pytest.fixture(scope="session")
+def single_band_config(tiny_config):
+    modalities = [
+        m for m in tiny_config.modalities
+        if m["family"] != "image" or m["name"] == "legacy_north_g"
+    ]
+    return AstroPT3Config(**{**tiny_config.to_dict(), "modalities": modalities})
 
+
+@pytest.fixture(scope="session")
+def single_band_sequencer(single_band_config):
+    return ObjectSequencer(single_band_config)
+
+
+@pytest.fixture(scope="session")
+def single_band_collator(single_band_config):
+    return PackedCollator(single_band_config, seq_len=896)
+
+
+@pytest.fixture(scope="session")
+def single_band_model(single_band_config):
     torch.manual_seed(0)
-    model = AstroPT3Model(tiny_config)
+    return AstroPT3Model(single_band_config).eval()
+
+
+def test_forward_backward(single_band_config, single_band_sequencer, single_band_collator):
+    torch.manual_seed(0)
+    model = AstroPT3Model(single_band_config)
     model.train()
-    batch = collator([sequencer.build(r) for r in record_stream(4)])
+    batch = single_band_collator([single_band_sequencer.build(r) for r in record_stream(4)])
     out = model(**batch)
     assert torch.isfinite(out.loss)
-    assert set(out.modality_losses) == {"images", "spectra", "Z", "ebv", "photometry"}
+    assert set(out.modality_losses) == {"legacy_north_g", "spectra", "Z", "ebv", "photometry"}
     assert set(out.family_losses) == {"image", "spectrum", "scalar"}
     assert all(torch.isfinite(v) for v in out.modality_losses.values())
     out.loss.backward()
@@ -23,26 +49,24 @@ def test_forward_backward(tiny_config, sequencer, collator):
     assert not missing, f"params without grad: {missing}"
 
 
-def test_pad_invariance(tiny_model, tiny_config, sequencer, full_record):
+def test_pad_invariance(single_band_model, single_band_config, single_band_sequencer, full_record):
     """Trailing pad tokens must not change the loss at all."""
-    from astropt3.data.packing import PackedCollator
-
-    obj = sequencer.build(full_record)
-    tight = PackedCollator(tiny_config, seq_len=397)([obj])
-    padded = PackedCollator(tiny_config, seq_len=520)([obj])
+    obj = single_band_sequencer.build(full_record)
+    tight = PackedCollator(single_band_config, seq_len=len(obj))([obj])
+    padded = PackedCollator(single_band_config, seq_len=520)([obj])
     with torch.no_grad():
-        loss_tight = tiny_model(**tight).loss
-        loss_padded = tiny_model(**padded).loss
+        loss_tight = single_band_model(**tight).loss
+        loss_padded = single_band_model(**padded).loss
     assert torch.allclose(loss_tight, loss_padded, atol=1e-6)
 
 
-def test_doc_mask_blocks_cross_object_attention(tiny_model, tiny_config, sequencer):
+def test_doc_mask_blocks_cross_object_attention(
+    single_band_model, single_band_config, single_band_sequencer
+):
     """Perturbing object A's pixels must not move object B's hidden states."""
-    from astropt3.data.packing import PackedCollator
-
     records = list(record_stream(2))
-    objs = [sequencer.build(r) for r in records]
-    collator = PackedCollator(tiny_config, seq_len=len(objs[0]) + len(objs[1]))
+    objs = [single_band_sequencer.build(r) for r in records]
+    collator = PackedCollator(single_band_config, seq_len=len(objs[0]) + len(objs[1]))
     batch = collator(objs)
     assert batch["input_ids"].shape[0] == 1  # both objects share one row
 
@@ -55,26 +79,28 @@ def test_doc_mask_blocks_cross_object_attention(tiny_model, tiny_config, sequenc
             k: v.clone() for k, v in batch["modality_values"].items()
         },
     }
-    n_a = objs[0].values["images"].shape[0]
-    perturbed["modality_values"]["images"][:n_a] += 10.0
+    n_a = objs[0].values["legacy_north_g"].shape[0]
+    perturbed["modality_values"]["legacy_north_g"][:n_a] += 10.0
 
     with torch.no_grad():
-        h0 = tiny_model(**batch, compute_loss=False).last_hidden_state
-        h1 = tiny_model(**perturbed, compute_loss=False).last_hidden_state
+        h0 = single_band_model(**batch, compute_loss=False).last_hidden_state
+        h1 = single_band_model(**perturbed, compute_loss=False).last_hidden_state
 
     start_b = len(objs[0])
     assert not torch.allclose(h0[0, :start_b], h1[0, :start_b])  # A moved
     assert torch.equal(h0[0, start_b:], h1[0, start_b:])  # B bit-identical
 
 
-def test_family_loss_matches_adr_0013(tiny_model, sequencer, collator, full_record):
-    batch = collator([sequencer.build(full_record)])
+def test_family_loss_matches_adr_0013(
+    single_band_model, single_band_sequencer, single_band_collator, full_record
+):
+    batch = single_band_collator([single_band_sequencer.build(full_record)])
     with torch.no_grad():
-        out = tiny_model(**batch)
+        out = single_band_model(**batch)
     scalar_mean = torch.stack(
         [out.modality_losses[name] for name in ("Z", "ebv", "photometry")]
     ).mean()
-    assert torch.allclose(out.family_losses["image"], out.modality_losses["images"])
+    assert torch.allclose(out.family_losses["image"], out.modality_losses["legacy_north_g"])
     assert torch.allclose(out.family_losses["spectrum"], out.modality_losses["spectra"])
     assert torch.allclose(out.family_losses["scalar"], scalar_mean)
     expected = (
@@ -85,7 +111,9 @@ def test_family_loss_matches_adr_0013(tiny_model, sequencer, collator, full_reco
     assert torch.allclose(out.loss, expected, atol=1e-6)
 
 
-def test_loss_matches_manual_computation(tiny_model, sequencer, collator, full_record):
+def test_loss_matches_manual_computation(
+    single_band_model, single_band_sequencer, single_band_collator, full_record
+):
     """outputs.loss must equal NLL_GMM(z) - logdet recomputed from the
     model's own flow + GMM head, for each patch modality.
 
@@ -95,18 +123,18 @@ def test_loss_matches_manual_computation(tiny_model, sequencer, collator, full_r
     from astropt3.modalities import gmm_nll
     from astropt3.modeling_astropt3 import left_shift_mask
 
-    batch = collator([sequencer.build(full_record, include_scalars=False)])
+    batch = single_band_collator([single_band_sequencer.build(full_record, include_scalars=False)])
     with torch.no_grad():
-        out = tiny_model(**batch)
+        out = single_band_model(**batch)
         manual = []
-        for m in ("images", "spectra"):
+        for m in ("legacy_north_g", "spectra"):
             mask = batch["modality_masks"][m]
             hidden = out.last_hidden_state[left_shift_mask(mask)]
-            z, logdet = tiny_model.flows[m](
+            z, logdet = single_band_model.flows[m](
                 batch["modality_values"][m], batch["modality_positions"][m],
                 flow_object_ids(batch["position_ids"], mask),
             )
-            logits_pi, mu, log_sigma = tiny_model.decoders[m](hidden)
+            logits_pi, mu, log_sigma = single_band_model.decoders[m](hidden)
             nll = gmm_nll(z, logits_pi, mu, log_sigma)
             manual.append((nll - logdet).mean())
     expected = torch.stack(manual).mean()

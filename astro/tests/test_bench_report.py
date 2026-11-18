@@ -145,6 +145,10 @@ def test_world_rank_logs_count_tp_replicas_once_and_divide_by_world_size(tmp_pat
             if rank % tp:
                 record["tokens_nonpad"] *= 1000
                 record["rows"] *= 1000
+            anchor = "south" if rank // tp else "north"
+            record["fresh_anchor_counts"] = {anchor: {"objects": 2, "tokens_nonpad": 10}}
+            record["replayed_anchor_counts"] = {anchor: {"objects": 4, "tokens_nonpad": 20}}
+            record["anchor_counts"] = {anchor: {"objects": 6, "tokens_nonpad": 30}}
         _jsonl(tmp_path / f"steps.rank{rank}.jsonl", records)
         old.unlink()
     report = _report(tmp_path)
@@ -155,6 +159,9 @@ def test_world_rank_logs_count_tp_replicas_once_and_divide_by_world_size(tmp_pat
     assert steps["world_size"] == 2 * tp
     assert steps["tokens_nonpad"] == 7200
     assert steps["rows"] == 400
+    assert steps["anchor_counts"] == {name: {"objects": 24, "tokens_nonpad": 120} for name in ("north", "south")}
+    assert steps["fresh_anchor_counts"]["south"] == {"objects": 8, "tokens_nonpad": 40}
+    assert steps["replayed_anchor_counts"]["north"] == {"objects": 16, "tokens_nonpad": 80}
     assert steps["mfu"]["mfu"] == pytest.approx(4e14 / (100 * 312e12 * 2 * tp))
 
 

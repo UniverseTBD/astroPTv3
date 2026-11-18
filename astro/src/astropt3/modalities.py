@@ -18,14 +18,16 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from .tokenization import FIXED_IMAGE_CATEGORIES
+
 
 @dataclass
 class ModalityConfig:
     """Configuration for a single modality.
 
     Attributes:
-        name: modality name; registry order (alphabetical) fixes sequence order.
-        input_size: flattened patch vector length (e.g. 8*8*3 = 192 for images).
+        name: modality name, source-and-band qualified for physical images.
+        input_size: flattened patch vector length (e.g. 8*8 = 64 for images).
         patch_size: patch side length (images) or window length (1-D data).
         pos_type: "index" for learned integer-position embeddings,
             "continuous" for a projected float position (e.g. wavelength).
@@ -35,20 +37,12 @@ class ModalityConfig:
         source: source survey/product name used for provenance and dispatch.
         record_keys: record field(s) carrying this modality.
         token_ids: frozen (begin, placeholder, end) special-token block.
-        channel_tokenization: image factorisation (ADR 0014 §8).
-            ``fused`` (default) makes one token per patch across all bands
-            (8*8*3 = 192 floats); ``per_band`` makes one token per patch PER
-            band (8*8 = 64 floats, 3x the tokens) from identical bytes — a
-            finer autoregressive factorisation with narrower heads, not more
-            information. ``E_values`` is unchanged either way.
+        band: physical image channel label in the source payload, e.g. ``des-g``.
+        image_format: ``physical`` for one calibrated band, ``rgb`` for a display composite.
         image_crop: central crop side in pixels before patchify (0 keeps the
             whole image); 96 turns 152x152 survey cutouts into 144 patch-8 tokens.
         pre_flow_noise_max: initial Gaussian sigma in normalized patch units,
             cosine-annealed to zero during training. Zero disables it.
-        band_order: fixed band serialization order for ``per_band``, in
-            record band names (``des-g``, ``des-r``, ``des-z``). Fixed, not
-            shuffled: band order as an ADR 0008 ordering decision is a
-            separate experiment, and this one changes one variable.
         ADR 0008 scalar modality (``family == "scalar"``) — a one-token span holding a
             physical quantity (Z, ebv, photometry). Scalars bypass the
             jetformer flow (their dims are odd and a flow buys nothing on a
@@ -66,8 +60,8 @@ class ModalityConfig:
     source: str | None = None
     record_keys: tuple[str, ...] = ()
     token_ids: tuple[int, int, int] | None = None
-    channel_tokenization: str = "fused"
-    band_order: tuple[str, ...] = ()
+    band: str | None = None
+    image_format: str = "physical"
     image_crop: int = 96
     pre_flow_noise_max: float = 0.0
 
@@ -81,32 +75,22 @@ class ModalityConfig:
             raise ValueError(f"modality {self.name!r} pre_flow_noise_max must be finite and nonnegative")
         if sigma and self.scalar:
             raise ValueError(f"modality {self.name!r} pre_flow_noise_max is only for patch modalities")
-        if self.channel_tokenization not in {"fused", "per_band"}:
-            raise ValueError(
-                f"modality {self.name!r} has invalid channel_tokenization "
-                f"{self.channel_tokenization!r} (fused | per_band)"
-            )
-        self.band_order = tuple(self.band_order)
+        if type(self.input_size) is not int or self.input_size < 1:
+            raise ValueError(f"modality {self.name!r} input_size must be a positive integer")
+        if self.family != "scalar":
+            self._validate_patch_modality()
         if type(self.image_crop) is not int or self.image_crop < 0:
             raise ValueError(f"modality {self.name!r} image_crop must be a nonnegative integer")
-        if self.channel_tokenization == "per_band":
-            if self.family != "image":
-                raise ValueError(
-                    f"modality {self.name!r} is {self.family!r}; per-band "
-                    "tokenisation only applies to images"
-                )
-            if not self.band_order:
-                raise ValueError(
-                    f"modality {self.name!r} is per_band but names no "
-                    "band_order; the order must be fixed, not inferred"
-                )
-            expected = self.patch_size * self.patch_size
-            if self.input_size != expected:
-                raise ValueError(
-                    f"modality {self.name!r} is per_band with patch_size "
-                    f"{self.patch_size}, so input_size must be {expected}, "
-                    f"got {self.input_size}"
-                )
+        if self.family == "image":
+            self._validate_image()
+        elif self.band is not None or self.image_format != "physical":
+            raise ValueError(f"modality {self.name!r} may only declare band or image_format for images")
+        if fixed := FIXED_IMAGE_CATEGORIES.get(self.name):
+            source, band, _ = fixed
+            image_format = "rgb" if band is None else "physical"
+            if (self.family, self.source, self.band, self.image_format) != ("image", source, band, image_format):
+                raise ValueError(f"modality {self.name!r} must use source {source!r} and "
+                                 f"band {band!r} ({image_format} image)")
         if not self.source:
             raise ValueError(f"modality {self.name!r} is missing source provenance")
         self.record_keys = tuple(self.record_keys)
@@ -124,6 +108,32 @@ class ModalityConfig:
             raise ValueError(f"modality {self.name!r} token_ids must be consecutive")
         self.token_ids = token_ids
 
+    def _validate_patch_modality(self):
+        if self.input_size % 2:
+            raise ValueError("jetformer flows require an even input_size for patch modalities")
+        if self.pos_type not in ("index", "continuous"):
+            raise ValueError(f"unknown pos_type {self.pos_type!r}")
+        for field in ("max_positions", "pos_input_size"):
+            value = getattr(self, field)
+            if type(value) is not int or value < 1:
+                raise ValueError(f"modality {self.name!r} {field} must be a positive integer")
+
+    def _validate_image(self):
+        if self.image_format == "rgb":
+            if self.band is not None:
+                raise ValueError(f"RGB modality {self.name!r} cannot declare a band")
+        elif self.image_format != "physical":
+            raise ValueError(f"image modality {self.name!r} has invalid image_format {self.image_format!r}")
+        elif not isinstance(self.band, str) or not self.band.strip() or self.band.startswith("rgb-"):
+            raise ValueError(f"image modality {self.name!r} must declare one calibrated band")
+        if type(self.patch_size) is not int or self.patch_size < 1:
+            raise ValueError(f"image modality {self.name!r} patch_size must be a positive integer")
+        if self.input_size != (3 if self.image_format == "rgb" else 1) * self.patch_size**2:
+            raise ValueError(f"image modality {self.name!r} input_size does not match its patch dimensions")
+        keys = self.record_keys
+        if not isinstance(keys, (list, tuple)) or len(keys) != 1 or not isinstance(keys[0], str) or not keys[0].strip():
+            raise ValueError(f"image modality {self.name!r} must declare one nonempty record key")
+
     @property
     def scalar(self) -> bool:
         return self.family == "scalar"
@@ -140,8 +150,8 @@ class ModalityConfig:
             "source": self.source,
             "record_keys": list(self.record_keys),
             "token_ids": list(self.token_ids or ()),
-            "channel_tokenization": self.channel_tokenization,
-            "band_order": list(self.band_order),
+            **({"band": self.band} if self.band is not None else {}),
+            **({"image_format": "rgb"} if self.image_format == "rgb" else {}),
             "image_crop": self.image_crop,
             "pre_flow_noise_max": self.pre_flow_noise_max,
         }
@@ -150,8 +160,7 @@ class ModalityConfig:
 class ModalityRegistry:
     """Central registry for model modalities.
 
-    ``names()`` returns modalities sorted alphabetically; this order defines
-    the per-object sequence order (as in astroPT).
+    ``names()`` returns modalities sorted alphabetically before span shuffling.
     """
 
     def __init__(self, modalities):

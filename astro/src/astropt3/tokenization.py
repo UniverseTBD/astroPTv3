@@ -1,14 +1,13 @@
 """Special-token vocabulary and patchification.
 
 Existing special-token ids are FROZEN: released checkpoints depend on them.
-Layout: 0 <|pad|>, 1 <|bos|>, then 3 consecutive ids per modality in the
-order modalities are added: <|begin_m|>, <|m|> (placeholder), <|end_m|>.
-New modalities take complete unused blocks in ids 17-63 first, then append
-blocks above 63 and requires the config to carry the enlarged vocabulary.
+Layout: 0 <|pad|>, 1 <|bos|>, and three consecutive IDs per modality:
+<|begin_m|>, <|m|> (placeholder), <|end_m|>. Built-ins own fixed blocks;
+automatically allocated modalities take free blocks below 64 first.
 
 Patchification is pinned to the verified MMU schemas:
 - images:  float32 (3, 152, 152) cubes, center-cropped to 96x96 by the
-  sequencer -> patch 8 -> 144 tokens of 192 floats
+  sequencer -> 144 patch-8 tokens of 64 floats per band
 - spectra: float32 (7781,) flux -> pad to 7936 -> 31 patches of 256 floats
 """
 
@@ -25,22 +24,39 @@ VOCAB_SIZE = 64
 PAD_ID = 0
 BOS_ID = 1
 
-# Frozen legacy assignment. New configs carry their complete token blocks.
+# Survey-wide image blocks must not acquire new meanings.
+_RESERVED_IMAGE_BASES = (2, 20, 53)
+# name -> (source, payload band or None for display RGB, first marker ID)
+FIXED_IMAGE_CATEGORIES = {
+    "galaxies": ("galaxies_with_hats", None, 23),
+    "legacy_north_g": ("legacy_north", "des-g", 160),
+    "legacy_north_r": ("legacy_north", "des-r", 163),
+    "legacy_north_z": ("legacy_north", "des-z", 166),
+    "legacy_south_g": ("legacy_south", "des-g", 169),
+    "legacy_south_r": ("legacy_south", "des-r", 172),
+    "legacy_south_i": ("legacy_south", "des-i", 175),
+    "legacy_south_z": ("legacy_south", "des-z", 178),
+    "hsc_g": ("hsc", "hsc-g", 181),
+    "hsc_r": ("hsc", "hsc-r", 184),
+    "hsc_i": ("hsc", "hsc-i", 187),
+    "hsc_z": ("hsc", "hsc-z", 190),
+    "hsc_y": ("hsc", "hsc-y", 193),
+}
 _MODALITY_ID_BLOCKS = {
-    "images": 2,  # begin=2, placeholder=3, end=4
     "spectra": 5,  # begin=5, placeholder=6, end=7
     # ADR 0008 scalar modalities (one-token spans, GMM heads)
     "Z": 8,  # begin=8, placeholder=9, end=10
     "ebv": 11,  # begin=11, placeholder=12, end=13
     "photometry": 14,  # begin=14, placeholder=15, end=16
+    **{name: base for name, (_, _, base) in FIXED_IMAGE_CATEGORIES.items()},
 }
 
 
 def assign_modality_token_ids(modalities: list[dict]) -> list[dict]:
     """Return config dicts with stable, non-overlapping three-id blocks.
 
-    Declaration order is addition order. Legacy ids are always reserved;
-    unassigned modalities consume bases 17, 20, ..., 59, then 64, 67, ... .
+    Fixed blocks are reserved regardless of which modalities are enabled.
+    Other modalities consume free blocks in declaration order.
     """
     if not modalities:
         raise ValueError("at least one modality is required")
@@ -51,10 +67,9 @@ def assign_modality_token_ids(modalities: list[dict]) -> list[dict]:
     used = {PAD_ID, BOS_ID}
     used.update(
         token_id
-        for base in _MODALITY_ID_BLOCKS.values()
+        for base in (*_RESERVED_IMAGE_BASES, *_MODALITY_ID_BLOCKS.values())
         for token_id in range(base, base + 3)
     )
-    assigned = set()
     out = []
     next_reserved, next_appended = 17, VOCAB_SIZE
     for raw in modalities:
@@ -92,17 +107,14 @@ def assign_modality_token_ids(modalities: list[dict]) -> list[dict]:
                 raise ValueError(
                     f"modality {name!r} token_ids must be three consecutive ids"
                 )
-        overlap = used.intersection(token_ids)
-        legacy_ids = name in _MODALITY_ID_BLOCKS and token_ids == tuple(
-            range(_MODALITY_ID_BLOCKS[name], _MODALITY_ID_BLOCKS[name] + 3)
-        )
-        assigned_overlap = assigned.intersection(token_ids)
-        if assigned_overlap or (overlap and not legacy_ids):
+        if name in _MODALITY_ID_BLOCKS:
+            if token_ids != modality_token_ids(name):
+                raise ValueError(f"modality {name!r} must use token_ids {modality_token_ids(name)}")
+        elif overlap := used.intersection(token_ids):
             raise ValueError(
                 f"modality {name!r} token_ids collide at "
-                f"{sorted(assigned_overlap or overlap)}"
+                f"{sorted(overlap)}"
             )
-        assigned.update(token_ids)
         used.update(token_ids)
         modality["token_ids"] = list(token_ids)
         out.append(modality)
@@ -117,13 +129,13 @@ def required_vocab_size(modalities: list[dict]) -> int:
 
 
 def modality_token_ids(name: str) -> tuple[int, int, int]:
-    """Return the frozen block for a legacy modality."""
+    """Return the frozen block for a built-in modality."""
     base = _MODALITY_ID_BLOCKS[name]
     return base, base + 1, base + 2
 
 
 def special_token_map(modalities: list[dict] | None = None) -> dict[str, int]:
-    """Human-readable token map for legacy or config-carried modalities."""
+    """Human-readable token map for built-in or config-carried modalities."""
     tokens = {"<|pad|>": PAD_ID, "<|bos|>": BOS_ID}
     blocks = (
         {name: (base, base + 1, base + 2) for name, base in _MODALITY_ID_BLOCKS.items()}

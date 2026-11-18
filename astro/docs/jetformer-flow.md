@@ -14,20 +14,11 @@ while growing the trunk. Ours is a convention: 8 stages, depth 4, 8 heads, and
 
     jetformer_flow_hidden = min(hidden_size // 4, 512)
 
-Flow parameters scale as width², like a trunk layer. With the five patch
-modalities (Legacy, HSC and galaxies-with-hats images; DESI and SDSS spectra)
-the flows are ~33–50% of trunk parameters up to 1B; the 512 cap (JetFormer's
-flow size) holds them at ~519M from 1B upward. The 768-wide galaxies-with-hats
-patches make its flow the largest. `tests/test_jetformer_flow.py` enforces the
-rule on every `configs/nanotron/*.yaml`. `scripts/count_params.py` reports
-flows in their own column and excludes them from the nominal-size check.
-
-| Trunk | hidden_size | Flow width | Five flows |
-|---|---:|---:|---:|
-| 70M | 512 | 128 | 35.3M |
-| 160M | 768 | 192 | 76.5M |
-| 410M | 1024 | 256 | 133.5M |
-| 1B and up | ≥2048 | 512 | 518.6M |
+Flow parameters scale as width², like a trunk layer. The training recipes
+have one flow per calibrated band, one for the 768-wide RGB display patches,
+and one per spectrum source. `tests/test_jetformer_flow.py` enforces the
+width rule on every `configs/nanotron/*.yaml`. `scripts/count_params.py`
+reports the HF size configs' flows separately from the nominal-size check.
 
 ## Noise curricula
 
@@ -44,9 +35,10 @@ inputs. `jetformer_noise_max` and `jetformer_noise_min` still control the
 independent linear latent-input noise; set both to zero for pre-flow only.
 
 Choose σ in each modality's normalized units. For calibrated images, estimate
-per-band noise on held-out blank-sky patches and pick a representative scale
-for the modality (a single σ is shared across bands). The 70M recipe starts
-DESI and SDSS at σ = 0.1 in normalized flux units, based on robust scatter
+sky noise on held-out blank-sky patches for each source and band. The 70M
+recipe starts all Legacy North bands at σ = 0.4 and all HSC bands at σ = 0.35;
+Legacy South bands are not opted in. It starts DESI and SDSS at σ = 0.1 in
+normalized flux units, based on robust scatter
 between adjacent bins in archived training spectra. The SDSS estimate is
 provisional (three spectra). The schedule also perturbs filled masked bins
 and tail padding during training.
@@ -63,7 +55,7 @@ cutouts, and linear-probe and scalar-head metrics.
   parallelism would split. DP and TP are supported; flow parameters are
   TP-replicated like the other modality modules.
 - MFU FLOPs (`modality_flops_per_token`) price attention over
-  `max_positions`, an upper bound on span length (images use 144 of 361), so
-  flow FLOPs and MFU are overstated.
+  `max_positions`, an upper bound on span length, so flow FLOPs and MFU can be
+  overstated for shorter spans.
 - Permutations are derived from seed 42 + stage index, not stored; changing
   that rule breaks existing checkpoints.

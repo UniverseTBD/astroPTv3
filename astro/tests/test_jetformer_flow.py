@@ -6,14 +6,14 @@ from pathlib import Path
 import pytest
 import torch
 from legacy_fixture import make_record
+from test_model import single_band_config as single_band_config
 
 from astropt3 import AstroPT3Config, AstroPT3Model
-from astropt3.config_io import load_model_config
 from astropt3.data.packing import ObjectSequencer, PackedCollator
 from astropt3.flows import FlowTransformerBlock, JetFormerFlow, flow_object_ids
 from astropt3.generation import generate, reconstruct
 
-CONFIG = Path(__file__).resolve().parents[1] / "configs/model/test-tiny.yaml"
+RECIPES = Path(__file__).resolve().parents[1] / "configs/nanotron"
 
 
 def small_flow(**kwargs):
@@ -29,11 +29,6 @@ def activate(flow):
             block.out_proj.weight.normal_(std=0.08)
             block.out_proj.bias.normal_(std=0.02)
     return flow
-
-
-def flow_config():
-    config, _ = load_model_config(CONFIG)
-    return config
 
 
 def test_transformer_matches_torch_encoder_layer():
@@ -131,9 +126,10 @@ def test_empty_modality_connects_all_parameters():
 def test_permutations_are_exact_reconstructible_derived_buffers():
     flow = JetFormerFlow(320, steps=2, hidden_dim=8, depth=1, num_heads=2).bfloat16().eval()
     for block in flow.blocks:
-        assert block.permutation.dtype == torch.int64
-        torch.testing.assert_close(block.permutation.sort().values, torch.arange(320))
-        torch.testing.assert_close(block.permutation[block.inverse_permutation], torch.arange(320))
+        permutation = block.get_buffer("permutation")
+        assert permutation.dtype == torch.int64
+        torch.testing.assert_close(permutation.sort().values, torch.arange(320))
+        torch.testing.assert_close(permutation[block.get_buffer("inverse_permutation")], torch.arange(320))
     assert not any("permutation" in key for key in flow.state_dict())
     torch.manual_seed(12345)
     restored = JetFormerFlow(320, steps=2, hidden_dim=8, depth=1, num_heads=2).bfloat16().eval()
@@ -153,30 +149,32 @@ def test_packed_object_ids_do_not_merge_adjacent_rows():
     ids = flow_object_ids(positions, mask)
     assert ids.tolist() == [1, 1, 2, 2, 3, 3]
     with pytest.raises(ValueError, match="position_ids"):
-        flow_object_ids(None, mask)
+        flow_object_ids(None, mask)  # pyright: ignore[reportArgumentType] -- exercise invalid input
 
 
 @pytest.mark.parametrize("field,value", [
     ("jetformer_flow_steps", 0),
     ("jetformer_flow_depth", True), ("jetformer_flow_hidden", 15),
 ])
-def test_reject_invalid_flow_config(field, value):
-    kwargs = {**flow_config().to_dict(), field: value}
+def test_reject_invalid_flow_config(single_band_config, field, value):
+    kwargs = {**single_band_config.to_dict(), field: value}
     with pytest.raises(ValueError):
         AstroPT3Config(**kwargs)
 
 
-def test_hf_packing_normalization_backward_and_save_load(tmp_path):
+def test_hf_packing_normalization_backward_and_save_load(tmp_path, single_band_config, tiny_config):
     torch.manual_seed(6)
-    cfg = flow_config()
+    cfg = single_band_config
     model = AstroPT3Model(cfg)
     for flow in model.flows.values():
-        assert all(not b.out_proj.weight.any() and not b.out_proj.bias.any() for b in flow.blocks)
+        assert isinstance(flow, JetFormerFlow)
+        for block in flow.blocks:
+            assert not block.get_parameter("out_proj.weight").any()
+            assert not block.get_parameter("out_proj.bias").any()
         activate(flow)
-    base, _ = load_model_config(CONFIG)
     record = make_record(3, image_only_fraction=0)
     obj = ObjectSequencer(cfg).build(record)
-    original = ObjectSequencer(base).build(record)
+    original = ObjectSequencer(tiny_config).build(record)
     for name in obj.values:
         assert torch.equal(obj.values[name], original.values[name])
         assert torch.equal(obj.positions[name], original.positions[name])
@@ -198,9 +196,9 @@ def test_hf_packing_normalization_backward_and_save_load(tmp_path):
     assert restored.config.jetformer_flow_depth == 1
 
 
-def test_generation_uses_latent_prefixes_and_complete_span_inverse():
+def test_generation_uses_latent_prefixes_and_complete_span_inverse(single_band_config):
     torch.manual_seed(7)
-    cfg = flow_config()
+    cfg = single_band_config
     model = AstroPT3Model(cfg).eval()
     for flow in model.flows.values():
         activate(flow)
@@ -212,12 +210,8 @@ def test_generation_uses_latent_prefixes_and_complete_span_inverse():
     assert torch.isfinite(first["spectra"]).all()
     torch.testing.assert_close(first["spectra"], second["spectra"], atol=0, rtol=0)
     reconstructed = reconstruct(model, obj)
-    assert reconstructed["images"].shape == (144, 192)
+    assert reconstructed["legacy_north_g"].shape == (144, 64)
     assert torch.isfinite(reconstructed["spectra"]).all()
-
-
-
-RECIPES = CONFIG.parents[1] / "nanotron"
 
 
 def load_recipe(name):
@@ -234,8 +228,9 @@ def test_flow_width_follows_trunk_rule(recipe):
 
 
 @pytest.mark.parametrize("name,flow", [
-    ("astropt3-70m", 35_276_800),
-    ("astropt3-410m", 133_453_824),
+    ("../controls/astropt3-70m-north", 74_013_696),
+    ("astropt3-70m", 100_381_696),
+    ("astropt3-410m", 389_490_688),
 ])
 def test_recipe_flow_parameter_counts(name, flow):
     config = load_recipe(f"{name}.yaml")["model"]["model_config"]

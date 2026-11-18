@@ -78,7 +78,7 @@ def _read_probe_cache(path: Path):
 
 @torch.no_grad()
 def embed_objects(
-    model, config, objects, *, seq_len=896, objects_per_batch=8, pool_modality="images"
+    model, config, objects, *, seq_len=4096, objects_per_batch=8, pool_modality="legacy_north_g"
 ):
     """Mean-pool the CENTRAL layer state over one modality's tokens, per object.
 
@@ -174,9 +174,9 @@ def probe_checkpoint(
     checkpoint,
     *,
     target="Z",
-    seq_len=896,
+    seq_len=4096,
     objects_per_batch=8,
-    pool_modality="images",
+    pool_modality="legacy_north_g",
     device=None,
     seed=0,
     probe_set,

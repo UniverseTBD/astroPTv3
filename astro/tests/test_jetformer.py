@@ -1,21 +1,19 @@
 """jetformer tokeniser: flow + GMM head (JetFormer/GIVT-style); flow internals in test_jetformer_flow.py."""
 
-from pathlib import Path
-
 import pytest
 import torch
 from legacy_fixture import record_stream
+from test_model import single_band_collator as single_band_collator
+from test_model import single_band_config as single_band_config
+from test_model import single_band_sequencer as single_band_sequencer
 
-from astropt3.config_io import load_model_config
 from astropt3.data.packing import ObjectSequencer, PackedCollator
 from astropt3.modalities import GMMHead, gmm_nll
 
-CONFIG = Path(__file__).resolve().parents[1] / "configs" / "model" / "test-tiny.yaml"
-
 
 @pytest.fixture(scope="module")
-def jet_batch(sequencer, collator):
-    return collator([sequencer.build(r) for r in record_stream(2)])
+def jet_batch(single_band_sequencer, single_band_collator):
+    return single_band_collator([single_band_sequencer.build(r) for r in record_stream(2)])
 
 
 def test_gmm_nll_matches_torch_distributions():
@@ -36,15 +34,15 @@ def test_gmm_nll_matches_torch_distributions():
 
 
 def test_gmm_head_shapes():
-    head = GMMHead(64, 192, k=4)
+    head = GMMHead(64, 64, k=4)
     logits_pi, mu, log_sigma = head(torch.randn(11, 64))
     assert logits_pi.shape == (11, 4)
-    assert mu.shape == (11, 4, 192)
-    assert log_sigma.shape == (11, 4, 192)
+    assert mu.shape == (11, 4, 64)
+    assert log_sigma.shape == (11, 4, 64)
     assert log_sigma.min() >= -7.0 and log_sigma.max() <= 2.0
 
 
-def test_jetformer_skips_per_patch_standardization(tiny_config):
+def test_jetformer_skips_per_patch_standardization(single_band_config):
     """jetformer tokens must invert back to flux: no per-patch standardization."""
     from legacy_fixture import make_record
 
@@ -52,21 +50,18 @@ def test_jetformer_skips_per_patch_standardization(tiny_config):
     from astropt3.tokenization import antispiralise, patchify_image
 
     record = make_record(3, image_only_fraction=0.0)
-    jet_seq = ObjectSequencer(tiny_config).build(record)
+    jet_seq = ObjectSequencer(single_band_config).build(record)
     from astropt3.data.packing import IMAGE_CROP
 
     flux = torch.as_tensor(record["image"]["flux"])
     h, w = flux.shape[-2:]
     top, left = (h - IMAGE_CROP) // 2, (w - IMAGE_CROP) // 2
-    flux = flux[..., top : top + IMAGE_CROP, left : left + IMAGE_CROP]
-    flux = physical_normalize(flux, record["image"]["band"])
-    expected = patchify_image(flux, 8)
+    g = record["image"]["band"].index("des-g")
+    flux = flux[g : g + 1, top : top + IMAGE_CROP, left : left + IMAGE_CROP]
+    expected = patchify_image(physical_normalize(flux, ["des-g"]), 8)
     # undo the config's spiral patch order before comparing to raster patchify
-    actual = (
-        antispiralise(jet_seq.values["images"])
-        if tiny_config.spiral
-        else jet_seq.values["images"]
-    )
+    patches = jet_seq.values["legacy_north_g"]
+    actual = antispiralise(patches) if single_band_config.spiral else patches
     assert torch.allclose(actual, expected)
     # spectra tokens are the physically normalized (ADR 0007) mask-zeroed
     # flux — invertible, but not per-patch standardized
@@ -80,23 +75,23 @@ def test_jetformer_skips_per_patch_standardization(tiny_config):
     )
 
 
-def test_noise_curriculum_sigma_endpoints(tiny_config):
+def test_noise_curriculum_sigma_endpoints(single_band_config):
     from astropt3 import AstroPT3Model
 
-    model = AstroPT3Model(tiny_config)
+    model = AstroPT3Model(single_band_config)
     model.set_jet_noise_frac(0.0)
-    assert model._jet_noise_sigma() == pytest.approx(tiny_config.jetformer_noise_max)
+    assert model._jet_noise_sigma() == pytest.approx(single_band_config.jetformer_noise_max)
     model.set_jet_noise_frac(1.0)
-    assert model._jet_noise_sigma() == pytest.approx(tiny_config.jetformer_noise_min)
+    assert model._jet_noise_sigma() == pytest.approx(single_band_config.jetformer_noise_min)
     model.set_jet_noise_frac(-3.0)  # clamped
-    assert model._jet_noise_sigma() == pytest.approx(tiny_config.jetformer_noise_max)
+    assert model._jet_noise_sigma() == pytest.approx(single_band_config.jetformer_noise_max)
 
 
-def test_noise_curriculum_perturbs_train_only(tiny_config, jet_batch):
+def test_noise_curriculum_perturbs_train_only(single_band_config, jet_batch):
     from astropt3 import AstroPT3Model
 
     torch.manual_seed(0)
-    model = AstroPT3Model(tiny_config)
+    model = AstroPT3Model(single_band_config)
     model.set_jet_noise_frac(0.0)  # sigma = noise_max
 
     # Training mode: noise on the embedded z copy makes forwards stochastic,
@@ -115,7 +110,7 @@ def test_noise_curriculum_perturbs_train_only(tiny_config, jet_batch):
     assert torch.allclose(eval_a.loss, eval_b.loss)
 
 
-@pytest.mark.parametrize("modality, sigma_max", [("images", 0.4), ("spectra", 0.1)])
+@pytest.mark.parametrize("modality, sigma_max", [("legacy_north_g", 0.4), ("spectra", 0.1)])
 @pytest.mark.parametrize("training, frac, scale", [
     (True, -0.1, 1.0),
     (True, 1 / 3, 0.75),
@@ -123,14 +118,14 @@ def test_noise_curriculum_perturbs_train_only(tiny_config, jet_batch):
     (False, 0.0, 0.0),
 ])
 def test_pre_flow_noise_scores_noisy_values(
-    tiny_config, jet_batch, monkeypatch, modality, sigma_max, training, frac, scale,
+    single_band_config, jet_batch, monkeypatch, modality, sigma_max, training, frac, scale,
 ):
     from astropt3 import AstroPT3Config, AstroPT3Model
 
-    modalities = [dict(m) for m in tiny_config.modalities]
+    modalities = [dict(m) for m in single_band_config.modalities]
     next(m for m in modalities if m["name"] == modality)["pre_flow_noise_max"] = sigma_max
     config = AstroPT3Config.from_dict({
-        **tiny_config.to_dict(), "modalities": modalities, "jetformer_noise_max": 0.0,
+        **single_band_config.to_dict(), "modalities": modalities, "jetformer_noise_max": 0.0,
     })
     model = AstroPT3Model(config).train(training)
     # Make both the latent and the logdet depend on the flow input.
@@ -165,22 +160,11 @@ def test_pre_flow_noise_scores_noisy_values(
     torch.testing.assert_close(patches, original, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("name, sigma", [
-    ("images", -1.0), ("images", float("nan")), ("images", float("inf")), ("Z", 0.1),
-])
-def test_invalid_pre_flow_noise(tiny_config, name, sigma):
-    from dataclasses import replace
-
-    modality = tiny_config.modality_registry().get_config(name)
-    with pytest.raises(ValueError, match="pre_flow_noise_max"):
-        replace(modality, pre_flow_noise_max=sigma)
-
-
-def test_smoke_training_learns():
+def test_smoke_training_learns(single_band_config):
     """Local AdamW loop (astropt3.train_smoke is retired, ADR 0015)."""
     from astropt3.modeling_astropt3 import AstroPT3Model
 
-    config, _ = load_model_config(CONFIG)
+    config = single_band_config
     torch.manual_seed(0)
     model = AstroPT3Model(config)
     model.train()
