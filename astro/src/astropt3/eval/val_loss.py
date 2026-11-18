@@ -12,8 +12,10 @@ def evaluate(model, *, batches):
     """Mean loss (and per-modality/family means) over ``batches``.
 
     ``batches`` is an iterable of HF ``AstroPT3Model`` forward keyword dicts,
-    consumed on the model's own device and dtype.
+    consumed on the model's own device and dtype. Call ``model.eval()`` first.
     """
+    if model.training:
+        raise ValueError("Call model.eval() before evaluating loss")
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
     total, per_key, per_key_n = 0.0, {}, {}

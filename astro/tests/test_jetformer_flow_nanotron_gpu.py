@@ -201,12 +201,28 @@ def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt,
     trainer.metadata.current_stage.consumed_train_samples = 4
     trainer.metadata.current_stage.consumed_tokens_per_dataset_folder = {"synthetic": 256}
     model.eval()
+    batch = regroup(flat, model.config.modality_names())
     with torch.no_grad():
-        before = model.model(**regroup(flat, model.config.modality_names()))
+        before = model.model(**batch)
     checkpoint = trainer.save_checkpoint()
+
+    next_frac = (trainer.metadata.last_train_step + 1) / trainer.config.tokens.train_steps
+    model.train()
+    model.set_jet_noise_frac(next_frac)
+    with torch.no_grad():
+        uninterrupted = model.model(**batch)["hsc_images_z"]
+    assert not torch.equal(uninterrupted, before["hsc_images_z"])
+
     # Construction must reconstruct buffers without reading them from checkpoint tensors.
     resumed = _trainer(tmp_path, resume=checkpoint)
-    loaded = resumed.unwrapped_model.eval()
+    loaded = resumed.unwrapped_model
+    assert isinstance(loaded, AstroPT3ForTraining)
+    assert resumed.rng_restored
+    loaded.train()
+    loaded.set_jet_noise_frac(next_frac)
+    with torch.no_grad():
+        torch.testing.assert_close(loaded.model(**batch)["hsc_images_z"], uninterrupted, rtol=0, atol=0)
+    loaded.eval()
     assert resumed.init_checkpoint_path is not None
     assert resumed.metadata.last_train_step == 2
     _assert_permutations(_flows(loaded))
@@ -219,7 +235,7 @@ def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt,
         for suffix in ("z", "logdet"):
             key = f"{name}_{suffix}"
             assert torch.equal(after[key], before[key]), key
-        for old_block, new_block in zip(_flows(model)[name].blocks, _flows(loaded)[name].blocks):
+        for old_block, new_block in zip(_flows(model)[name].blocks, _flows(loaded)[name].blocks, strict=True):
             assert torch.equal(old_block.permutation, new_block.permutation)
             assert torch.equal(old_block.inverse_permutation, new_block.inverse_permutation)
 
