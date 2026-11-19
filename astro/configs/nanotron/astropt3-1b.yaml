@@ -201,15 +201,6 @@ model:
         patch_size: 1
         pos_type: index
         max_positions: 1
-      - name: hsc_extendedness
-        family: scalar
-        source: hsc
-        record_keys: [hsc_i_extendedness_value]
-        token_ids: [211, 212, 213]
-        input_size: 1
-        patch_size: 1
-        pos_type: index
-        max_positions: 1
       - name: hsc_shape
         family: scalar
         source: hsc
@@ -600,7 +591,6 @@ data_stages:
                 hsc_i_cmodel_magerr: i_cmodel_magerr
                 hsc_z_cmodel_magerr: z_cmodel_magerr
                 hsc_y_cmodel_magerr: y_cmodel_magerr
-                hsc_i_extendedness_value: i_extendedness_value
                 hsc_i_sdssshape_shape11: i_sdssshape_shape11
                 hsc_i_sdssshape_shape22: i_sdssshape_shape22
                 hsc_i_sdssshape_shape12: i_sdssshape_shape12

@@ -86,8 +86,6 @@ SCALAR_TRANSFORMS = {
     "psf_fwhm": (lambda x: x - 1.5, lambda x: x + 1.5),
     # AB magnitudes, 17.3-25.5 measured against HSC's 22.5 DUD cut
     "hsc_cmodel_mag": (lambda x: (x - 21.5) / 2.0, lambda x: x * 2.0 + 21.5),
-    # binary 0/1 star-galaxy flag; same map as the gwh fractions
-    "hsc_extendedness": (lambda x: 2.0 * x - 1.0, lambda x: (x + 1.0) / 2.0),
     # second moments in px^2: heavy-tailed (p50 0.28, p99 24.7) and shape12 is
     # SIGNED, so arcsinh — it keeps both tails and the sign, which log cannot.
     "hsc_shape": (lambda x: torch.arcsinh(x / 0.3), lambda x: torch.sinh(x) * 0.3),

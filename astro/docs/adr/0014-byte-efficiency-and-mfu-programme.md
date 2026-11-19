@@ -929,7 +929,6 @@ into 7 heads and 21 tokens instead of 57.
 | `psfdepth` | 3 | `psfdepth_{g,r,z}` | every anchor | `log10(1+x) − 2.5` |
 | `psf_fwhm` | 3 | `image.psf_fwhm` | every anchor | `x − 1.5` |
 | `hsc_cmodel_mag` | 5 | `{g,r,i,z,y}_cmodel_mag` | HSC | `(m − 21.5)/2` |
-| `hsc_extendedness` | 1 | `i_extendedness_value` | HSC | `2x − 1` |
 | `hsc_shape` | 3 | `i_sdssshape_shape{11,22,12}` | HSC | `arcsinh(x/0.3)` |
 | `hsc_psf_shape` | 3 | `i_sdssshape_psf_shape{11,22,12}` | HSC | `arcsinh(x/0.1)` |
 
@@ -964,9 +963,12 @@ and three wasted tokens:
 - **`a_{g,r,i,z,y}` (5 columns).** Their pairwise correlation is exactly
   **1.0000**: one dust map times a fixed per-band coefficient. `ebv` on the
   anchor is that same map a third time. Five columns carrying one number.
-- **`{g,r,z,y}_extendedness_value` (4 columns).** The value is binary (only
-  0.0 and 1.0 occur; 85.5% are 1.0) and near-identical across bands. One band
-  is the whole field.
+- **`{g,r,i,z,y}_extendedness_value` (5 columns).** The value is binary (only
+  0.0 and 1.0 occur; 85.5% are 1.0) and near-identical across bands. A GMM head
+  collapses onto the point mass: in the 1M and 70M PR #63 runs (`rp95towy`,
+  `uloib7sx`) its NLL sat at the `log_sigma = −7` clamp floor (−6.081) on ~45%
+  of steps, and its loss tracked log grad-norm at r ≈ 0.58, with clipped grad
+  norms reaching 10³.
 - **Object shape moments in four of five bands (12 columns).** ~80% resolved
   in *every* band, so these are twelve correlated views of one shape. `i` is
   HSC's reference band.
@@ -999,7 +1001,6 @@ not defaulted, and a group is all-or-nothing because `_scalar_value` returns
 | `psfdepth` | all three finite and `> 0` |
 | `psf_fwhm` | all three finite and `0 < x < 5` arcsec |
 | `hsc_cmodel_mag` | all five finite, `10 < m < 30`, **and** the band's `cmodel_magerr` finite and `< 0.1` mag |
-| `hsc_extendedness` | finite and in `{0, 1}` |
 | `hsc_shape` | all three finite |
 | `hsc_psf_shape` | all three finite |
 
@@ -1056,7 +1057,7 @@ table absorbs the earlier `-99` sentinel list and A8's predicates.
 | `Z` | DESI `Z` | all DESI | `log(1+z)` | `ZWARN ≤ 0` |
 | `sdss_Z` | SDSS `Z` | all SDSS | `log(1+z)` | `ZWARNING ≤ 0` |
 | `sdss_vdisp` | SDSS `VDISP` | 82% | `log10(v) − 2` | `0 < v < 850`, `ZWARNING ≤ 0` |
-| `hsc_cmodel_mag`, `hsc_extendedness`, `hsc_shape`, `hsc_psf_shape` | HSC (A8) | all HSC | A8 | `10 < m < 30`, each `magerr ≤ 0.1` |
+| `hsc_cmodel_mag`, `hsc_shape`, `hsc_psf_shape` | HSC (A8) | all HSC | A8 | `10 < m < 30`, each `magerr ≤ 0.1` |
 | `gwh_gz_<question>` ×10 | Zoobot fractions, n−1 per question | 100% / 5.7% follow-ups | `2x − 1` | — |
 | `gwh_total_sfr_median`, `gwh_total_ssfr_median` | MPA-JHU | 11% | unchanged | `> −99`, MPA flag `≤ 0` (drops 12%) |
 | `gwh_fibre_sfr_median`, `gwh_fibre_ssfr_median` | MPA-JHU | 11% | as total | `> −99` |
@@ -1102,7 +1103,7 @@ which is the ordinary absent span.
   `photo_zerr`; PROVABGS weights, `TSNR2_BGS`, `HPIX_64`, `SCHLEGEL_COLOR`,
   `PROVABGS_Z_MAX`; `galaxy_size` (undocumented); position angles
   (orientation is not a galaxy property). HSC `a_*` and the other bands'
-  extendedness and shape moments stay refused as in A8.
+  shape moments and every band's extendedness stay refused as in A8.
 - **Functions of a spectrum already modelled.** SDSS `SPECTROFLUX_*` and
   `SPECTROSYNFLUX_*`.
 - **Coverage.** OSSY AGN fields (`log_l_oiii`, `log_l_ha`, `log_m_bh`, line

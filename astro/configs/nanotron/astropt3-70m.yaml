@@ -207,15 +207,6 @@ model:
         patch_size: 1
         pos_type: index
         max_positions: 1
-      - name: hsc_extendedness
-        family: scalar
-        source: hsc
-        record_keys: [hsc_i_extendedness_value]
-        token_ids: [211, 212, 213]
-        input_size: 1
-        patch_size: 1
-        pos_type: index
-        max_positions: 1
       - name: hsc_shape
         family: scalar
         source: hsc
@@ -490,6 +481,7 @@ model:
         max_positions: 256
         image_format: rgb
         image_crop: 0
+        pre_flow_noise_max: 0.04 # 8-bit RGB, as galaxies
       - {name: legacy_south_g, family: image, source: legacy_south,
          record_keys: [legacy_south_image], band: des-g, token_ids: [169, 170, 171],
          input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96, pre_flow_noise_max: 0.15}
@@ -606,7 +598,6 @@ data_stages:
                 hsc_i_cmodel_magerr: i_cmodel_magerr
                 hsc_z_cmodel_magerr: z_cmodel_magerr
                 hsc_y_cmodel_magerr: y_cmodel_magerr
-                hsc_i_extendedness_value: i_extendedness_value
                 hsc_i_sdssshape_shape11: i_sdssshape_shape11
                 hsc_i_sdssshape_shape22: i_sdssshape_shape22
                 hsc_i_sdssshape_shape12: i_sdssshape_shape12

@@ -44,7 +44,7 @@ Legacy North at `(0.21, 0.37, 1.08)` for `g, r, z`, Legacy South at
 robust pixel scatter in the outer regions of 23 North and 26 HSC training
 cutouts and valid pixels from 70 South cutouts across three sampled fields.
 They are not a dedicated blank-sky calibration. Galaxies-with-hats RGB uses
-one shared starting σ of `0.04`.
+one shared starting σ of `0.04`, and so does Galaxy10.
 
 DESI and SDSS start at σ = 0.1 in normalized flux units, based on robust
 scatter between adjacent bins in archived training spectra. The SDSS estimate

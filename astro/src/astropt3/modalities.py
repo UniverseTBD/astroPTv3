@@ -42,7 +42,7 @@ class ModalityConfig:
         image_crop: central crop side in pixels before patchify (0 keeps the
             whole image); 96 turns 152x152 survey cutouts into 144 patch-8 tokens.
         pre_flow_noise_max: initial Gaussian sigma in normalized patch units,
-            cosine-annealed to zero during training. Zero disables it.
+            cosine-annealed to 3/64 of itself during training. Zero disables it.
         ADR 0008 scalar modality (``family == "scalar"``) — a one-token span holding a
             physical quantity (Z, ebv, photometry). Scalars bypass the
             jetformer flow (their dims are odd and a flow buys nothing on a

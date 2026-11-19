@@ -31,7 +31,6 @@ def test_scalar_registry_roundtrip_and_unknown_raises():
         # ADR 0014 A8 free scalars
         "fiberflux",
         "psf_fwhm",
-        "hsc_extendedness",
         "hsc_shape",
         "hsc_psf_shape",
     ):

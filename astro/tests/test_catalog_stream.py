@@ -301,7 +301,7 @@ def test_configured_loader_preserves_alignment_across_echoes(recipe, offline):
 def test_recipe_and_shared_builder(recipe, offline):
     dataset_args = recipe["data_stages"][0]["data"]["dataset"]
     assert dataset_args["echo_factor"] == 4
-    assert len(recipe["model"]["model_config"]["modalities"]) == 54
+    assert len(recipe["model"]["model_config"]["modalities"]) == 53
     batches = loader.build_astropt3_dataloader(
         SimpleNamespace(**dataset_args), SimpleNamespace(**recipe["model"]["model_config"]),
         micro_batch_size=1, sequence_length=2048, dp_rank=0, num_workers=0,
