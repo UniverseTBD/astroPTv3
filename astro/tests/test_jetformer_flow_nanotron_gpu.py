@@ -12,7 +12,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 import yaml
-from test_nanotron_gpu import REL_TOL, build_nt_model, make_nt, regroup
+from test_nanotron_gpu import (
+    REL_TOL,
+    assert_loss_metrics,
+    build_nt_model,
+    make_nt,
+    regroup,
+)
 
 pytestmark = pytest.mark.gpu
 ASTRO_DIR = Path(__file__).resolve().parents[1]
@@ -214,7 +220,7 @@ def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt,
         for suffix in ("z", "logdet"):
             key = f"{name}_{suffix}"
             assert torch.equal(after[key], before[key]), key
-        for old_block, new_block in zip(_flows(model)[name].blocks, _flows(loaded)[name].blocks):
+        for old_block, new_block in zip(_flows(model)[name].blocks, _flows(loaded)[name].blocks, strict=True):
             assert torch.equal(old_block.permutation, new_block.permutation)
             assert torch.equal(old_block.inverse_permutation, new_block.inverse_permutation)
 
@@ -263,12 +269,8 @@ def test_hf_nanotron_parity_and_exact_conversion(nt, tmp_path):
                 )
                 assert torch.equal(z, predictions[f"{name}_z"])
                 assert torch.equal(logdet, predictions[f"{name}_logdet"])
-            assert nt_output[f"{name}_loss"].item() == pytest.approx(
-                hf_output.modality_losses[name].item(), rel=REL_TOL
-            )
     assert nt_output["loss"].item() == pytest.approx(hf_output.loss.item(), rel=REL_TOL)
-    for family, loss in hf_output.family_losses.items():
-        assert nt_output[f"{family}_family_loss"].item() == pytest.approx(loss.item(), rel=REL_TOL)
+    assert_loss_metrics(nt_output, hf_output, config, flat)
 
     hf_back = AstroPT3Model(hf_config)
     torch.nn.Module.cuda(hf_back).bfloat16().eval()
