@@ -246,10 +246,9 @@ data_stages:
               record_key: hsc_image
             - name: galaxies
               repo: >-
-                Smith42/galaxies-with-hats@c0188b776c4ce6312a805a04cbc25c891a075933/train
+                Smith42/galaxies-with-hats@1a2b1ebbbe06c67a15f49385643ab711c5824a0d/train
               decoder: rgb_png
               record_key: galaxy_image
-              how: left # no HATS margin cache, which outer joins require
               scalar_columns:
                 gwh_redshift: redshift
                 gwh_mass_med_photoz: mass_med_photoz
