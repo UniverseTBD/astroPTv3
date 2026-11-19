@@ -542,6 +542,8 @@ def test_redshift_requires_quality_from_same_catalog(separate_flag):
 
 def test_per_catalog_join_overrides_stream_join(recipe, offline):
     spec = deepcopy(recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"])
+    hsc = next(c for c in spec["catalogs"] if c["name"] == "hsc")
+    hsc["how"] = "left"
     config = AstroPT3Config(modalities=recipe["model"]["model_config"]["modalities"])
     stream = streaming.CatalogStream(spec, config)
     frame = nested_frame([_row(stream.spec)], tuple(stream.stars[0].nested))
@@ -550,11 +552,10 @@ def test_per_catalog_join_overrides_stream_join(recipe, offline):
         next(draws)
     opened = offline.streams[0]
     joins = {right["suffixes"][1]: right["how"] for right in opened.rights}
-    assert joins == {"_sdss": "outer", "_desi": "outer", "_hsc": "outer", "_galaxies": "left"}
-    # sky is selected from the anchor and outer surveys only; galaxies cannot widen it
-    surveys = tuple(f"hf://datasets/{c['repo']}" for c in spec["catalogs"][:3])
+    assert joins == {"_sdss": "outer", "_desi": "outer", "_hsc": "left", "_galaxies": "outer"}
+    surveys = tuple(f"hf://datasets/{c['repo']}" for c in spec["catalogs"] if c["name"] != "hsc")
     assert opened.kwargs["footprint"] == ("footprint", f"hf://datasets/{spec['anchors'][0]['repo']}", surveys, 3)
-    spec["catalogs"][-1]["how"] = "inner"
+    hsc["how"] = "inner"
     with pytest.raises(ValueError, match="left or outer"):
         streaming.CatalogStream(spec, config)
 
@@ -662,7 +663,7 @@ def test_galaxies_with_hats_png_scalars_and_sentinels(recipe):
     assert set(values) == {m["name"] for m in modalities} - {"gwh_mass_med_photoz"}
 
 
-def test_left_joined_galaxy_without_match_is_skipped(recipe):
+def test_unmatched_anchor_has_no_galaxy_modalities(recipe):
     spec = deepcopy(recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"])
     config = AstroPT3Config(modalities=recipe["model"]["model_config"]["modalities"])
     stream = streaming.CatalogStream(spec, config)
@@ -676,3 +677,16 @@ def test_left_joined_galaxy_without_match_is_skipped(recipe):
     assert record["object_id"] == "legacy:legacy-1"
     assert "galaxy_image" not in record and not any(key.startswith("gwh_") for key in record)
     assert "galaxies" not in ObjectSequencer(config).build(record).values
+
+
+def test_unmatched_galaxy_keeps_its_identity_and_modalities(recipe):
+    spec = recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"]
+    config = AstroPT3Config(modalities=recipe["model"]["model_config"]["modalities"])
+    stream = streaming.CatalogStream(spec, config)
+    record = _decode(stream, {k: v for k, v in _row(spec).items() if k.endswith("_galaxies")})
+    assert record is not None
+    assert record["source_ids"] == {"galaxies": "galaxies-1"}
+    assert record["object_id"] == "galaxies:galaxies-1" and record["anchor"] is None
+    assert set(ObjectSequencer(config).build(record).values) == {
+        m["name"] for m in config.modalities if m["source"] == "galaxies_with_hats"
+    }
