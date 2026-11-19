@@ -46,7 +46,7 @@ def test_yaml_uses_current_modalities(path):
     images = {m["name"]: m for m in expected if m["family"] == "image"}
     assert set(images) == {
         "legacy_north_g", "legacy_north_r", "legacy_north_z",
-        "hsc_g", "hsc_r", "hsc_i", "hsc_z", "hsc_y", "galaxies",
+        "hsc_g", "hsc_r", "hsc_i", "hsc_z", "hsc_y", "galaxies", "gz10_images",
     }
     rgb = images["galaxies"]
     assert rgb["image_format"] == "rgb" and "band" not in rgb
@@ -55,14 +55,27 @@ def test_yaml_uses_current_modalities(path):
     raw = yaml.safe_load(path.read_text())
     assert Path(raw["checkpoints"]["checkpoints_path"]).name == f"{path.stem}-dual-anchor"
     model = raw["model"]["model_config"]
-    assert model["modalities"][: len(expected)] == expected
-    assert ModalityRegistry(model["modalities"][len(expected) :]).to_list() == (
+    # Noise amplitude is a training setting, not part of the data contract.
+    definitions = [
+        {key: value for key, value in m.items() if key != "pre_flow_noise_max"}
+        for m in model["modalities"]
+    ]
+    assert definitions[: len(expected)] == expected
+    south = definitions[len(expected) :]
+    assert ModalityRegistry(south[: len(LEGACY_SOUTH_MODALITIES)]).to_list() == (
         ModalityRegistry(LEGACY_SOUTH_MODALITIES).to_list()
     )
+    assert [(m["name"], m["source"], m["record_keys"]) for m in south[len(LEGACY_SOUTH_MODALITIES) :]] == [
+        ("legacy_south_ebv", "legacy_south", ["legacy_south_ebv"]),
+        ("legacy_south_photometry", "legacy_south", [f"legacy_south_flux_{band}" for band in "griz"]),
+    ]
     assert model["vocab_size"] == control["model"]["model_config"]["vocab_size"] == 256
     assert model["vocab_size"] % raw["parallelism"]["tp"] == 0
-    worst_case = 1 + sum(m["max_positions"] + 2 for m in model["modalities"])
-    assert worst_case <= raw["tokens"]["sequence_length"]
+    config = AstroPT3Config(**model)
+    # Each record can carry at most one Legacy anchor's bands and scalars.
+    for absent in ({"legacy_north", "legacy"}, {"legacy_south"}):
+        worst_case = 1 + sum(m["max_positions"] + 2 for m in model["modalities"] if m["source"] not in absent)
+        assert worst_case <= raw["tokens"]["sequence_length"]
     original = control["data_stages"][0]["data"]["dataset"]["catalog_stream"]
     assert original["split"] == "train"
     for stage in raw["data_stages"]:
@@ -71,3 +84,15 @@ def test_yaml_uses_current_modalities(path):
         assert [north] == original["anchors"] and north["draw_weight"] == 1
         assert south["draw_weight"] == 2 and south["record_key"] == "legacy_south_image"
         assert stream == {**original, "anchors": [north, south]}
+        CatalogStream(stream, config)
+
+
+def test_70m_recipe_combines_pre_flow_and_constant_latent_noise():
+    config = yaml.safe_load((ASTRO_DIR / "configs/nanotron/astropt3-70m.yaml").read_text())["model"]["model_config"]
+    assert config["jetformer_noise_min"] == config["jetformer_noise_max"] == 0.1
+    assert {m["name"]: m["pre_flow_noise_max"] for m in config["modalities"] if "pre_flow_noise_max" in m} == {
+        "legacy_north_g": 0.21, "legacy_north_r": 0.37, "legacy_north_z": 1.08,
+        "legacy_south_g": 0.15, "legacy_south_r": 0.14, "legacy_south_i": 0.45, "legacy_south_z": 0.64,
+        "hsc_g": 0.15, "hsc_r": 0.20, "hsc_i": 0.32, "hsc_z": 0.49, "hsc_y": 0.93,
+        "galaxies": 0.04, "gz10_images": 0.04, "spectra": 0.1, "sdss_spectra": 0.1,
+    }

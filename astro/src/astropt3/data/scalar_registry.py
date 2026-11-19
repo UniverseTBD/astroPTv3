@@ -17,6 +17,8 @@ trained on. Unknown scalar names raise.
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 from .band_registry import _DIV_FACTOR
@@ -24,43 +26,25 @@ from .band_registry import _DIV_FACTOR
 # ebv knee: typical Galactic E(B-V) is a few hundredths of a magnitude
 _EBV_DIV = 0.1
 
-GWH_FRACTION_FIELDS = (
-    "smooth-or-featured_smooth_fraction",
-    "smooth-or-featured_featured-or-disk_fraction",
-    "smooth-or-featured_artifact_fraction",
-    "disk-edge-on_yes_fraction",
-    "disk-edge-on_no_fraction",
-    "has-spiral-arms_yes_fraction",
-    "has-spiral-arms_no_fraction",
-    "bar_strong_fraction",
-    "bar_weak_fraction",
-    "bar_no_fraction",
-    "bulge-size_dominant_fraction",
-    "bulge-size_large_fraction",
-    "bulge-size_moderate_fraction",
-    "bulge-size_small_fraction",
-    "bulge-size_none_fraction",
-    "how-rounded_round_fraction",
-    "how-rounded_in-between_fraction",
-    "how-rounded_cigar-shaped_fraction",
-    "edge-on-bulge_boxy_fraction",
-    "edge-on-bulge_none_fraction",
-    "edge-on-bulge_rounded_fraction",
-    "spiral-winding_tight_fraction",
-    "spiral-winding_medium_fraction",
-    "spiral-winding_loose_fraction",
-    "spiral-arm-count_1_fraction",
-    "spiral-arm-count_2_fraction",
-    "spiral-arm-count_3_fraction",
-    "spiral-arm-count_4_fraction",
-    "spiral-arm-count_more-than-4_fraction",
-    "spiral-arm-count_cant-tell_fraction",
-    "merging_none_fraction",
-    "merging_minor-disturbance_fraction",
-    "merging_major-disturbance_fraction",
-    "merging_merger_fraction",
-)
-_GWH_SCALAR_NAMES = {f"gwh_{field}" for field in GWH_FRACTION_FIELDS}
+# Galaxy Zoo (Zoobot) question -> kept answers. One joint modality per question,
+# ``gwh_gz_<question>``, over ``<question>_<answer>_fraction``. A question's
+# fractions sum to 1, so its null answer (no/none/artifact/cant-tell; else the
+# last) is dropped: it is 1 - sum(kept), and keeping it would hand the diagonal
+# GMM a degenerate direction. Unreached follow-up questions are NaN upstream,
+# which is the ordinary absent span.
+GZ_QUESTIONS = {
+    "smooth-or-featured": ("smooth", "featured-or-disk"),
+    "disk-edge-on": ("yes",),
+    "has-spiral-arms": ("yes",),
+    "bar": ("strong", "weak"),
+    "bulge-size": ("dominant", "large", "moderate", "small"),
+    "how-rounded": ("round", "in-between"),
+    "edge-on-bulge": ("boxy", "rounded"),
+    "spiral-winding": ("tight", "medium"),
+    "spiral-arm-count": ("1", "2", "3", "4", "more-than-4"),
+    "merging": ("minor-disturbance", "major-disturbance", "merger"),
+}
+_GZ_NAMES = {f"gwh_gz_{question}" for question in GZ_QUESTIONS}
 
 
 def _photometry_fwd(x: torch.Tensor) -> torch.Tensor:
@@ -85,6 +69,9 @@ SCALAR_TRANSFORMS = {
     "provabgs_AVG_SFR": (torch.asinh, torch.sinh),
     "ebv": (lambda x: x / _EBV_DIV, lambda x: x * _EBV_DIV),
     "photometry": (_photometry_fwd, _photometry_inv),
+    # DR10 South Tractor columns: the same SFD map and nMgy, plus the i band
+    "legacy_south_ebv": (lambda x: x / _EBV_DIV, lambda x: x * _EBV_DIV),
+    "legacy_south_photometry": (_photometry_fwd, _photometry_inv),
     # ADR 0014 A8 — free scalars from rows already on the wire. Knees are
     # published units, never corpus fits; the percentiles in A8 are shown only
     # to evidence that each lands O(1).
@@ -102,8 +89,6 @@ SCALAR_TRANSFORMS = {
     "psf_fwhm": (lambda x: x - 1.5, lambda x: x + 1.5),
     # AB magnitudes, 17.3-25.5 measured against HSC's 22.5 DUD cut
     "hsc_cmodel_mag": (lambda x: (x - 21.5) / 2.0, lambda x: x * 2.0 + 21.5),
-    # binary 0/1 star-galaxy flag; same map as the gwh fractions
-    "hsc_extendedness": (lambda x: 2.0 * x - 1.0, lambda x: (x + 1.0) / 2.0),
     # second moments in px^2: heavy-tailed (p50 0.28, p99 24.7) and shape12 is
     # SIGNED, so arcsinh — it keeps both tails and the sign, which log cannot.
     "hsc_shape": (lambda x: torch.arcsinh(x / 0.3), lambda x: torch.sinh(x) * 0.3),
@@ -117,24 +102,100 @@ SCALAR_TRANSFORMS = {
     "gwh_mass_med_photoz": (lambda x: (x - 10.0) / 2.0, lambda x: x * 2.0 + 10.0),
     "gwh_total_sfr_median": (lambda x: x, lambda x: x),
     "gwh_total_ssfr_median": (lambda x: x + 11.0, lambda x: x - 11.0),
+    # Issue #53 triage (ADR 0014 A9). Log-scale catalogue values reuse the
+    # maps above; sizes, widths and dispersions are positive, so log10 with a
+    # fixed unit offset; AB magnitudes take a fixed (m - m0) / 2.
+    "gwh_fibre_sfr_median": (lambda x: x, lambda x: x),
+    "gwh_fibre_ssfr_median": (lambda x: x + 11.0, lambda x: x - 11.0),
+    "gwh_ssfr_med_photoz": (lambda x: x + 11.0, lambda x: x - 11.0),
+    "gwh_logMH": (lambda x: (x - 10.0) / 2.0, lambda x: x * 2.0 + 10.0),
+    "gwh_W50": (lambda x: torch.log10(x) - 2.0, lambda x: torch.pow(10.0, x + 2.0)),  # km/s
+    "gwh_est_petro_th50": (torch.log10, lambda x: torch.pow(10.0, x)),  # arcsec
+    "gwh_petro_radius": (torch.log10, lambda x: torch.pow(10.0, x)),  # th50, th90 arcsec
+    "gwh_sersic_n": (torch.log10, lambda x: torch.pow(10.0, x)),
+    "gwh_sersic_ba": (lambda x: 2.0 * x - 1.0, lambda x: (x + 1.0) / 2.0),
+    "gwh_nsa_mag": (lambda x: (x - 17.0) / 2.0, lambda x: x * 2.0 + 17.0),  # GALEX F, N, SDSS u, i
+    "gwh_petro_ba": (lambda x: 2.0 * x - 1.0, lambda x: (x + 1.0) / 2.0),  # b/a at th50, th90
+    "sdss_vdisp": (lambda x: torch.log10(x) - 2.0, lambda x: torch.pow(10.0, x + 2.0)),  # km/s
+    "provabgs_MAG_W1": (lambda x: (x - 18.0) / 2.0, lambda x: x * 2.0 + 18.0),
 }
 
-# Catalog fill values that mean "not measured" for a scalar (photo-z and
-# MPA-JHU use -99); such a value drops the span like a missing one.
-MISSING_SENTINELS = {
-    "gwh_mass_med_photoz": -99.0,
-    "gwh_total_sfr_median": -99.0,
-    "gwh_total_ssfr_median": -99.0,
+# Open valid interval per scalar; any value outside drops the span. Log maps
+# need x > 0; -99 is the photo-z / MPA-JHU "not measured" fill; the rest are
+# the ADR 0014 A8 predicates and published caps (SDSS VDISP saturates at 850).
+_ABOVE_FILL = (-99.0, math.inf)
+_POSITIVE = (0.0, math.inf)
+_AB_MAG = (10.0, 30.0)
+VALID_RANGES = {
+    "gwh_mass_med_photoz": _ABOVE_FILL,
+    "gwh_total_sfr_median": _ABOVE_FILL,
+    "gwh_total_ssfr_median": _ABOVE_FILL,
+    "gwh_fibre_sfr_median": _ABOVE_FILL,
+    "gwh_fibre_ssfr_median": _ABOVE_FILL,
+    "gwh_ssfr_med_photoz": _ABOVE_FILL,
+    "gwh_W50": _POSITIVE,
+    "gwh_est_petro_th50": _POSITIVE,
+    "gwh_petro_radius": _POSITIVE,
+    "gwh_sersic_n": _POSITIVE,
+    "gwh_nsa_mag": _AB_MAG,
+    "psfdepth": _POSITIVE,
+    "psf_fwhm": (0.0, 5.0),
+    "hsc_cmodel_mag": _AB_MAG,
+    "sdss_vdisp": (0.0, 850.0),
+    "provabgs_MAG_W1": _AB_MAG,
+    "gwh_petro_ba": _POSITIVE,
+    "gz10_label": (-0.5, 9.5),
 }
 
-_GWH_FRACTION = (lambda x: 2.0 * x - 1.0, lambda x: (x + 1.0) / 2.0)
+# Scalar -> {record key of a quality flag or error: largest passing value}.
+# The flag must come from the scalar's own catalogue (CatalogStream checks), and
+# a missing flag fails: an unknown quality must not look reliable.
+QUALITY_GATES = {
+    "Z": {"ZWARN": 0.0},
+    "sdss_Z": {"sdss_ZWARNING": 0.0},
+    "sdss_vdisp": {"sdss_ZWARNING": 0.0},
+    "hsc_cmodel_mag": {f"hsc_{band}_cmodel_magerr": 0.1 for band in "grizy"},
+    "gwh_total_sfr_median": {"gwh_total_sfr_flag": 0.0},
+    "gwh_total_ssfr_median": {"gwh_total_ssfr_flag": 0.0},
+}
+
+_GZ_FRACTION = (lambda x: 2.0 * x - 1.0, lambda x: (x + 1.0) / 2.0)
+
+# Categorical scalars: one record key holding a class index -> its one-hot
+# vector (input_size == classes); the inverse is the argmax. A density over
+# class indices would invent an ordering, so these take a CategoricalHead.
+CATEGORICAL = {"gz10_label": 10}  # Galaxy10 DECaLS morphology classes 0-9
+
+
+def _one_hot(classes: int):
+    return (
+        lambda x: torch.nn.functional.one_hot(x[..., 0].round().long(), classes).to(x.dtype),
+        lambda x: x.argmax(dim=-1, keepdim=True).to(x.dtype),
+    )
+
+
+def scalar_valid(name: str, values, record: dict) -> bool:
+    """Whether a scalar's raw values pass its range and quality predicates."""
+    try:
+        numbers = [float(value) for value in values]
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"modality {name!r} has a non-numeric value") from error
+    low, high = VALID_RANGES.get(name, (-math.inf, math.inf))
+    if not all(math.isfinite(x) and low < x < high for x in numbers):
+        return False
+    if name in CATEGORICAL and any(x != round(x) for x in numbers):
+        return False
+    return all(record.get(flag) is not None and float(record[flag]) <= limit
+               for flag, limit in QUALITY_GATES.get(name, {}).items())
 
 
 def _transforms(name: str):
     if name in SCALAR_TRANSFORMS:
         return SCALAR_TRANSFORMS[name]
-    if name in _GWH_SCALAR_NAMES:
-        return _GWH_FRACTION
+    if name in _GZ_NAMES:
+        return _GZ_FRACTION
+    if name in CATEGORICAL:
+        return _one_hot(CATEGORICAL[name])
     raise NotImplementedError(
         f"no scalar normalization for {name!r}; add it to "
         "scalar_registry.SCALAR_TRANSFORMS"
@@ -150,8 +211,11 @@ def scalar_inverse(name: str, value: torch.Tensor) -> torch.Tensor:
 
 
 if __name__ == "__main__":
-    for name in SCALAR_TRANSFORMS:
-        x = torch.tensor([0.0, 0.03, 0.7, 1.5, 42.0])
+    for name, classes in CATEGORICAL.items():
+        labels = torch.arange(classes, dtype=torch.float32).unsqueeze(-1)
+        assert torch.equal(scalar_inverse(name, scalar_normalize(name, labels)), labels), name
+    for name in [*SCALAR_TRANSFORMS, *_GZ_NAMES]:
+        x = torch.tensor([0.03, 0.7, 1.5, 42.0])
         rt = scalar_inverse(name, scalar_normalize(name, x))
         assert torch.allclose(rt, x, atol=1e-5), name
     try:

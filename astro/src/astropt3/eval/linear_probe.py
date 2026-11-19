@@ -87,7 +87,10 @@ def embed_objects(
     Objects are packed with the shared collator; each object's span in a row
     starts at its ``<|bos|>`` and the packed row-major object order equals
     the input order, so embeddings align with the targets by construction.
+    Call ``model.eval()`` first.
     """
+    if model.training:
+        raise ValueError("Call model.eval() before extracting probe embeddings")
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
     collator = PackedCollator(config, seq_len=seq_len)

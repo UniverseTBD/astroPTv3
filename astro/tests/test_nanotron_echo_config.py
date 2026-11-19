@@ -70,7 +70,7 @@ def test_derived_gpu_smoke_keeps_tiny_training_contract(tmp_path):
     config = nanotron_config.get_config_from_dict(yaml.safe_load(yaml.safe_dump(raw)))
     model = config.model.model_config
     assert (model.hidden_size, model.num_hidden_layers, model.jetformer_flow_hidden) == (64, 4, 128)
-    assert len(model.modalities) == 24 and not model.use_cache
+    assert len(model.modalities) == 58 and not model.use_cache
     assert not model._fused_rms_norm and not model._fused_rotary_emb
     data = config.data_stages[0].data
     assert data.num_loading_workers == 0 and data.dataset.echo_factor == 1

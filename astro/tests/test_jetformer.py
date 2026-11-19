@@ -100,7 +100,7 @@ def test_noise_curriculum_perturbs_train_only(single_band_config, jet_batch):
     out_a = model(**jet_batch)
     out_b = model(**jet_batch)
     assert torch.isfinite(out_a.loss) and torch.isfinite(out_b.loss)
-    assert not torch.allclose(out_a.loss, out_b.loss)
+    assert not torch.allclose(out_a.modality_losses["legacy_north_g"], out_b.modality_losses["legacy_north_g"])
 
     # Eval mode: noise off regardless of frac -> deterministic.
     model.eval()
@@ -108,6 +108,70 @@ def test_noise_curriculum_perturbs_train_only(single_band_config, jet_batch):
         eval_a = model(**jet_batch)
         eval_b = model(**jet_batch)
     assert torch.allclose(eval_a.loss, eval_b.loss)
+
+
+@pytest.mark.parametrize("modality, sigma_max", [("legacy_north_g", 0.4), ("spectra", 0.1)])
+@pytest.mark.parametrize("training, frac, scale", [
+    (True, -0.1, 1.0),
+    (True, 1 / 3, 195 / 256),
+    (True, 1.0, 3 / 64),
+    (False, 0.0, 0.0),
+])
+def test_pre_flow_noise_scores_noisy_values(
+    single_band_config, jet_batch, monkeypatch, modality, sigma_max, training, frac, scale,
+):
+    from astropt3 import AstroPT3Config, AstroPT3Model
+
+    modalities = [dict(m) for m in single_band_config.modalities]
+    next(m for m in modalities if m["name"] == modality)["pre_flow_noise_max"] = sigma_max
+    config = AstroPT3Config.from_dict({
+        **single_band_config.to_dict(), "modalities": modalities, "jetformer_noise_max": 0.0,
+    })
+    model = AstroPT3Model(config).train(training)
+    # Make both the latent and the logdet depend on the flow input.
+    with torch.no_grad():
+        for name, param in model.flows[modality].named_parameters():
+            if name.endswith("out_proj.weight"):
+                param.normal_(std=0.02)
+    model.set_jet_noise_frac(frac)
+    patches = jet_batch["modality_values"][modality]
+    original = patches.clone()
+    draws = []
+
+    def fixed_noise(values):
+        draws.append(values)
+        return torch.ones_like(values)
+
+    monkeypatch.setattr(torch, "randn_like", fixed_noise)
+    with torch.no_grad():
+        actual = model(**jet_batch)
+        # Score explicitly perturbed data without drawing noise a second time.
+        model.pre_flow_noise_max[modality] = 0.0
+        noisy_batch = {
+            **jet_batch,
+            "modality_values": {**jet_batch["modality_values"], modality: patches + sigma_max * scale},
+        }
+        expected = model(**noisy_batch)
+    assert len(draws) == int(scale > 0)
+    if draws:
+        assert draws[0] is patches
+    torch.testing.assert_close(actual.last_hidden_state, expected.last_hidden_state)
+    torch.testing.assert_close(actual.modality_losses, expected.modality_losses)
+    torch.testing.assert_close(patches, original, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("backend", ["hf", "nanotron"])
+@pytest.mark.parametrize("name, sigma", [
+    ("legacy_north_g", -1.0), ("legacy_north_g", float("nan")),
+    ("legacy_north_g", float("inf")), ("Z", 0.1),
+])
+def test_invalid_pre_flow_noise(single_band_config, backend, name, sigma):
+    from astropt3 import AstroPT3Config
+
+    config_cls = AstroPT3Config if backend == "hf" else pytest.importorskip("nanotron.config").AstroPT3Config
+    modality = next(m for m in single_band_config.modalities if m["name"] == name)
+    with pytest.raises(ValueError, match="pre_flow_noise_max"):
+        config_cls(modalities=[{**modality, "pre_flow_noise_max": sigma}], vocab_size=256)
 
 
 def test_smoke_training_learns(single_band_config):
@@ -142,5 +206,5 @@ def test_smoke_training_learns(single_band_config):
         opt.step()
         losses.append(out.loss.item())
     # Likelihood loss (NLL - logdet) can cross zero, so assert an absolute
-    # drop rather than the affine gate's ratio check.
-    assert losses[-1] < losses[0] - 10.0, f"{losses[0]:.4f} -> {losses[-1]:.4f}"
+    # drop rather than a ratio; patch losses are nats per dimension.
+    assert losses[-1] < losses[0] - 2.0, f"{losses[0]:.4f} -> {losses[-1]:.4f}"
