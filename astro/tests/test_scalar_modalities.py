@@ -247,18 +247,11 @@ def test_recipe_galaxy_zoo_spans_match_registry_questions():
         assert span["input_size"] == len(answers)
 
 
-GZ10_LABEL = {
-    "name": "gz10_label", "family": "scalar", "source": "gz10", "record_keys": ["gz10_label"],
-    "token_ids": [64, 65, 66], "input_size": 10, "patch_size": 1, "pos_type": "index",
-    "max_positions": 1, "categories": 10,
-}
-
-
 @pytest.fixture
-def categorical_model(tiny_config):
+def categorical_model(tiny_config, categorical_label):
     from astropt3 import AstroPT3Config, AstroPT3Model
 
-    config = AstroPT3Config(**{**tiny_config.to_dict(), "modalities": [*tiny_config.modalities, GZ10_LABEL]})
+    config = AstroPT3Config(**{**tiny_config.to_dict(), "modalities": [*tiny_config.modalities, categorical_label]})
     torch.manual_seed(0)
     return AstroPT3Model(config).eval()
 
@@ -270,25 +263,25 @@ def test_categorical_scalar_is_one_hot_with_cross_entropy(categorical_model, ful
     from astropt3.modeling_astropt3 import left_shift_mask
 
     model = categorical_model
-    assert isinstance(model.decoders["gz10_label"], CategoricalHead)
-    assert "gz10_label" in model.scalar_names and "gz10_label" not in model.flows
+    assert isinstance(model.decoders["test_label"], CategoricalHead)
+    assert "test_label" in model.scalar_names and "test_label" not in model.flows
     sequencer = ObjectSequencer(model.config)
-    obj = sequencer.build({**full_record, "gz10_label": 7})
-    torch.testing.assert_close(obj.values["gz10_label"], torch.nn.functional.one_hot(torch.tensor([7]), 10).float())
-    assert scalar_inverse("gz10_label", obj.values["gz10_label"]).item() == 7
-    for bad in (10, -1, 2.5):  # out of range, or not a class index
-        assert not scalar_valid("gz10_label", [bad], {})
-        assert "gz10_label" not in sequencer.build({**full_record, "gz10_label": bad}).masks
+    obj = sequencer.build({**full_record, "test_label": 3})
+    torch.testing.assert_close(obj.values["test_label"], torch.nn.functional.one_hot(torch.tensor([3]), 4).float())
+    assert scalar_inverse("test_label", obj.values["test_label"]).item() == 3
+    for bad in (4, -1, 2.5):  # out of range, or not a class index
+        assert not scalar_valid("test_label", [bad], {})
+        assert "test_label" not in sequencer.build({**full_record, "test_label": bad}).masks
     from astropt3.data.packing import PackedCollator
 
     batch = PackedCollator(model.config, seq_len=896)([obj])
     with torch.no_grad():
         out = model(**batch)
-    mask = batch["modality_masks"]["gz10_label"]
-    logits = model.decoders["gz10_label"](out.last_hidden_state[left_shift_mask(mask)])
-    expected = torch.nn.functional.cross_entropy(logits.float(), torch.tensor([7]))
-    torch.testing.assert_close(out.modality_losses["gz10_label"], expected)
-    assert out.predictions["gz10_label"].shape == (1, 10)
+    mask = batch["modality_masks"]["test_label"]
+    logits = model.decoders["test_label"](out.last_hidden_state[left_shift_mask(mask)])
+    expected = torch.nn.functional.cross_entropy(logits.float(), torch.tensor([3]))
+    torch.testing.assert_close(out.modality_losses["test_label"], expected)
+    assert out.predictions["test_label"].shape == (1, 4)
 
 
 def test_categorical_generation_samples_one_hot_classes(categorical_model, full_record):
@@ -296,19 +289,33 @@ def test_categorical_generation_samples_one_hot_classes(categorical_model, full_
     from astropt3.generation import generate
 
     sequencer = ObjectSequencer(categorical_model.config)
-    record = {**full_record, "gz10_label": 3}
+    record = {**full_record, "test_label": 3}
     order = list(sequencer.build(full_record).masks)
-    template = sequencer.build(record, modality_order=[*order, "gz10_label"])
-    sampled = generate(categorical_model, template, {"gz10_label"}, n=4,
-                       generator=torch.Generator().manual_seed(0))["gz10_label"]
-    assert sampled.shape == (4, 1, 10)
+    template = sequencer.build(record, modality_order=[*order, "test_label"])
+    sampled = generate(categorical_model, template, {"test_label"}, n=4,
+                       generator=torch.Generator().manual_seed(0))["test_label"]
+    assert sampled.shape == (4, 1, 4)
     assert torch.equal(sampled.sum(-1), torch.ones(4, 1)) and set(sampled.unique().tolist()) <= {0.0, 1.0}
 
 
-@pytest.mark.parametrize("patch", [{"categories": 10, "family": "spectrum"}, {"categories": 10, "input_size": 9},
-                                   {"categories": 1, "input_size": 1}])
-def test_categorical_config_is_validated(patch):
+@pytest.mark.parametrize("patch", [{"family": "spectrum"}, {"input_size": 3}, {"categories": 1, "input_size": 1}])
+def test_categorical_config_is_validated(categorical_label, patch):
     from astropt3.modalities import ModalityConfig
 
     with pytest.raises(ValueError, match="categorical"):
-        ModalityConfig(**{**GZ10_LABEL, "record_keys": tuple(GZ10_LABEL["record_keys"]), **patch})
+        ModalityConfig(**{**categorical_label, **patch})
+
+
+def test_catalog_rejects_categorical_head_with_wrong_class_count(categorical_label):
+    from copy import deepcopy
+
+    from legacy_fixture import TINY_CATALOG_STREAM
+
+    from astropt3 import AstroPT3Config
+    from astropt3.data.catalog_stream import CatalogStream
+
+    spec = deepcopy(TINY_CATALOG_STREAM)
+    spec["anchors"][0]["scalar_columns"]["test_label"] = "test_label"
+    wrong = {**categorical_label, "categories": 3, "input_size": 3}
+    with pytest.raises(ValueError, match="categories disagree"):
+        CatalogStream(spec, AstroPT3Config(modalities=[wrong]))

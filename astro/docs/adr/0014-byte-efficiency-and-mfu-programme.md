@@ -1033,6 +1033,9 @@ figures describe 0.7% of the corpus.
 
 ## Implementation amendments (2026-11-17, r5)
 
+The catalog inventory and measurements in this section describe the r5 experiment.
+For the active catalog joins and modality counts, see the [training guide](../training.md).
+
 **A9 — value-added scalar triage (issue #53): 33 new scalar modalities
 across six catalogues, PROVABGS as a left-joined scalar spoke, and Galaxy10
 as a left-joined image + categorical-label spoke.** The

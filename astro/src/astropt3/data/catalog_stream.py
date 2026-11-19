@@ -41,15 +41,12 @@ _PROFILES = {
     "scalars": (None, (), "scalar"),
     # 8-bit RGB PNG/JPEG struct {bytes, path} (e.g. galaxies-with-hats); dequantized to (k + U(0,1)) / 255
     "rgb_png": ("image", (), "image"),
-    # Galaxy10 DECaLS: the same 256x256 RGB PNG struct, stored as ``rgb_image``
-    "gz10_png": ("rgb_image", (), "image"),
 }
 _IMAGE_SOURCE_DECODERS = {
     "legacy_north": "legacy_image",
     "legacy_south": "legacy_south_image",
     "hsc": "hsc_image",
     "galaxies_with_hats": "rgb_png",
-    "gz10": "gz10_png",
 }
 # Catalogs whose identifier column is not ``object_id``.
 _ID_COLUMNS = {"rgb_png": "dr8_id"}
@@ -195,7 +192,7 @@ class _Star:
                 if scale.shape != (5,) or not np.allclose(scale, 0.168, rtol=1e-6, atol=0):
                     raise ValueError("HSC Wide pixel scale must be 0.168 arcsec in all five bands")
                 result = {"flux": flux, "band": bands}
-            elif decoder in ("rgb_png", "gz10_png"):
+            elif decoder == "rgb_png":
                 with Image.open(io.BytesIO(value["bytes"])) as png:
                     rgb = np.asarray(png.convert("RGB"), dtype=np.float32)
                 # Uniform dequantization: a continuous likelihood on exact k/255 levels

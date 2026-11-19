@@ -46,7 +46,7 @@ def test_yaml_uses_current_modalities(path):
     images = {m["name"]: m for m in expected if m["family"] == "image"}
     assert set(images) == {
         "legacy_north_g", "legacy_north_r", "legacy_north_z",
-        "hsc_g", "hsc_r", "hsc_i", "hsc_z", "hsc_y", "galaxies", "gz10_images",
+        "hsc_g", "hsc_r", "hsc_i", "hsc_z", "hsc_y", "galaxies",
     }
     rgb = images["galaxies"]
     assert rgb["image_format"] == "rgb" and "band" not in rgb
@@ -60,6 +60,8 @@ def test_yaml_uses_current_modalities(path):
         {key: value for key, value in m.items() if key != "pre_flow_noise_max"}
         for m in model["modalities"]
     ]
+    assert len(definitions) == 57
+    assert {"gz10_label", "gz10_images"}.isdisjoint(m["name"] for m in definitions)
     assert definitions[: len(expected)] == expected
     south = definitions[len(expected) :]
     assert ModalityRegistry(south[: len(LEGACY_SOUTH_MODALITIES)]).to_list() == (
@@ -78,6 +80,7 @@ def test_yaml_uses_current_modalities(path):
         assert worst_case <= raw["tokens"]["sequence_length"]
     original = control["data_stages"][0]["data"]["dataset"]["catalog_stream"]
     assert original["split"] == "train"
+    assert "gz10" not in {catalog["name"] for catalog in original["catalogs"]}
     for stage in raw["data_stages"]:
         stream = stage["data"]["dataset"]["catalog_stream"]
         north, south = stream["anchors"]
@@ -94,5 +97,5 @@ def test_70m_recipe_combines_pre_flow_and_constant_latent_noise():
         "legacy_north_g": 0.21, "legacy_north_r": 0.37, "legacy_north_z": 1.08,
         "legacy_south_g": 0.15, "legacy_south_r": 0.14, "legacy_south_i": 0.45, "legacy_south_z": 0.64,
         "hsc_g": 0.15, "hsc_r": 0.20, "hsc_i": 0.32, "hsc_z": 0.49, "hsc_y": 0.93,
-        "galaxies": 0.04, "gz10_images": 0.04, "spectra": 0.1, "sdss_spectra": 0.1,
+        "galaxies": 0.04, "spectra": 0.1, "sdss_spectra": 0.1,
     }

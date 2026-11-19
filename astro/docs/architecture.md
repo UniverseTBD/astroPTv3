@@ -5,8 +5,8 @@
 
 Training uses live LSDB access to YAML-configured catalogs and modality lists.
 The training recipes combine Legacy Survey North, Legacy Survey South and HSC
-image bands, galaxies-with-hats and Galaxy10 RGB images, DESI and SDSS spectra,
-and 42 scalar modalities including PROVABGS and the Galaxy10 morphology label.
+image bands, galaxies-with-hats RGB images, DESI and SDSS spectra,
+and 42 scalar modalities including PROVABGS and Galaxy Zoo vote fractions.
 This document focuses on the survey-to-model contract.
 
 ## What this is
@@ -69,7 +69,7 @@ survey data to model input (using LegacySurvey and DESI as examples):
      crop to 96×96, then form **144 patches of 64 floats per band** (8×8),
      with integer positions restarting at zero for each band;
    - display RGB (`image_format: rgb`) → keep all three channels together.
-     Galaxies-with-hats and Galaxy10 each use the whole 256×256 image:
+     Galaxies-with-hats uses the whole 256×256 image:
      **256 patches of 768 floats** (16×16×3);
    - spectra → pad 7781→7936 → **31 patches of 256 floats**, each with a
      *continuous* position: the patch's mean wavelength, normalized
@@ -108,7 +108,6 @@ survey data to model input (using LegacySurvey and DESI as examples):
 | Legacy South | `legacy_south_{g,r,i,z}` | 169–180 | 585 |
 | HSC | `hsc_{g,r,i,z,y}` | 181–195 | 731 |
 | Galaxies-with-hats | `galaxies` (display RGB) | 23–25 | 259 |
-| Galaxy10 | `gz10_images` (display RGB) | 145–147 | 259 |
 
 Each row's IDs are assigned in consecutive triplets per category. Training
 recipes use a 256-row vocabulary; there is no text vocabulary. The

@@ -405,18 +405,15 @@ def test_50step_live_run_and_checkpoint_conversion(nt, tmp_path_factory):
     assert hf_loss == pytest.approx(nt_loss, rel=REL_TOL), f"NT={nt_loss}, HF={hf_loss}"
 
 
-def test_categorical_scalar_parity_and_conversion(nt):
+def test_categorical_scalar_parity_and_conversion(nt, categorical_label):
     """A categorical scalar (one-hot in, cross-entropy out) matches across the twins."""
     from copy import deepcopy
 
     import astropt3  # noqa: F401 -- registers Auto classes
     from astropt3 import AstroPT3Model
 
-    label = {"name": "gz10_label", "family": "scalar", "source": "gz10", "record_keys": ["gz10_label"],
-             "token_ids": [64, 65, 66], "input_size": 10, "patch_size": 1, "pos_type": "index",
-             "max_positions": 1, "categories": 10}
     nt_config = tiny_nt_config(nt, jetformer_flow_hidden=32,
-                               modalities=[*DEFAULT_MODALITIES, label])
+                               modalities=[*DEFAULT_MODALITIES, categorical_label])
     hf_config = nt.to_hf.get_hf_config(nt_config)
     torch.manual_seed(0)
     hf_model = AstroPT3Model(hf_config)
@@ -427,14 +424,14 @@ def test_categorical_scalar_parity_and_conversion(nt):
     hf_model.eval()
     nt_model.eval()
     spec = deepcopy(TINY_CATALOG_STREAM)
-    spec["anchors"][0]["scalar_columns"]["gz10_label"] = "gz10_label"
-    flat = micro_batch(hf_config, catalog_stream=spec, record=lambda i: {**make_record(i), "gz10_label": i % 10})
-    assert flat["gz10_label_mask"].any()
+    spec["anchors"][0]["scalar_columns"]["test_label"] = "test_label"
+    flat = micro_batch(hf_config, catalog_stream=spec, record=lambda i: {**make_record(i), "test_label": i % 4})
+    assert flat["test_label_mask"].any()
     names = hf_config.modality_registry().names()
     with torch.no_grad():
         nt_out = nt_model(**flat)
         hf_out = hf_model(**regroup(flat, names))
-    assert nt_out["gz10_label_loss"].item() == pytest.approx(hf_out.modality_losses["gz10_label"].item(), rel=REL_TOL)
+    assert nt_out["test_label_loss"].item() == pytest.approx(hf_out.modality_losses["test_label"].item(), rel=REL_TOL)
     assert nt_out["loss"].item() == pytest.approx(hf_out.loss.item(), rel=REL_TOL)
     hf_back = AstroPT3Model(hf_config)
     torch.nn.Module.cuda(hf_back)
@@ -443,4 +440,4 @@ def test_categorical_scalar_parity_and_conversion(nt):
     original = hf_model.state_dict()
     for key, value in hf_back.state_dict().items():
         assert torch.equal(value, original[key]), f"roundtrip drift in {key}"
-    assert original["decoders.gz10_label.proj.weight"].shape == (10, hf_config.hidden_size)
+    assert original["decoders.test_label.proj.weight"].shape == (4, hf_config.hidden_size)

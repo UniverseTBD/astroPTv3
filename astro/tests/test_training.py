@@ -69,13 +69,13 @@ def test_default_recipe_keeps_reserved_modality_tokens(default_recipe):
     assert model["vocab_size"] == 256
     assert modalities["spectra"]["token_ids"] == [5, 6, 7]
     assert modalities["sdss_spectra"]["token_ids"] == [17, 18, 19]
-    for name, ids in (("galaxies", [23, 24, 25]), ("gz10_images", [145, 146, 147])):
-        rgb = modalities[name]
-        assert rgb["image_format"] == "rgb" and "band" not in rgb
-        assert rgb["token_ids"] == ids
-        assert (rgb["input_size"], rgb["patch_size"], rgb["max_positions"], rgb["image_crop"]) == (768, 16, 256, 0)
-    assert modalities["gz10_label"]["categories"] == 10
-    assert {i for m in modalities.values() for i in m["token_ids"]}.isdisjoint(range(38, 56))
+    rgb = modalities["galaxies"]
+    assert rgb["image_format"] == "rgb" and "band" not in rgb
+    assert rgb["token_ids"] == [23, 24, 25]
+    assert (rgb["input_size"], rgb["patch_size"], rgb["max_positions"], rgb["image_crop"]) == (768, 16, 256, 0)
+    used_ids = {i for m in modalities.values() for i in m["token_ids"]}
+    assert used_ids.isdisjoint(range(38, 56))
+    assert used_ids.isdisjoint(range(142, 148))
     for source, key, prefix, bands, first_id in (
         ("legacy_north", "image", "des", "grz", 160),
         ("legacy_south", "legacy_south_image", "des", "griz", 169),
@@ -88,8 +88,8 @@ def test_default_recipe_keeps_reserved_modality_tokens(default_recipe):
             assert modality["source"] == source and modality["record_keys"] == [key]
             assert modality["band"] == f"{prefix}-{band}"
             assert (modality["input_size"], modality["patch_size"], modality["max_positions"]) == (64, 8, 144)
-    assert sum(m["family"] == "scalar" for m in modalities.values()) == 43
-    assert len(modalities) == 59
+    assert sum(m["family"] == "scalar" for m in modalities.values()) == 42
+    assert len(modalities) == 57
 
 
 def test_training_caps_loader_workers_on_one_gpu(tmp_path, default_recipe):

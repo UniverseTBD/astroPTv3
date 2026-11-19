@@ -144,7 +144,6 @@ VALID_RANGES = {
     "sdss_vdisp": (0.0, 850.0),
     "provabgs_MAG_W1": _AB_MAG,
     "gwh_petro_ba": _POSITIVE,
-    "gz10_label": (-0.5, 9.5),
 }
 
 # Scalar -> {record key of a quality flag or error: largest passing value}.
@@ -164,7 +163,7 @@ _GZ_FRACTION = (lambda x: 2.0 * x - 1.0, lambda x: (x + 1.0) / 2.0)
 # Categorical scalars: one record key holding a class index -> its one-hot
 # vector (input_size == classes); the inverse is the argmax. A density over
 # class indices would invent an ordering, so these take a CategoricalHead.
-CATEGORICAL = {"gz10_label": 10}  # Galaxy10 DECaLS morphology classes 0-9
+CATEGORICAL: dict[str, int] = {}
 
 
 def _one_hot(classes: int):
@@ -183,7 +182,7 @@ def scalar_valid(name: str, values, record: dict) -> bool:
     low, high = VALID_RANGES.get(name, (-math.inf, math.inf))
     if not all(math.isfinite(x) and low < x < high for x in numbers):
         return False
-    if name in CATEGORICAL and any(x != round(x) for x in numbers):
+    if name in CATEGORICAL and not all(x.is_integer() and 0 <= x < CATEGORICAL[name] for x in numbers):
         return False
     return all(record.get(flag) is not None and float(record[flag]) <= limit
                for flag, limit in QUALITY_GATES.get(name, {}).items())

@@ -455,28 +455,6 @@ model:
         patch_size: 1
         pos_type: index
         max_positions: 1
-      - name: gz10_label
-        family: scalar
-        source: gz10
-        record_keys: [gz10_label]
-        token_ids: [142, 143, 144]
-        input_size: 10
-        patch_size: 1
-        pos_type: index
-        max_positions: 1
-        categories: 10 # one-hot in, softmax/cross-entropy head out
-      - name: gz10_images
-        family: image
-        source: gz10
-        record_keys: [gz10_image]
-        token_ids: [145, 146, 147]
-        input_size: 768 # 16 * 16 * 3: 8-bit RGB PNG scaled to [0, 1], as galaxies
-        patch_size: 16
-        pos_type: index
-        pos_input_size: 1
-        max_positions: 256
-        image_format: rgb
-        image_crop: 0
     spiral: true # center-outward image patch order (ADR 0004)
     hidden_size: 512
     num_hidden_layers: 23
@@ -644,14 +622,6 @@ data_stages:
                 provabgs_TAGE_MW: TAGE_MW
                 provabgs_AVG_SFR: AVG_SFR
                 provabgs_MAG_W1: MAG_W1
-            - name: gz10
-              repo: >-
-                UniverseTBD/mmu_gz10@e99918709f5c6bccf496bebbc2790cb69c51851c
-              decoder: gz10_png
-              record_key: gz10_image
-              how: left # decorates anchored objects; outer would let it widen the min_catalogs footprint
-              scalar_columns:
-                gz10_label: gz10_label
           how: outer
           min_catalogs: 3
           radius_arcsec: 1.0
