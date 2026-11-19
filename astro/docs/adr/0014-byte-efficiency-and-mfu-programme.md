@@ -1054,6 +1054,7 @@ table absorbs the earlier `-99` sentinel list and A8's predicates.
 | Modality | Columns | Coverage | Transform | Range / gate |
 | --- | --- | ---: | --- | --- |
 | `ebv`, `photometry`, `fiberflux`, `psfdepth` | Legacy anchor | 100% | ADR 0008 / A8 | `psfdepth > 0` |
+| `legacy_south_ebv`, `legacy_south_photometry` (`FLUX_{G,R,I,Z}`) | Legacy South anchor | 100% | as `ebv` / `photometry` | finite |
 | `Z` | DESI `Z` | all DESI | `log(1+z)` | `ZWARN ≤ 0` |
 | `sdss_Z` | SDSS `Z` | all SDSS | `log(1+z)` | `ZWARNING ≤ 0` |
 | `sdss_vdisp` | SDSS `VDISP` | 82% | `log10(v) − 2` | `0 < v < 850`, `ZWARNING ≤ 0` |

@@ -88,8 +88,8 @@ def test_default_recipe_keeps_reserved_modality_tokens(default_recipe):
             assert modality["source"] == source and modality["record_keys"] == [key]
             assert modality["band"] == f"{prefix}-{band}"
             assert (modality["input_size"], modality["patch_size"], modality["max_positions"]) == (64, 8, 144)
-    assert sum(m["family"] == "scalar" for m in modalities.values()) == 41
-    assert len(modalities) == 57
+    assert sum(m["family"] == "scalar" for m in modalities.values()) == 43
+    assert len(modalities) == 59
 
 
 def test_training_caps_loader_workers_on_one_gpu(tmp_path, default_recipe):

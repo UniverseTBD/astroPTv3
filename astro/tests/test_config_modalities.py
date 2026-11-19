@@ -61,9 +61,14 @@ def test_yaml_uses_current_modalities(path):
         for m in model["modalities"]
     ]
     assert definitions[: len(expected)] == expected
-    assert ModalityRegistry(definitions[len(expected) :]).to_list() == (
+    south = definitions[len(expected) :]
+    assert ModalityRegistry(south[: len(LEGACY_SOUTH_MODALITIES)]).to_list() == (
         ModalityRegistry(LEGACY_SOUTH_MODALITIES).to_list()
     )
+    assert [(m["name"], m["source"], m["record_keys"]) for m in south[len(LEGACY_SOUTH_MODALITIES) :]] == [
+        ("legacy_south_ebv", "legacy_south", ["legacy_south_ebv"]),
+        ("legacy_south_photometry", "legacy_south", [f"legacy_south_flux_{band}" for band in "griz"]),
+    ]
     assert model["vocab_size"] == control["model"]["model_config"]["vocab_size"] == 256
     assert model["vocab_size"] % raw["parallelism"]["tp"] == 0
     config = AstroPT3Config(**model)

@@ -476,6 +476,24 @@ model:
       - {name: legacy_south_z, family: image, source: legacy_south,
          record_keys: [legacy_south_image], band: des-z, token_ids: [178, 179, 180],
          input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
+      - name: legacy_south_ebv
+        family: scalar
+        source: legacy_south
+        record_keys: [legacy_south_ebv]
+        token_ids: [211, 212, 213]
+        input_size: 1
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
+      - name: legacy_south_photometry
+        family: scalar
+        source: legacy_south
+        record_keys: [legacy_south_flux_g, legacy_south_flux_r, legacy_south_flux_i, legacy_south_flux_z]
+        token_ids: [214, 215, 216]
+        input_size: 4
+        patch_size: 1
+        pos_type: index
+        max_positions: 1
     spiral: true
     hidden_size: 128
     num_hidden_layers: 5
@@ -546,6 +564,12 @@ data_stages:
                 hugging-science/mmu_legacysurvey_dr10_south_21@982f321784d8daf2a5f983eb3ec560f31b90d667
               decoder: legacy_south_image
               record_key: legacy_south_image
+              scalar_columns:
+                legacy_south_ebv: EBV
+                legacy_south_flux_g: FLUX_G
+                legacy_south_flux_r: FLUX_R
+                legacy_south_flux_i: FLUX_I
+                legacy_south_flux_z: FLUX_Z
           catalogs:
             - name: sdss
               repo: >-

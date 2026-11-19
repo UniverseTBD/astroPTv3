@@ -69,6 +69,9 @@ SCALAR_TRANSFORMS = {
     "provabgs_AVG_SFR": (torch.asinh, torch.sinh),
     "ebv": (lambda x: x / _EBV_DIV, lambda x: x * _EBV_DIV),
     "photometry": (_photometry_fwd, _photometry_inv),
+    # DR10 South Tractor columns: the same SFD map and nMgy, plus the i band
+    "legacy_south_ebv": (lambda x: x / _EBV_DIV, lambda x: x * _EBV_DIV),
+    "legacy_south_photometry": (_photometry_fwd, _photometry_inv),
     # ADR 0014 A8 — free scalars from rows already on the wire. Knees are
     # published units, never corpus fits; the percentiles in A8 are shown only
     # to evidence that each lands O(1).
