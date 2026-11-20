@@ -55,8 +55,14 @@ def main():
     losses = []
     for _ in range(STEPS):
         trainer.optimizer.zero_grad()
+        trainer.grad_accumulator.fp32_grads_allreduce_handle = None
         loss = trainer.model(**flat)["loss"]  # DDP-wrapped forward: gradients all-reduce over DP
         trainer.grad_accumulator.backward(loss)
+        # The fp32 DDP hook all-reduces asynchronously; wait as DistributedTrainer.training_step does.
+        handle = trainer.grad_accumulator.fp32_grads_allreduce_handle
+        assert handle is not None, "no fp32 gradient all-reduce was launched"
+        for pending in handle if isinstance(handle, list) else [handle]:
+            pending.wait()
         trainer.optimizer.step()
         trainer.lr_scheduler.step()
         losses.append(loss.detach().float())
