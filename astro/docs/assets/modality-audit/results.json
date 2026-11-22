@@ -1,0 +1,223 @@
+{
+  "schema_version": 1,
+  "kind": "modality_audit_aggregate_results",
+  "date": "2026-11-22",
+  "recipe": {
+    "path": "configs/nanotron/astropt3-70m.yaml",
+    "sha256": "2ff5c2d959a1e678289b4c701b6ec7467ee342b57f45812a610a32c6759dbe24"
+  },
+  "field_manifest": {
+    "path": "configs/audit/modality-validation-fields.json",
+    "sha256": "cc344c5c35f110db86d4521f5ae383b2de6aed6028e858e646ff24f616135122"
+  },
+  "sampling": {
+    "seeded_fields": 24,
+    "targeted_cosmos_fields": 1,
+    "radius_arcsec": 300,
+    "seed": 42,
+    "minimum_separation_within_stratum_deg": 2,
+    "all_apertures_disjoint": true
+  },
+  "catalog_revisions": {
+    "legacy": "UniverseTBD/mmu_ssl_legacysurvey_north@f634744d3c44dd4fde0dee3172d4887c5e3c31c0",
+    "legacy_south": "hugging-science/mmu_legacysurvey_dr10_south_21@982f321784d8daf2a5f983eb3ec560f31b90d667",
+    "sdss": "UniverseTBD/mmu_sdss_sdss@da175ca9bb931f4301ab950431922ba9f99089ba",
+    "desi": "UniverseTBD/mmu_desi_edr_sv3@9fd88ba48233cb9857701ce802a7eade2d4c4a88",
+    "hsc": "hugging-science/mmu_hsc_pdr3_wide_21@7de6b92fd99097207a00b9c42f2d2862d62662bf",
+    "galaxies": "Smith42/galaxies-with-hats@1a2b1ebbbe06c67a15f49385643ab711c5824a0d/train"
+  },
+  "packages": {
+    "python": "3.13.1",
+    "lsdb": "0.11.3.dev3+g8aa1e63f9",
+    "hats": "0.11.2",
+    "numpy": "2.4.6",
+    "pyarrow": "26.0.1",
+    "torch": "2.12.1",
+    "huggingface-hub": "1.22.0",
+    "astropy": "8.0.1",
+    "mocpy": "0.20.0"
+  },
+  "coverage_by_region": {
+    "north_only": {
+      "fields": 8,
+      "rows": 248,
+      "anchor_rows": 168,
+      "outer_only_rows": 80,
+      "source_presence": {
+        "legacy": 168,
+        "sdss": 14,
+        "desi": 105,
+        "hsc": 0,
+        "galaxies": 41,
+        "legacy_south": 0
+      }
+    },
+    "overlap": {
+      "fields": 8,
+      "rows": 778,
+      "anchor_rows": 450,
+      "outer_only_rows": 328,
+      "source_presence": {
+        "legacy": 450,
+        "sdss": 35,
+        "desi": 0,
+        "hsc": 462,
+        "galaxies": 84,
+        "legacy_south": 0
+      }
+    },
+    "south_only": {
+      "fields": 8,
+      "rows": 702,
+      "anchor_rows": 658,
+      "outer_only_rows": 44,
+      "source_presence": {
+        "legacy": 0,
+        "sdss": 26,
+        "desi": 0,
+        "hsc": 177,
+        "galaxies": 75,
+        "legacy_south": 658
+      }
+    },
+    "targeted_south": {
+      "fields": 1,
+      "rows": 294,
+      "anchor_rows": 227,
+      "outer_only_rows": 67,
+      "source_presence": {
+        "legacy": 0,
+        "sdss": 2,
+        "desi": 101,
+        "hsc": 109,
+        "galaxies": 15,
+        "legacy_south": 227
+      }
+    }
+  },
+  "seeded_sample": {
+    "rows": 1728,
+    "single_source_rows": 1251,
+    "source_presence": {
+      "legacy": 618,
+      "sdss": 75,
+      "desi": 105,
+      "hsc": 639,
+      "galaxies": 200,
+      "legacy_south": 658
+    },
+    "usable_scalars": {
+      "gwh_disk-edge-on_yes_fraction": 40,
+      "gwh_has-spiral-arms_yes_fraction": 23,
+      "gwh_mass_med_photoz": 194,
+      "gwh_merging_merger_fraction": 200,
+      "gwh_redshift": 195,
+      "gwh_smooth-or-featured_featured-or-disk_fraction": 200,
+      "gwh_smooth-or-featured_smooth_fraction": 200,
+      "gwh_total_sfr_median": 63,
+      "gwh_total_ssfr_median": 63
+    }
+  },
+  "join_validation": {
+    "checked_anchor_rows": 1503,
+    "checked_anchor_partner_pairs": 6012,
+    "checked_outer_rows": 519,
+    "distance_ties": 0,
+    "outer_ids_withheld_for_halo_ties": 0
+  },
+  "payload_validation": {
+    "selected_records": 64,
+    "status_counts": {
+      "passed": 64
+    },
+    "budget_skips": {
+      "legacy": 0,
+      "legacy_south": 0,
+      "sdss": 0,
+      "desi": 0,
+      "hsc": 0,
+      "galaxies": 0
+    },
+    "nonfinite_token_records": 0,
+    "entirely_filled_modality_records": 0,
+    "maximum_input_fill_fraction": {
+      "galaxies": 0.0,
+      "hsc_g": 0.0,
+      "hsc_i": 0.0,
+      "hsc_r": 0.0,
+      "hsc_y": 0.0,
+      "hsc_z": 0.0,
+      "legacy_north_g": 0.0,
+      "legacy_north_r": 0.0,
+      "legacy_north_z": 0.0,
+      "legacy_south_g": 0.4375,
+      "legacy_south_i": 0.4375,
+      "legacy_south_r": 0.4375,
+      "legacy_south_z": 0.4375,
+      "sdss_spectra": 0.5271358088808101,
+      "spectra": 0.004112581930343143
+    }
+  },
+  "offline_verification": {
+    "status": "passed",
+    "rows": 2022,
+    "projection_files_verified": 50,
+    "payload_files_verified": 84,
+    "cross_path_shared_ids": {
+      "galaxies:legacy/legacy_south": 0,
+      "sdss:legacy/legacy_south": 0,
+      "desi:legacy/legacy_south": 0,
+      "hsc:legacy/legacy_south": 0
+    },
+    "primary_coordinate_value_checks": 248,
+    "primary_scalar_value_checks": 270,
+    "replayed_records": 64,
+    "packed_rows": 12,
+    "sequence_length": 4096,
+    "nonpad_tokens": 43704,
+    "packing_scope": "Sequential greedy integrity check, not streaming packer fill or throughput",
+    "measurement_script_sha256": "956f15ff3543c1986d9ba14f5d0646665792faf6cbdb3994f5c6c660e429dbdd",
+    "replay_script_sha256": "b261e465e8386b240e547ac37feeea583553a5d0a9b295629aab57def5b64554",
+    "verifier_sha256": "a0a353a1a68306cfd5639de165bb347cd1e74ad325c00cca98927c7fa49c78da"
+  },
+  "tests": {
+    "linux_cpu_suite": {
+      "passed": 485,
+      "skipped": 4,
+      "deselected": 19
+    },
+    "windows_audit_tests_passed": 19,
+    "parameter_count_gate": "all named sizes within tolerance",
+    "negative_budget_check": {
+      "exit_code": 1,
+      "validation": "failed",
+      "payload_status_counts": {
+        "payload_unavailable": 4
+      }
+    }
+  },
+  "provenance": {
+    "raw_run_artifact_sha256": {
+      "fields.json": "3e8ba79ca62804a1de3c996aac1a12eadce33bada483f96ce4d00648242cfe48",
+      "coverage.json": "235b6831a51ee723c97aeaac86b5b019cf8b666271dc29f497d76a6b44ddbdbb",
+      "payload-checks.json": "f89ba20ebed38f21f0168dd5ccb62f3a5c3e0283b26914c4f3c7d683f8aa0061",
+      "payload-reads.json": "32967c178c85636e2863b80573d212415556a40791ddbd3070047bd04bd4dc81"
+    },
+    "measurement_to_final_source_patch": {
+      "before": "    (output / \"recipe.yaml\").write_text(recipe_text, encoding=\"utf-8\")\n",
+      "after": "    shutil.copyfile(args.recipe, output / \"recipe.yaml\")\n"
+    },
+    "recipe_snapshot_correction": {
+      "reason": "Windows text-mode writing changed LF to CRLF in the saved recipe.",
+      "proof": "Original and saved recipe text matched after newline normalization; restored bytes match the original manifest SHA256.",
+      "original_snapshot_sha256": "de6988011c3759e369166cc8f36204834f64cd25365116e942de4c362e44ddf8",
+      "restored_recipe_sha256": "2ff5c2d959a1e678289b4c701b6ec7467ee342b57f45812a610a32c6759dbe24"
+    }
+  },
+  "resources": {
+    "elapsed_seconds": 5202.1100909,
+    "returned_range_bytes": 5232458323,
+    "returned_range_requests": 2940,
+    "scope": "Partly warm metadata/projection caches; excludes preparation and earlier runs. Peak RAM not measured."
+  }
+}

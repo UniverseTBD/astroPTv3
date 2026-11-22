@@ -85,6 +85,9 @@ Live data checks need Hub access:
 uv run pytest -m network tests/test_lsdb_stream.py
 ```
 
+For finite CPU checks of survey coverage, usable scalar targets and decoded
+payload quality, see the [modality coverage audit](docs/modality-coverage-audit.md).
+
 Training needs nanotron, flash-attn, a GPU, and live catalog access. From the
 repository root:
 
