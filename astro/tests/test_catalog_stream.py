@@ -260,7 +260,7 @@ def test_catalog_count_projection_and_finite_draws(recipe, offline, count):
     assert offline.clusters[0]["memory_limit"] == spec["worker_memory_limit"]
 
 
-def test_south_draw_without_quality_planes(offline):
+def test_south_draw_requests_only_band_and_flux(offline):
     repo = "offline/south"
     config = AstroPT3Config(modalities=LEGACY_SOUTH_MODALITIES)
     stream = streaming.CatalogStream({"anchors": [{
@@ -270,14 +270,13 @@ def test_south_draw_without_quality_planes(offline):
     frame = nested_frame([{"object_id": "1", "image": {
         "band": [f"des-{band}" for band in "griz"],
         "flux": np.ones((4, 160, 160), dtype=np.float32).tolist(),
-        "scale": [0.262] * 4,
     }}], ("image",))
     offline.frames = lambda: [frame]
     with closing(stream.draws(seed=0, rank=0, worker_id=0)) as draws:
         _, records = next(draws)
         record, = records
     assert offline.opened == [(f"hf://datasets/{repo}", [
-        "object_id", "ra", "dec", "image.band", "image.flux", "image.scale",
+        "object_id", "ra", "dec", "image.band", "image.flux",
     ])]
     assert record["legacy_south_image"]["band"] == ["des-g", "des-r", "des-i", "des-z"]
 

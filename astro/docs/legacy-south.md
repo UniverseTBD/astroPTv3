@@ -19,7 +19,7 @@ Row 0 has 13,820 true mask pixels per band out of 25,600, with positive ivar eve
 
 ## Decode and pack
 
-Project `image.{band,flux,scale}`. Reject unexpected band order, shape, or scale. Convert non-finite flux to zero. Like North, the sequencer treats exact zeros as missing and fills them with deterministic channel noise after the 96×96 center crop and physical normalization. Finite negative flux is retained. Pixels with nonzero finite flux are used even if `mask` or `ivar` would flag them. Each filter yields 144 patch-8 tokens of 64 floats and two delimiters, for **585** tokens in a South-only image record including BOS.
+Project `image.{band,flux}`. Reject unexpected band order or shape. Like North, assume the band registry's fixed 0.262 arcsec/pixel without reading the per-cutout `scale` field. Convert non-finite flux to zero. Like North, the sequencer treats exact zeros as missing and fills them with deterministic channel noise after the 96×96 center crop and physical normalization. Finite negative flux is retained. Pixels with nonzero finite flux are used even if `mask` or `ivar` would flag them. Each filter yields 144 patch-8 tokens of 64 floats and two delimiters, for **585** tokens in a South-only image record including BOS.
 
 ## Selection and scalar quality
 

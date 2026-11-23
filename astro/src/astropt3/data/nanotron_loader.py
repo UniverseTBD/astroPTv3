@@ -164,9 +164,6 @@ def decode_legacy_south_image(value: Any) -> dict:
     bands = list(image.get("band", ()))
     if bands != ["des-g", "des-r", "des-i", "des-z"]:
         raise ValueError(f"Legacy South bands must be ordered des-g/r/i/z, got {bands}")
-    scale = np.asarray(image.get("scale"), dtype=np.float32)
-    if scale.shape != (4,) or not np.allclose(scale, 0.262, rtol=1e-6, atol=0):
-        raise ValueError("Legacy South pixel scale must be 0.262 arcsec/pixel in every band")
     decoded = decode_legacy_image(image, shape=(4, 160, 160))
     flux = decoded["flux"]
     decoded["flux"] = np.where(np.isfinite(flux), flux, np.float32(0))

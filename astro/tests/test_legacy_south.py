@@ -28,14 +28,12 @@ def _payload():
     shape = (4, 160, 160)
     return {
         "band": ["des-g", "des-r", "des-i", "des-z"],
-        "scale": np.full(4, 0.262, np.float32),
         "flux": np.full(shape, np.arange(1, 5, dtype=np.float32)[:, None, None] * 0.01),
     }
 
 
 @pytest.mark.parametrize("field,bad", [
     ("flux", np.zeros((3, 152, 152))), ("flux", None),
-    ("scale", [0.262, 0.262, 0.168, 0.262]), ("scale", [0.262]),
     ("band", ["des-g", "des-r", "des-z", "des-i"]),
     ("band", ["des-g", "des-r", "des-z", "des-z"]),
 ])
@@ -145,7 +143,7 @@ def test_pinned_south_parquet_row():
         data = response.read(2_802_724)
     assert len(data) == 2_802_723
     table = pq.ParquetFile(io.BytesIO(data)).read(
-        columns=["image.band", "image.flux", "image.scale", "object_id", "FLUX_G"],
+        columns=["image.band", "image.flux", "object_id", "FLUX_G"],
     )
     assert len(table) == 4 and table["object_id"][0].as_py() == "2462m200-369"
     assert table["FLUX_G"][1].as_py() == pytest.approx(-0.42972362)
