@@ -29,7 +29,7 @@ from PIL import Image
 from . import nanotron_loader as loader
 from . import telemetry
 from .packing import has_modality
-from .scalar_registry import _transforms
+from .scalar_registry import CATEGORICAL, QUALITY_GATES, _transforms
 
 # Decoder names describe verified payload contracts, not arbitrary calibrations.
 _PROFILES = {
@@ -134,6 +134,8 @@ class _Star:
             modality = registry.get_config(name)
             if modality.family == "scalar":
                 _transforms(name)  # Reject uncalibrated scalars before opening catalogs.
+                if modality.categories != CATEGORICAL.get(name, 0):
+                    raise ValueError(f"modality {name!r} categories disagree with scalar_registry.CATEGORICAL")
             decoder = None
             if modality.family == "image":
                 decoder = _IMAGE_SOURCE_DECODERS.get(modality.source or "")
@@ -144,10 +146,11 @@ class _Star:
                     raise ValueError(f"modality {name!r} has no compatible catalog output for {key!r}")
                 if decoder is not None and outputs[key][1] != decoder:
                     raise ValueError(f"modality {name!r} source disagrees with its {modality.family} decoder")
-            if name == "Z" and ("ZWARN" not in outputs or any(
-                outputs[key][2] != outputs["ZWARN"][2] for key in modality.record_keys
-            )):
-                raise ValueError("Z requires an explicit ZWARN scalar column from the same catalog")
+            for flag in QUALITY_GATES.get(name, ()):
+                if flag not in outputs or any(
+                    outputs[key][2] != outputs[flag][2] for key in modality.record_keys
+                ):
+                    raise ValueError(f"{name} requires an explicit {flag} scalar column from the same catalog")
 
     def decode_row(self, mapped):
         row = loader._row_from_map_rows(mapped, self.nested)
@@ -166,10 +169,6 @@ class _Star:
                 key: loader._finite_scalar(row.get(f"{column}{suffix}"))
                 for key, column in catalog["scalar_columns"].items()
             }
-            # A missing/invalid quality flag must not make a redshift look reliable.
-            if ("ZWARN" in scalars and scalars["ZWARN"] is None
-                    and (value is not None or any(number is not None for number in scalars.values()))):
-                scalars["ZWARN"] = 1.0
             scalars = {key: number for key, number in scalars.items() if number is not None}
             if value is None and not scalars:
                 continue
@@ -242,7 +241,11 @@ class CatalogStream:
     def __init__(self, spec, config):
         if not isinstance(spec, dict) or set(spec) - {*_DEFAULTS, "anchors", "catalogs", "min_catalogs", "split"}:
             raise ValueError("catalog_stream has unknown settings or is not a mapping")
-        self.spec = spec = {**_DEFAULTS, "min_catalogs": 1, **copy.deepcopy(spec)}
+        # Concatenating multiple unjoined image partitions can exceed Arrow's offset limit.
+        chunk_default = 1 if spec.get("catalogs") == [] else _DEFAULTS["partitions_per_chunk"]
+        self.spec = spec = {
+            **_DEFAULTS, "min_catalogs": 1, "partitions_per_chunk": chunk_default, **copy.deepcopy(spec),
+        }
         anchors = spec.get("anchors")
         if not isinstance(anchors, list) or not anchors or not all(isinstance(c, dict) for c in anchors):
             raise ValueError("catalog_stream.anchors must be a nonempty list of catalogs with draw_weight")

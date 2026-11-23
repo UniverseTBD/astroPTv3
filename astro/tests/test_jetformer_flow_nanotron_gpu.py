@@ -12,11 +12,17 @@ from types import SimpleNamespace
 import pytest
 import torch
 import yaml
-from test_nanotron_gpu import REL_TOL, build_nt_model, make_nt, regroup
+from test_nanotron_gpu import (
+    REL_TOL,
+    assert_loss_metrics,
+    build_nt_model,
+    make_nt,
+    regroup,
+)
 
 pytestmark = pytest.mark.gpu
 ASTRO_DIR = Path(__file__).resolve().parents[1]
-SEQ_LEN = 256  # fits two objects carrying every recipe modality
+SEQ_LEN = 512  # fits two synthetic objects carrying every recipe modality
 
 
 @pytest.fixture(scope="module")
@@ -39,6 +45,9 @@ def _trainer(tmp_path, resume=None):
         jetformer_noise_max=0.0,
         jetformer_noise_min=0.0,
     )
+    next(
+        m for m in config["model"]["model_config"]["modalities"] if m["name"] == "hsc_g"
+    )["pre_flow_noise_max"] = 0.5
     config["data_stages"] = pilot["data_stages"]  # parsed only: catalog streams are required, never opened
     config["tokens"].update(sequence_length=SEQ_LEN, micro_batch_size=2)
     config["optimizer"]["learning_rate_scheduler"].update(lr_warmup_steps=0, lr_warmup_style="linear")
@@ -76,7 +85,11 @@ def _flat_batch(config):
                 start = cursor + len(tokens)
                 batch[f"{name}_mask"][row, start : start + length] = True
                 tokens.extend([placeholder] * length + [end])
-                values[name].append(torch.randn(length, modality["input_size"], generator=generator) * 0.1)
+                if categories := modality.get("categories", 0):
+                    labels = torch.randint(categories, (length,), generator=generator)
+                    values[name].append(torch.nn.functional.one_hot(labels, categories).float())
+                else:
+                    values[name].append(torch.randn(length, modality["input_size"], generator=generator) * 0.1)
                 positions[name].append(
                     torch.arange(length)
                     if modality.get("pos_type", "index") == "index"
@@ -168,13 +181,18 @@ def test_init_context_moves_buffers_without_casting_nonfloat(nt, dtype):
 
 
 def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt, tmp_path):
+    from nanotron.models.astropt3 import AstroPT3ForTraining
+
     trainer = _trainer(tmp_path)
     model = trainer.unwrapped_model
+    assert isinstance(model, AstroPT3ForTraining)
+    assert trainer.config.tokens is not None
     flat = _flat_batch(model.config)
     # The baseline scheduler starts at LR=0; the second update exercises nonzero outputs.
     model.train()
     trainer.optimizer.zero_grad()
-    for _ in range(2):
+    for step in (1, 2):
+        model.set_jet_noise_frac(step / trainer.config.tokens.train_steps)
         loss = model(**flat)["loss"]
         assert torch.isfinite(loss)
         trainer.grad_accumulator.backward(loss)
@@ -196,12 +214,28 @@ def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt,
     trainer.metadata.current_stage.consumed_train_samples = 4
     trainer.metadata.current_stage.consumed_tokens_per_dataset_folder = {"synthetic": 4 * SEQ_LEN}
     model.eval()
+    batch = regroup(flat, model.config.modality_names())
     with torch.no_grad():
-        before = model.model(**regroup(flat, model.config.modality_names()))
+        before = model.model(**batch)
     checkpoint = trainer.save_checkpoint()
+
+    next_frac = (trainer.metadata.last_train_step + 1) / trainer.config.tokens.train_steps
+    model.train()
+    model.set_jet_noise_frac(next_frac)
+    with torch.no_grad():
+        uninterrupted = model.model(**batch)["hsc_g_z"]
+    assert not torch.equal(uninterrupted, before["hsc_g_z"])
+
     # Construction must reconstruct buffers without reading them from checkpoint tensors.
     resumed = _trainer(tmp_path, resume=checkpoint)
-    loaded = resumed.unwrapped_model.eval()
+    loaded = resumed.unwrapped_model
+    assert isinstance(loaded, AstroPT3ForTraining)
+    assert resumed.rng_restored
+    loaded.train()
+    loaded.set_jet_noise_frac(next_frac)
+    with torch.no_grad():
+        torch.testing.assert_close(loaded.model(**batch)["hsc_g_z"], uninterrupted, rtol=0, atol=0)
+    loaded.eval()
     assert resumed.init_checkpoint_path is not None
     assert resumed.metadata.last_train_step == 2
     _assert_permutations(_flows(loaded))
@@ -214,7 +248,7 @@ def test_full_trainer_checkpoint_reconstructs_exact_latents_and_permutations(nt,
         for suffix in ("z", "logdet"):
             key = f"{name}_{suffix}"
             assert torch.equal(after[key], before[key]), key
-        for old_block, new_block in zip(_flows(model)[name].blocks, _flows(loaded)[name].blocks):
+        for old_block, new_block in zip(_flows(model)[name].blocks, _flows(loaded)[name].blocks, strict=True):
             assert torch.equal(old_block.permutation, new_block.permutation)
             assert torch.equal(old_block.inverse_permutation, new_block.inverse_permutation)
 
@@ -263,12 +297,8 @@ def test_hf_nanotron_parity_and_exact_conversion(nt, tmp_path):
                 )
                 assert torch.equal(z, predictions[f"{name}_z"])
                 assert torch.equal(logdet, predictions[f"{name}_logdet"])
-            assert nt_output[f"{name}_loss"].item() == pytest.approx(
-                hf_output.modality_losses[name].item(), rel=REL_TOL
-            )
     assert nt_output["loss"].item() == pytest.approx(hf_output.loss.item(), rel=REL_TOL)
-    for family, loss in hf_output.family_losses.items():
-        assert nt_output[f"{family}_family_loss"].item() == pytest.approx(loss.item(), rel=REL_TOL)
+    assert_loss_metrics(nt_output, hf_output, config, flat)
 
     hf_back = AstroPT3Model(hf_config)
     torch.nn.Module.cuda(hf_back).bfloat16().eval()

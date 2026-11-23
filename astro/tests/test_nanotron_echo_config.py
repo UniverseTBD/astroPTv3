@@ -34,12 +34,16 @@ def test_explicit_dataset_config_defaults_to_no_echoing():
 
 
 @pytest.mark.parametrize("kwargs", [
-    {}, {"catalog_stream": None}, {"catalog_stream": {}},
-    {"catalog_stream": {"catalogs": []}}, {"catalog_stream": []},
+    {}, {"catalog_stream": None}, {"catalog_stream": {}}, {"catalog_stream": []},
 ])
 def test_nanotron_requires_explicit_catalogs(kwargs):
     with pytest.raises(ValueError, match="catalog_stream.catalogs"):
         AstroPT3StreamingDatasetsArgs(**kwargs)
+
+
+def test_nanotron_accepts_anchor_only_stream():
+    stream = {**TINY_CATALOG_STREAM, "catalogs": []}
+    assert AstroPT3StreamingDatasetsArgs(catalog_stream=stream).catalog_stream["catalogs"] == []
 
 
 @pytest.mark.parametrize("selected", [False, True])
@@ -70,7 +74,7 @@ def test_derived_gpu_smoke_keeps_tiny_training_contract(tmp_path):
     config = nanotron_config.get_config_from_dict(yaml.safe_load(yaml.safe_dump(raw)))
     model = config.model.model_config
     assert (model.hidden_size, model.num_hidden_layers, model.jetformer_flow_hidden) == (64, 4, 128)
-    assert len(model.modalities) == 24 and not model.use_cache
+    assert len(model.modalities) == 57 and not model.use_cache
     assert not model._fused_rms_norm and not model._fused_rotary_emb
     data = config.data_stages[0].data
     assert data.num_loading_workers == 0 and data.dataset.echo_factor == 1

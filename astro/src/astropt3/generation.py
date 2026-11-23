@@ -20,8 +20,10 @@ caching only if generation ever becomes a hot path.
 
 
 import torch
+import torch.nn.functional as F
 
 from .data.packing import ObjectSeq, PackedCollator
+from .data.scalar_registry import constrain_scalar_sample
 from .flows import flow_object_ids
 
 
@@ -111,7 +113,18 @@ def generate(
         if m_t is None or m_t not in generate_modalities:
             continue
         out = model(**prefix_kwargs(t), compute_loss=False, values_are_latents=True)
-        logits_pi, mu, log_sigma = model.decoders[m_t](out.last_hidden_state[:, -1])
+        head = model.decoders[m_t](out.last_hidden_state[:, -1])
+        if m_t in model.categorical_names:
+            # categorical scalar: draw a class, embed it back as its one-hot
+            if argmax or temperature <= 0:  # temperature 0 is the mode
+                cls = head.argmax(dim=-1)
+            else:
+                probs = torch.softmax(head.float() / temperature, dim=-1)
+                cls = torch.multinomial(probs, 1, generator=generator).squeeze(-1)
+            z = F.one_hot(cls, head.shape[-1]).to(head.dtype)
+            values[m_t] = torch.cat([values[m_t], z.unsqueeze(1)], dim=1)
+            continue
+        logits_pi, mu, log_sigma = head
         z = sample_gmm(
             logits_pi,
             mu,
@@ -121,7 +134,9 @@ def generate(
             generator=generator,
         )
         # Flows invert only after the entire latent span is sampled; scalar
-        # GMMs predict raw normalized values with no flow (ADR 0008).
+        # GMMs predict normalized values with no flow (ADR 0008).
+        if m_t in model.scalar_names:
+            z = constrain_scalar_sample(m_t, z)
         values[m_t] = torch.cat([values[m_t], z.unsqueeze(1)], dim=1)
 
     for m in generate_modalities - model.scalar_names:

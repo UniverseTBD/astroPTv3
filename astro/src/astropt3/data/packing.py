@@ -13,10 +13,10 @@ conditional among the present spans lands in the training distribution;
 the seed changes each epoch, and being a pure function of (object_id,
 epoch) the order is exact under checkpoint resume (no ambient RNG state).
 
-ADR 0008 scalar modalities (Z / ebv / photometry) are one-token spans over
-the record's catalog scalars, normalized by ``data/scalar_registry.py``;
-``Z`` is gated on DESI's ``ZWARN == 0`` reliability flag. A missing scalar
-is an absent span — the ordinary modality-optional path.
+ADR 0008 scalar modalities are one-token spans over the record's catalog
+scalars, normalized by ``data/scalar_registry.py``. A missing scalar, or one
+failing its registry range or quality gate (e.g. ``Z`` needs DESI's
+``ZWARN == 0``), is an absent span — the ordinary modality-optional path.
 
 The collator packs whole objects greedily into rows of ``seq_len`` tokens;
 objects are never split. ``position_ids`` restart at 0 on each object, which
@@ -33,12 +33,10 @@ row-major (batch, time) order — the same order a boolean mask lookup
 
 from __future__ import annotations
 
-import math
 import random
 import zlib
 from collections.abc import Collection
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 
@@ -53,7 +51,7 @@ from ..tokenization import (
     spiralise,
 )
 from .band_registry import RGB_CHANNELS, physical_normalize, validate_physical_bands
-from .scalar_registry import MISSING_SENTINELS, scalar_normalize
+from .scalar_registry import scalar_normalize, scalar_valid
 from .spectral import spectral_normalize
 
 # side of the central image crop applied before patchify, in pixels
@@ -66,9 +64,12 @@ SPAN_ORDER_VERSION = "adr0008_uniform_v1"
 
 
 def has_modality(modality, record: dict) -> bool:
-    """Whether a record carries a modality; ``Z`` also needs ``ZWARN`` 0 or absent."""
-    return (all(key in record for key in modality.record_keys)
-            and (modality.name != "Z" or not record.get("ZWARN")))
+    """Whether a record carries a modality; a scalar must also pass its
+    ``scalar_registry`` range and quality predicates."""
+    values = [record.get(key) for key in modality.record_keys]
+    if any(value is None for value in values):
+        return False
+    return modality.family != "scalar" or scalar_valid(modality.name, values, record)
 
 
 def span_order(names, object_id: str, epoch: int = 0) -> list[str]:
@@ -217,29 +218,13 @@ class ObjectSequencer:
         """The record's raw value(s) for a scalar modality, or None if absent.
 
         Per-scalar missingness IS the modality-optional path: a None here
-        just means no span. ``Z`` additionally gates on DESI's ``ZWARN``
-        reliability flag (ADR 0008 reuses ADR 0005's cut; a missing flag on
-        a Z-bearing record — synthetic pre-ZWARN fixtures — passes).
+        just means no span. Values outside the scalar's valid range, or with
+        a failing quality gate (``Z`` needs ``ZWARN == 0``), are absent too.
         """
         mod = self.registry.get_config(name)
-        values = []
-        for key in mod.record_keys:
-            raw_value: Any = record.get(key)
-            if raw_value is None:
-                return None
-            try:
-                values.append(float(raw_value))
-            except (TypeError, ValueError) as error:
-                raise ValueError(
-                    f"modality {name!r} has a non-numeric value"
-                ) from error
-        if not all(math.isfinite(value) for value in values):
-            return None
-        if any(value == MISSING_SENTINELS.get(name) for value in values):
-            return None
         if not has_modality(mod, record):
             return None
-        return values
+        return [float(record[key]) for key in mod.record_keys]
 
     def _scalar_tokens(self, name: str, record: dict):
         value = self._scalar_value(name, record)

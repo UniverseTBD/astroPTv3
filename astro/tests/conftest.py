@@ -24,6 +24,18 @@ def tiny_config():
     return AstroPT3Config(**{**config.to_dict(), "modalities": DEFAULT_MODALITIES})
 
 
+@pytest.fixture
+def categorical_label(monkeypatch):
+    from astropt3.data.scalar_registry import CATEGORICAL
+
+    monkeypatch.setitem(CATEGORICAL, "test_label", 4)
+    return {
+        "name": "test_label", "family": "scalar", "source": "legacy", "record_keys": ["test_label"],
+        "token_ids": [64, 65, 66], "input_size": 4, "patch_size": 1, "pos_type": "index",
+        "max_positions": 1, "categories": 4,
+    }
+
+
 @pytest.fixture(scope="session")
 def sequencer(tiny_config):
     return ObjectSequencer(tiny_config)

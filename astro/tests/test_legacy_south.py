@@ -97,7 +97,13 @@ def test_packed_south_preserves_measured_zeros_and_all_four_bands(tiny_config):
 
 @pytest.mark.gpu
 def test_south_conversion_and_forward_parity():
-    from test_nanotron_gpu import REL_TOL, build_nt_model, make_nt, tiny_nt_config
+    from test_nanotron_gpu import (
+        REL_TOL,
+        assert_loss_metrics,
+        build_nt_model,
+        make_nt,
+        tiny_nt_config,
+    )
 
     nt = make_nt()
     config = tiny_nt_config(nt, modalities=[DEFAULT_MODALITIES[0], *LEGACY_SOUTH_MODALITIES],
@@ -125,10 +131,8 @@ def test_south_conversion_and_forward_parity():
     with torch.no_grad():
         out = model(**flat)
         ref = hf(**regroup_micro_batch(flat, config.modality_names()))
-    assert out["legacy_north_g_loss"].item() == 0.0
     assert set(ref.modality_losses) == {f"legacy_south_{band}" for band in "griz"}
-    for name, loss in ref.modality_losses.items():
-        assert out[f"{name}_loss"].item() == pytest.approx(loss.item(), rel=REL_TOL)
+    assert_loss_metrics(out, ref, config, flat)
     assert out["loss"].item() == pytest.approx(ref.loss.item(), rel=REL_TOL)
     back = AstroPT3Model(hf_config)
     torch.nn.Module.cuda(back)

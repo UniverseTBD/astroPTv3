@@ -227,15 +227,6 @@ def test_flow_width_follows_trunk_rule(recipe):
     assert (config["jetformer_flow_steps"], config["jetformer_flow_depth"], config["jetformer_flow_heads"]) == (8, 4, 8)
 
 
-@pytest.mark.parametrize("recipe", sorted(RECIPES.glob("*.yaml")), ids=lambda p: p.stem)
-def test_every_recipe_trains_the_same_modalities_and_catalogs(recipe):
-    baseline = load_recipe("astropt3-70m.yaml")
-    config = load_recipe(recipe.name)
-    assert config["model"]["model_config"]["modalities"] == baseline["model"]["model_config"]["modalities"]
-    stream = config["data_stages"][0]["data"]["dataset"]["catalog_stream"]
-    assert stream == baseline["data_stages"][0]["data"]["dataset"]["catalog_stream"]
-
-
 @pytest.mark.parametrize("name,flow", [
     ("../controls/astropt3-70m-north", 74_013_696),
     ("astropt3-70m", 100_381_696),

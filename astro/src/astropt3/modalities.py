@@ -41,11 +41,18 @@ class ModalityConfig:
         image_format: ``physical`` for one calibrated band, ``rgb`` for a display composite.
         image_crop: central crop side in pixels before patchify (0 keeps the
             whole image); 96 turns 152x152 survey cutouts into 144 patch-8 tokens.
+        pre_flow_noise_max: initial Gaussian sigma in normalized patch units,
+            cosine-annealed to zero during training. Zero disables it.
         ADR 0008 scalar modality (``family == "scalar"``) — a one-token span holding a
             physical quantity (Z, ebv, photometry). Scalars bypass the
             jetformer flow (their dims are odd and a flow buys nothing on a
             scalar) and are predicted by a ``GMMHead`` directly, with
             ``gmm_nll`` on the raw normalized value as the loss.
+        categories: class count of a categorical scalar (0 = continuous). Its
+            one record key holds a class index, the token value is the one-hot
+            vector (``input_size == categories``), and a ``CategoricalHead``
+            replaces the GMM: softmax over classes, cross-entropy loss, because a
+            density over class indices would invent an ordering.
     """
 
     name: str
@@ -61,13 +68,19 @@ class ModalityConfig:
     band: str | None = None
     image_format: str = "physical"
     image_crop: int = 96
+    categories: int = 0
+    pre_flow_noise_max: float = 0.0
 
     def __post_init__(self):
         if self.family not in {"image", "spectrum", "scalar"}:
             raise ValueError(
                 f"modality {self.name!r} has invalid family {self.family!r}"
             )
-
+        sigma = self.pre_flow_noise_max
+        if type(sigma) not in (int, float) or not math.isfinite(sigma) or sigma < 0:
+            raise ValueError(f"modality {self.name!r} pre_flow_noise_max must be finite and nonnegative")
+        if sigma and self.scalar:
+            raise ValueError(f"modality {self.name!r} pre_flow_noise_max is only for patch modalities")
         if type(self.input_size) is not int or self.input_size < 1:
             raise ValueError(f"modality {self.name!r} input_size must be a positive integer")
         if self.family != "scalar":
@@ -89,6 +102,14 @@ class ModalityConfig:
         self.record_keys = tuple(self.record_keys)
         if not self.record_keys:
             raise ValueError(f"modality {self.name!r} has no record_keys")
+        if self.categories and (
+            type(self.categories) is not int or self.categories < 2 or self.family != "scalar"
+            or self.input_size != self.categories or len(self.record_keys) != 1
+        ):
+            raise ValueError(
+                f"modality {self.name!r}: a categorical needs family scalar, one record key, "
+                "and input_size == categories >= 2"
+            )
         raw_token_ids = self.token_ids
         if raw_token_ids is None or len(raw_token_ids) != 3:
             raise ValueError(f"modality {self.name!r} needs three token_ids")
@@ -146,6 +167,8 @@ class ModalityConfig:
             **({"band": self.band} if self.band is not None else {}),
             **({"image_format": "rgb"} if self.image_format == "rgb" else {}),
             "image_crop": self.image_crop,
+            "categories": self.categories,
+            "pre_flow_noise_max": self.pre_flow_noise_max,
         }
 
 
@@ -246,6 +269,17 @@ class GMMHead(nn.Module):
         mu = out[..., 1 : 1 + self.d]
         log_sigma = out[..., 1 + self.d :].clamp(-7.0, 2.0)
         return logits_pi, mu, log_sigma
+
+
+class CategoricalHead(nn.Module):
+    """Embedding space -> class logits for a categorical scalar."""
+
+    def __init__(self, hidden_size: int, categories: int):
+        super().__init__()
+        self.proj = nn.Linear(hidden_size, categories, bias=False)
+
+    def forward(self, h):
+        return self.proj(h)
 
 
 def gmm_nll(y, logits_pi, mu, log_sigma):

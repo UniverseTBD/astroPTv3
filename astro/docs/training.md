@@ -29,7 +29,7 @@ Verify the env on a GPU box: `pytest -m gpu tests/test_nanotron_gpu.py`.
 There is **no prep step** and no local corpus. `data/nanotron_loader.py` opens
 Multimodal Universe HATS catalogs via LSDB inside each DataLoader worker,
 decodes rows into the shared record shape, then sequences and packs them for
-nanotron. The default recipe joins DESI, SDSS, HSC, and galaxies-with-hats
+nanotron. The default recipe joins DESI, SDSS, HSC, galaxies-with-hats, and PROVABGS
 separately to each of Legacy Survey North and DR10 South; other YAMLs can
 select different supported modality/catalog combinations (§9).
 Depending on overlap, records carry different subsets of the configured
@@ -58,9 +58,9 @@ errors fail immediately.
 
 Full nanotron run configs live in `astro/configs/nanotron/`: the Pythia ladder
 `astropt3-{70m,160m,410m,1b,1p4b,2p8b,6p9b,12b}.yaml` plus single-GPU smoke
-recipes `astropt3-{1m,10m}.yaml`. Every ladder rung trains the same
-modalities from the same dual-anchor streams (five survey catalogs plus
-galaxies-with-hats RGB images and nine scalars); rungs differ in model size, cluster
+recipes `astropt3-{1m,10m}.yaml`. Every rung trains the same 57 modalities from
+the same dual-anchor stream: 12 calibrated image bands, one display RGB
+product, two spectra and 42 scalars. Rungs differ in model size, cluster
 topology, batch and LR. The convenience launcher's default is
 **`astropt3-70m.yaml`**, run at DP=1 with at most 4 loader workers (TP=1 rungs
 only). Every ladder rung echoes each draw 4 times.
@@ -148,18 +148,23 @@ checkpoints:
   resume_checkpoint_path: <checkpoints dir>   # reads latest.txt
 ```
 
-The run restores model/optimizer/scheduler/RNG **and nothing else**. The
-LSDB stream is cursorless: resume opens a fresh stream and records may be
-revisited immediately. There is no exact-sequence continuation, no replay
+The run restores model/optimizer/scheduler state and the RNG state on the
+same TP/DP topology. The LSDB stream is cursorless: resume opens a fresh
+stream and records may be revisited immediately. There is no exact-sequence continuation, no replay
 audit, and no worker-count constraint on resume.
 
 Resume needs a recipe whose modalities match the checkpoint's. The runner
 reads the checkpoint's saved YAML only for the echo factor; catalogs come from
 the launch YAML.
 
-Watch the logs: `lm_loss`, per-category losses such as `legacy_north_g_loss`
-and `spectra_loss`, `tokens_per_sec_per_gpu`, `model_tflops_per_gpu`,
-and memory lines. Exact-likelihood losses can be negative.
+`lm_loss` (`train/loss` in the single-GPU launcher) is the optimized objective;
+`grad_norm` is measured before clipping. Diagnostics such as `spectra_loss` and
+`image_family_loss` pool all scored targets across the step's microbatches and
+DP ranks. Each has a `*_loss_count`: zero means no loss is logged, not a loss
+of zero. Modality losses are joint NLL per target; image and spectrum family
+losses divide each patch NLL by its input dimension before pooling. Scalar
+family losses pool the unscaled target NLLs. These diagnostics need not
+reconstruct `lm_loss`; exact-likelihood losses can be negative.
 
 ## 6. Evaluation status
 
@@ -266,13 +271,20 @@ modality `record_keys` match catalog outputs. A catalog supplies `record_key`
 and/or `scalar_columns` (**record key → flat catalog column**). Keep existing
 token IDs frozen; new names need non-colliding IDs and sufficient `vocab_size`.
 
-North and [DR10 South](legacy-south.md) each outer-join SDSS, DESI, HSC and galaxies-with-hats at 1″. The [pinned Galaxies train collection](https://huggingface.co/datasets/Smith42/galaxies-with-hats/tree/1a2b1ebbbe06c67a15f49385643ab711c5824a0d/train) has a 10″ margin for cross-partition matches. `min_catalogs: 3` selects each anchor's sky where at least two of the four partners have coverage; it does not count the alternative anchor or require two matches per row. Within that footprint, unmatched galaxies remain separate objects. Missing modalities are omitted. Scalars require a registered transform; DESI `Z` requires valid `ZWARN` from the same catalog.
+North and [DR10 South](legacy-south.md) each anchor an LSDB star with SDSS, DESI, HSC and galaxies-with-hats outer joins and a PROVABGS left join at 1″. The [pinned Galaxies train collection](https://huggingface.co/datasets/Smith42/galaxies-with-hats/tree/1a2b1ebbbe06c67a15f49385643ab711c5824a0d/train) has a 10″ margin for cross-partition matches. `min_catalogs: 3` selects each anchor's sky where at least two outer partners have coverage. It does not count the alternative anchor, left-only partners, or modalities on a row. Missing modalities are omitted; right-only rows stay separate, and rows with no usable modalities are dropped.
+
+For anchor-only streaming, set `catalogs: []` and `min_catalogs: 1`. When
+omitted, `partitions_per_chunk` defaults to 1 for anchor-only streams and 4
+for joins. Native Nanotron uses one catalog reader group per DP replica and
+broadcasts packed batches to the other TP ranks in that replica.
+
+Scalars need registered transforms (`data/scalar_registry.py`). Values outside `VALID_RANGES` or missing or failing `QUALITY_GATES` flags omit the scalar span. Gated scalars (e.g. DESI `Z`, gated on `ZWARN`) need flag columns from the same catalog. North and South have separate reddening and photometry scalars; galaxies-with-hats supplies a display RGB image and Galaxy Zoo vote fractions.
 
 **Ownership is by sky, not a global object crossmatch.** The first anchor owns its eligible footprint. Each subsequent anchor gets its eligible footprint minus earlier claims and a one-cell order-14 guard around them. The guard prevents a partner within 1″ of two centers on opposite sides from entering through both paths. This protects both attached partners and outer-only rows without an index or cross-worker state. The cost is genuine South objects lost in shared sky: in the [pinned audit](dual-anchor-audit.md) 31 of 46 eligible South objects in the overlap cone have no North counterpart within 1″. Do not interpret this as a complete unique-object union. Records carry `source_ids`, source-qualified `object_id`, `anchor_path` (sky owner), and `anchor` (null for outer-only records).
 
 **Mixing:** `draw_weight` counts partition draws per worker cycle, not objects or tokens. The ladder uses 1 North : 2 South to give the larger eligible South sky more draws while guaranteeing North one in every three. This is not a measured optimum. The reader seed rotates the starting path; LSDB shuffles partitions and rows. Both stars share one Dask client per worker, but can each hold a prefetched frame; size workers for available memory. Benchmark JSON reports `anchor_counts`, `fresh_anchor_counts`, and `replayed_anchor_counts` in the measured window. These count object exposures and nonpadding tokens by owning path, including outer-only objects. See the [bounded pilot](dual-anchor-pilot.md) for measured exposures and limitations.
 
-**Splits:** recipes use `split: train`; generation defaults to `validation` for those recipes. Every source uses the same fixed 154 of 3,072 all-sky order-4 HEALPix cells for validation. A one-order-10-cell collar around them is excluded from training to separate adjacent cutouts and 1″ matches, including partners drawn without an anchor. The [North-only control](../configs/controls/astropt3-70m-north.yaml) uses the same split. Its model cannot resume as a dual-anchor model: South adds a four-band image head, not a fourth channel to the North head.
+**Splits:** recipes use `split: train`; generation defaults to `validation` for those recipes. Every source uses the same fixed 154 of 3,072 all-sky order-4 HEALPix cells for validation. A one-order-10-cell collar around them is excluded from training to separate adjacent cutouts and 1″ matches, including partners drawn without an anchor. The [North-only control](../configs/controls/astropt3-70m-north.yaml) uses the same split. Its model cannot resume as a dual-anchor model: South adds four separate band heads.
 
 ### Echoing, accounting, and resume
 

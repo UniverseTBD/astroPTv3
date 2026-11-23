@@ -49,6 +49,20 @@ def test_evaluate_over_provided_batches_is_finite(tiny_model, tiny_config):
         val_loss.evaluate(tiny_model, batches=[])
 
 
+@pytest.mark.parametrize("evaluate", [
+    lambda model: val_loss.evaluate(model, batches=()),
+    lambda model: linear_probe.embed_objects(model, model.config, []),
+    lambda model: scalar_head.scalar_head_metrics(model, [], []),
+])
+def test_evaluation_requires_eval_mode(tiny_model, evaluate):
+    tiny_model.train()
+    try:
+        with pytest.raises(ValueError, match=r"model\.eval\(\)"):
+            evaluate(tiny_model)
+    finally:
+        tiny_model.eval()
+
+
 def test_ridge_recovers_linear_signal():
     rng = np.random.default_rng(0)
     X = rng.normal(size=(400, 16))

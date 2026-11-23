@@ -66,9 +66,12 @@ def _catalogs(spec):
 def _case(recipe, count=4):
     spec = deepcopy(recipe["data_stages"][0]["data"]["dataset"]["catalog_stream"])
     modalities = deepcopy(recipe["model"]["model_config"]["modalities"])
-    # the four survey catalogs; galaxies-with-hats has its own test
-    spec["catalogs"] = [c for c in spec["catalogs"] if c["decoder"] != "rgb_png"]
-    modalities = [m for m in modalities if m["source"] != "galaxies_with_hats"]
+    # the four survey payloads without their scalars; galaxies-with-hats and
+    # the recipe's scalar wiring have their own tests
+    spec["catalogs"] = [c for c in spec["catalogs"] if c["decoder"] not in ("rgb_png", "scalars")]
+    for catalog in _catalogs(spec):
+        catalog.pop("scalar_columns", None)
+    modalities = [m for m in modalities if m["family"] != "scalar" and m["source"] != "galaxies_with_hats"]
     if count < 4:
         names = ("sdss", "desi")[:count]
         root, *partners = [next(c for c in spec["catalogs"] if c["name"] == n) for n in names]
@@ -85,6 +88,15 @@ def _case(recipe, count=4):
         modalities += deepcopy([m for m in DEFAULT_MODALITIES if m["name"] in ("Z", "ebv")])
     spec["min_catalogs"] = min(count, 3)
     return spec, AstroPT3Config(modalities=modalities)
+
+
+@pytest.mark.parametrize("count, override, expected", [(1, None, 1), (4, None, 4), (1, 2, 2)])
+def test_partition_chunk_defaults(recipe, count, override, expected):
+    spec, config = _case(recipe, count)
+    spec.pop("partitions_per_chunk", None)
+    if override is not None:
+        spec["partitions_per_chunk"] = override
+    assert streaming.CatalogStream(spec, config).spec["partitions_per_chunk"] == expected
 
 
 def _png(index, size=256):
@@ -298,7 +310,7 @@ def test_configured_loader_preserves_alignment_across_echoes(recipe, offline):
 def test_recipe_and_shared_builder(recipe, offline):
     dataset_args = recipe["data_stages"][0]["data"]["dataset"]
     assert dataset_args["echo_factor"] == 4
-    assert len(recipe["model"]["model_config"]["modalities"]) == 20
+    assert len(recipe["model"]["model_config"]["modalities"]) == 51
     batches = loader.build_astropt3_dataloader(
         SimpleNamespace(**dataset_args), SimpleNamespace(**recipe["model"]["model_config"]),
         micro_batch_size=1, sequence_length=2048, dp_rank=0, num_workers=0,
@@ -552,8 +564,9 @@ def test_per_catalog_join_overrides_stream_join(recipe, offline):
         next(draws)
     opened = offline.streams[0]
     joins = {right["suffixes"][1]: right["how"] for right in opened.rights}
-    assert joins == {"_sdss": "outer", "_desi": "outer", "_hsc": "left", "_galaxies": "outer"}
-    surveys = tuple(f"hf://datasets/{c['repo']}" for c in spec["catalogs"] if c["name"] != "hsc")
+    assert joins == {"_sdss": "outer", "_desi": "outer", "_hsc": "left", "_galaxies": "outer", "_provabgs": "left"}
+    # sky is selected from the anchor and outer partners only; left joins cannot widen it
+    surveys = tuple(f"hf://datasets/{c['repo']}" for c in spec["catalogs"] if c.get("how", "outer") == "outer")
     assert opened.kwargs["footprint"] == ("footprint", f"hf://datasets/{spec['anchors'][0]['repo']}", surveys, 3)
     hsc["how"] = "inner"
     with pytest.raises(ValueError, match="left or outer"):
@@ -643,6 +656,11 @@ def test_galaxies_with_hats_png_scalars_and_sentinels(recipe):
     scalars = spec["anchors"][0]["scalar_columns"]
     row[scalars["gwh_redshift"]] = 0.1
     row[scalars["gwh_mass_med_photoz"]] = -99.0  # photo-z fill value means "not measured"
+    row[scalars["gwh_total_sfr_flag"]] = 0.0  # MPA-JHU flag 0 = reliable
+    row[scalars["gwh_total_ssfr_flag"]] = 2.0  # any other flag drops the span
+    for key in ("gwh_mag_f", "gwh_mag_n", "gwh_mag_u", "gwh_mag_i"):
+        row[scalars[key]] = 18.0
+    row[scalars["gwh_bar_strong_fraction"]] = 0.25
     record = _decode(stream, row)
     assert record is not None
     assert record["object_id"] == "galaxies:galaxies-3"
@@ -659,8 +677,9 @@ def test_galaxies_with_hats_png_scalars_and_sentinels(recipe):
     assert tokens.shape == (256, 768)
     torch.testing.assert_close(antispiralise(tokens), patchify_image(torch.from_numpy(image["flux"]), 16))
     torch.testing.assert_close(values["gwh_redshift"], torch.log1p(torch.tensor([[0.1]])))
-    assert "gwh_mass_med_photoz" not in values
-    assert set(values) == {m["name"] for m in modalities} - {"gwh_mass_med_photoz"}
+    assert values["gwh_gz_bar"].shape == (1, 2)  # one joint span per Galaxy Zoo question
+    torch.testing.assert_close(values["gwh_gz_bar"], torch.tensor([[-0.5, 0.0]]))
+    assert set(values) == {m["name"] for m in modalities} - {"gwh_mass_med_photoz", "gwh_total_ssfr_median"}
 
 
 def test_unmatched_anchor_has_no_galaxy_modalities(recipe):
@@ -670,7 +689,8 @@ def test_unmatched_anchor_has_no_galaxy_modalities(recipe):
     row = _row(spec)
     row["dr8_id_galaxies"] = pd.NA
     row["image_galaxies"] = pd.NA  # no galaxy within the match radius
-    for column in spec["catalogs"][-1]["scalar_columns"].values():
+    galaxies = next(c for c in spec["catalogs"] if c["name"] == "galaxies")
+    for column in galaxies["scalar_columns"].values():
         row[f"{column}_galaxies"] = pd.NA
     record = _decode(stream, row)
     assert record is not None
@@ -687,6 +707,8 @@ def test_unmatched_galaxy_keeps_its_identity_and_modalities(recipe):
     assert record is not None
     assert record["source_ids"] == {"galaxies": "galaxies-1"}
     assert record["object_id"] == "galaxies:galaxies-1" and record["anchor"] is None
-    assert set(ObjectSequencer(config).build(record).values) == {
-        m["name"] for m in config.modalities if m["source"] == "galaxies_with_hats"
-    }
+    # same galaxies modalities as when matched; the fixture's placeholder scalars fail some gates either way
+    matched = ObjectSequencer(config).build(_decode(stream, _row(spec))).values
+    gwh = {m["name"] for m in config.modalities if m["source"] == "galaxies_with_hats"}
+    assert "galaxies" in gwh & set(matched)
+    assert set(ObjectSequencer(config).build(record).values) == gwh & set(matched)

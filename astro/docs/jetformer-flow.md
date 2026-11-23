@@ -20,6 +20,42 @@ and one per spectrum source. `tests/test_jetformer_flow.py` enforces the
 width rule on every `configs/nanotron/*.yaml`. `scripts/count_params.py`
 reports the HF size configs' flows separately from the nominal-size check.
 
+## Noise curricula
+
+Set `pre_flow_noise_max` on individual patch modalities in `modalities`
+(HF YAML) or `model.model_config.modalities` (Nanotron YAML). Omitted entries
+use zero; scalars cannot use pre-flow noise. During training, Gaussian noise
+is added to normalized patch values before the flow. Its standard deviation
+cosine-decays from `pre_flow_noise_max` to zero at the final training step.
+The same flow pass supplies the latents and logdet for the likelihood.
+
+The [70M Nanotron recipe](../configs/nanotron/astropt3-70m.yaml) also adds
+Gaussian noise with constant σ = 0.1 to the patch latents fed into the
+causal decoder. This second draw does not alter the likelihood targets
+or logdet. `jetformer_noise_max` and `jetformer_noise_min` control the
+linear latent-input schedule; 70M sets them equal. Neither curriculum
+adds noise during evaluation or generation.
+
+Choose σ in the normalized units each flow sees. The 70M recipe starts
+Legacy North at `(0.21, 0.37, 1.08)` for `g, r, z`, Legacy South at
+`(0.15, 0.14, 0.45, 0.64)` for `g, r, i, z`, and HSC at
+`(0.15, 0.20, 0.32, 0.49, 0.93)` for `g, r, i, z, y`. The estimates use
+robust pixel scatter in the outer regions of 23 North and 26 HSC training
+cutouts and valid pixels from 70 South cutouts across three sampled fields.
+They are not a dedicated blank-sky calibration. Galaxies-with-hats RGB uses
+one shared starting σ of `0.04`.
+
+DESI and SDSS start at σ = 0.1 in normalized flux units, based on robust
+scatter between adjacent bins in archived training spectra. The SDSS estimate
+is provisional (three spectra). The schedule also perturbs filled masked
+bins and tail padding during training.
+
+For the [#52 ablation](https://github.com/UniverseTBD/astroPTv3/issues/52), hold
+the `isqm4s6c` recipe, seed, training horizon, and validation samples fixed.
+To isolate pre-flow noise, keep the latent-noise settings identical and set
+`pre_flow_noise_max` to zero in the control. Compare clean total NLL,
+source vs. sky token NLL on fixed cutouts, and linear-probe and scalar-head metrics.
+
 ## Limits
 
 - CP=1 (asserted): the flow attends over whole object spans, which context

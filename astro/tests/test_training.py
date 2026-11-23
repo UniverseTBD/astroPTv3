@@ -73,6 +73,9 @@ def test_default_recipe_keeps_reserved_modality_tokens(default_recipe):
     assert rgb["image_format"] == "rgb" and "band" not in rgb
     assert rgb["token_ids"] == [23, 24, 25]
     assert (rgb["input_size"], rgb["patch_size"], rgb["max_positions"], rgb["image_crop"]) == (768, 16, 256, 0)
+    used_ids = {i for m in modalities.values() for i in m["token_ids"]}
+    assert used_ids.isdisjoint(range(38, 56))
+    assert used_ids.isdisjoint(range(142, 148))
     for source, key, prefix, bands, first_id in (
         ("legacy_north", "image", "des", "grz", 160),
         ("legacy_south", "legacy_south_image", "des", "griz", 169),
@@ -85,8 +88,8 @@ def test_default_recipe_keeps_reserved_modality_tokens(default_recipe):
             assert modality["source"] == source and modality["record_keys"] == [key]
             assert modality["band"] == f"{prefix}-{band}"
             assert (modality["input_size"], modality["patch_size"], modality["max_positions"]) == (64, 8, 144)
-    assert sum(m["family"] == "scalar" for m in modalities.values()) == 9
-    assert len(modalities) == 24
+    assert sum(m["family"] == "scalar" for m in modalities.values()) == 42
+    assert len(modalities) == 57
 
 
 def test_training_caps_loader_workers_on_one_gpu(tmp_path, default_recipe):
@@ -336,14 +339,14 @@ def test_resume_normalizes_modalities_and_preserves_legacy_checkpoint(
 
 
 @pytest.mark.parametrize("field,value", [
-    ("missing", None), ("name", "renamed"), ("token_ids", [56, 57, 58]),
+    ("missing", None), ("name", "renamed"), ("token_ids", [148, 149, 150]),
     ("source", "different-survey"), ("input_size", 384), ("pos_input_size", 2), ("band", "des-r"),
 ])
 def test_resume_rejects_generic_modality_mismatches(tmp_path, default_recipe, field, value):
     model = default_recipe["model"]["model_config"]
     if field == "band":
         # Exercise a valid config mismatch, not rejection of a fixed marker's identity.
-        model["modalities"][0].update(name="custom_band", token_ids=[56, 57, 58])
+        model["modalities"][0].update(name="custom_band", token_ids=[148, 149, 150])
     saved = copy.deepcopy(model)
     if field == "missing":
         saved["modalities"].pop(0)
@@ -627,7 +630,10 @@ def test_echo_runs_independent_model_optimizer_updates(echo_batch, tiny_config, 
         result = model(**run.loader.regroup_micro_batch(moved, config.modality_registry().names()))
         assert torch.isfinite(result.loss)
         assert set(result.modality_losses) == ({"hsc_g"} if hsc_only else set(config.modality_registry().names()))
-        torch.testing.assert_close(result.loss, torch.stack(list(result.modality_losses.values())).mean())
+        weights = {"image": 1.0, "spectrum": 1.0, "scalar": 0.1}
+        families = result.family_losses
+        torch.testing.assert_close(result.loss, sum(weights[f] * families[f] for f in families)
+                                   / sum(weights[f] for f in families))
         result.loss.backward()
         for module in (model.flows["hsc_g"], model.decoders["hsc_g"]):
             assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in module.parameters())
@@ -704,6 +710,7 @@ def test_echo_telemetry_counts_and_wait_attribution(echo_batch, monkeypatch, tmp
 def test_main_wires_echo_accounting_and_restarts_mid_group(
     monkeypatch, tmp_path, default_recipe, custom_config, resuming, override, expected_factor, nonfinite,
 ):
+    monkeypatch.syspath_prepend(str(run.REPO / "nanotron/src"))
     source_record = make_record(1, image_only_fraction=0.0)
     source_record.update(spectrum_sdss=sdss_spectrum(), hsc_image=hsc_image())
     config_args = []
@@ -732,11 +739,10 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(
             assert config["tokens"] == default_recipe["tokens"]
             self.init_checkpoint_path = config["checkpoints"]["resume_checkpoint_path"]
             self.metadata = SimpleNamespace(last_train_step=2 if self.init_checkpoint_path else 0)
-            self.parallel_context = None
-            self.random_states = {}
+            self.rng_restored = bool(self.init_checkpoint_path)
             self.num_params = {"total": 1}
             self.dataset_args = SimpleNamespace(**config["data_stages"][0]["data"]["dataset"])
-            self.model_config = SimpleNamespace(**config["model"]["model_config"])
+            self.model_config = SimpleNamespace(modality_names=lambda: names, **config["model"]["model_config"])
             self.config = SimpleNamespace(
                 save_as_yaml=lambda path: path.write_text(yaml.safe_dump(config)),
                 optimizer=SimpleNamespace(**config["optimizer"]),
@@ -752,7 +758,12 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(
                 self.grad_norm_unclipped = torch.tensor(
                     float("nan") if nonfinite == "grad" and step == 2 else 2.0,
                 )
-            return [{"loss": loss, f"{names[0]}_loss": loss}], loss, None, None
+            outputs = []
+            for loss_sum, count in ((6, 3), (8, 1), (0, 0)):
+                stats = torch.zeros(len(names) + 3, 2, dtype=torch.float64)
+                stats[0] = torch.tensor([loss_sum, count])
+                outputs.append({"loss_stats": stats})
+            return outputs, loss, None, None
 
         def train_step_logs(self, *args):
             pass
@@ -785,8 +796,6 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(
         "run_train": {"DistributedTrainer": FakeTrainer, "get_dataloader": get_dataloader},
         "benchmark_throughput": {"revision": lambda path: {}},
         "wandb": {"init": init, "Settings": lambda **kwargs: kwargs},
-        "nanotron.random": {"RandomState": dict, "RandomStates": dict},
-        "nanotron.serialize.random": {"load_random_states": lambda *args: {"test": 42}},
     }.items():
         module = ModuleType(name)
         vars(module).update(attributes)
@@ -818,7 +827,11 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(
     assert [record["fresh_micro_batches"] for record in records] == [1, 0]
     assert [step for step, _ in logged] == ([3, 4] if resuming else [1, 2])
     for step, metrics in logged:
-        assert metrics["train/loss"] == metrics[f"train/{names[0]}_loss"] == step
+        assert metrics["train/loss"] == step
+        assert metrics[f"train/{names[0]}_loss"] == 3.5
+        assert metrics[f"train/{names[0]}_loss_count"] == 4
+        assert metrics[f"train/{names[1]}_loss_count"] == 0
+        assert f"train/{names[1]}_loss" not in metrics
         assert metrics["train/lr"] == 0.001
         assert ("train/grad_norm" in metrics) == (default_recipe["optimizer"]["clip_grad"] is not None)
     assert [metrics["data/echo_index"] for _, metrics in logged] == [0, 1]
