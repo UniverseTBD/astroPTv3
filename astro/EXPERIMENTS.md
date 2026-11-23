@@ -756,8 +756,138 @@ Training loss, medians over steps 1701–2001 (all three runs at peak LR):
   candidates. Still open: the held-out eval of the step-2000 checkpoint
   and the 1e-4 arm.
 
+## 15. PR #63 recipe: sizes, LR, single-survey controls and cross-modal tests (2026-11-19/23)
+
+**Setup.** AstroPTv3 `b627214` / nanotron `4b18a5b` (PR #63, which contains
+#60, plus nanotron #15) unless noted. One H200 per run except 976 (DP=2).
+Run dirs are in `astroPTv3_telemetry/`; each has a README with provenance.
+Recipes are the 70M/1M/1B YAMLs of that commit: LR 1e-3 (1B 3e-4), 2k
+warmup, cosine to 0.1×, seq 4096 × 16 rows, echo 4, sky-scatter pre-flow
+noise.
+
+| Slurm | run | W&B |
+|---:|---|---|
+| 956 / 959 / 962 | 70M / 1M / 1B, full multimodal stream, 10k steps | `85tt2442` / `qdspn9uz` / `io9mjrpm` |
+| 964 | 70M pilot: first span unscored, scalar weight 1, 2k→4k | `hy7o4di5` |
+| 971 | 1M with pre-flow noise σ0 = measured pixel spread | `wpjtswfq` |
+| 976 | 70M, DP=2, 80k steps (`run_train.py`) | `lcq37ho8` |
+| 985 | 70M, galaxies-with-hats RGB only | `ccotv2t4` |
+| 986 / 990 | 70M / 1B, Legacy South g/r/i/z only | `6vqenbxq` / `zhn2t4nl` |
+| 989 | 70M at LR 1e-3 vs 3e-4 on byte-identical replayed batches | — |
+| 991 | 70M, Legacy South g/r/i/z + DESI EDR spectra, `min_catalogs: 2` | `7he89t59` |
+
+The single-catalog runs (985/986/990) needed `catalogs: []` to pass
+nanotron's config check and `partitions_per_chunk: 1`: four galaxies or
+South partitions exceed Arrow's 2 GiB offset limit when an anchor-only
+stream shuffles whole chunks.
+
+**Sizes at 10k (956/959/962).** The 1M had lower scalar-family training
+loss than the 70M (gap 0.70 at 10k). On small held-out panels the 70M was
+ahead or level: redshift point error 0.056 vs 0.078, Legacy South flux NLL
+2.70 vs 3.15. The 1B's logged per-task losses average per-micro-batch means
+with absent tasks as zero (#68), so its curves cannot be ranked.
+
+**Peak LR (989).** Two DP=1 trainers on the 956 recipe, differing only in
+peak/floor LR, consumed the same batches (the control streamed them and
+replayed each to the other arm; batch hashes matched for all 10k steps).
+Held-out metrics are on 4 Legacy South objects.
+
+| | 1e-3 | 3e-4 |
+|---|---:|---:|
+| training loss, paired steps where this arm is lower (median gap) | 0–2% | 98–100% (0.05–0.07) |
+| held-out r-band NLL, step 4k / 10k (nats/dim) | 0.61 / −0.04 | 0.10 / −0.20 |
+| own-vs-wrong g context gain on r, step 4k / 10k | +0.0002 / +0.007 | +0.017 / +0.011 |
+| mean cross-band correlation of free samples, step 10k | 0.17 | 0.66 |
+
+**3e-4 is now the 70M default.** This completes the §14 sweep. Related
+symptoms of the hot LR: the 70M's Galaxy10 image NLL went from −0.19 to
+47 nats/dim between steps 256 and 3k, and swapping only the Galaxy10 flow
+moved the failure with it (Galaxy10 was 0.024% of image tokens; it has
+since been removed from the recipes). In 976 the galaxies RGB loss jumped
+between two levels in bursts on 13–20% of steps until ~20k, with the other
+image losses worse during bursts.
+
+**Sample quality.** No implementation fault was found: the flow inverts
+exactly, generation from the true tokens reproduces them, and a fresh
+1M-config model trained on one image through the HF forward memorises it
+in 3k steps, with free-running error equal to teacher-forced error. Poor
+samples are under-fitting:
+- *RGB is starved in the multimodal mix.* It is ~2% of tokens, sits at ~0
+  nats/dim (1.85 above the noise floor), and with 768-dim tokens gets 1/12
+  of a 64-dim band's loss weight per dimension. The same 70M recipe on
+  galaxies-with-hats only (985) gives seam-free, plausible free samples by
+  10k after 2.4M RGB presentations (vs ~47k in 956). Step 128 (31k images)
+  looks as bad as 956; step 512 already shows galaxies. Exposure and
+  cross-modal interference are not separated.
+- *Single-survey South works.* 986 gives clean, centred galaxies. The 1B
+  (990, LR 3e-4, 2.3 s/step vs 0.45) is behind it at 10k: median
+  `lm_loss` over the last 100 steps 0.50 vs 0.40, behind on every band.
+  The 1B has seen 0.06 tokens per parameter and runs at a different LR.
+- *Strong pre-flow noise (971)* removed the ~1e5 spectrum spikes (worst
+  one-token deviation 29 → 8 arcsinh units) but not the image patch seams
+  (edge/within ratio 1.1–1.8 vs ~0.93 in data), and 66–69% of its spectra
+  collapse to zero flux at the red end. Not adopted.
+
+**Cross-modal conditioning.** Gain = NLL after a wrong object's context
+minus NLL after the object's own, in nats/dim. In 956, 959 and 971 it is
+≈0 in both directions (SDSS spectra were 0.06% of tokens). 991 restricts
+the sky to the DESI SV3 overlap (82 deg² train), where 17% of streamed
+objects carry both an image and a spectrum. On 32 held-out paired objects:
+
+| step | image → spectrum | spectrum → r, first token | spectrum → r, whole span | objects with gain > 0 |
+|---:|---:|---:|---:|---|
+| 1,000 | −0.0001 ± 0.0003 | +0.007 ± 0.006 | +0.0006 ± 0.0004 | 17/32, 17/32 |
+| 10,000 | **+0.0057 ± 0.0012** | **+0.205 ± 0.047** | **+0.0016 ± 0.0004** | 29/32, 27/32 |
+
+That is ~45 nats per spectrum. Samples do not show it yet: spectrum →
+image draws match the unconditional ones, and image → spectrum draws have
+no emission lines at the template's z = 0.288. `min_catalogs` selects the
+footprint only; rows stay outer-joined (56% South-only, 27% DESI-only, 17%
+paired in train).
+
+**70M at 80k (976).** Medians per 10k-step bin, first vs last:
+
+| | 0–10k | 70–80k |
+|---|---:|---:|
+| `lm_loss` | 0.16 | −0.47 |
+| image / spectrum / scalar family | 0.67 / −0.29 / −0.85 | 0.11 / −0.75 / −3.10 |
+
+All families still fell at the end. Legacy South free samples first look
+galaxy-like at 74k (compact, centred, smaller than the data); RGB samples
+are still noise at 80k, and swapping the conditioning spectrum changes
+the rendered image draws by a mean |Δpixel| of only 3–6 (20–27 at 40k). Step 80k, with 10k–70k
+as `stepN` branches, is public as `Smith42/astroPT_v3.0-pre-alpha-70m`
+(no held-out evaluation). Its checkpoints did not resume as saved: the
+per-dataset token ledger is empty under `run_train.py`.
+
+**Suffix-only pilot (964), rejected.** Leaving each object's first span
+unscored and raising the scalar weight to 1 (resumed from 956 at 2k) was
+worse at 4k on 432 held-out objects in every family: image +0.53 nats/dim,
+spectrum +0.34, scalar +2.35 per token. Masking and reweighting are not
+separated.
+
+**Streaming bytes (991 vs 986, from `telemetry/bytes.*.jsonl`).** Loader
+wait was 3% of step time at ~20 MB/s from HF. 991 read 654 kB per fresh
+object (986: 523 kB). Partitions were downloaded more than once: DESI
+2.22× (1.72× from different workers reading the same partitions, 1.29×
+within a worker), South 1.21×, against 1.00× in 986. An inner join would
+have cost ~4 MB per paired object. Dotted sub-field projection
+(`spectrum.flux`, …) still downloads the whole struct (298.7 MB per DESI
+partition either way; cf. §5): fsspec's `open_parquet_file` prefetch, used
+by nested-pandas for remote files, truncates column names to the
+top-level field. Plain pyarrow skips the unused `ivar` (152 → 84 MB). Of
+the bytes read, unused `ivar` is ~49% of DESI and ~47% of HSC; South uses
+`ivar` only as a validity test (~34% of its bytes).
+
 ## Open items / not pursued
 
+- **Paired-object echo weighting**: echo paired objects more often than
+  single-modality ones (e.g. 12× vs 4×) to raise the cross-modal share
+  without more downloads; needs object-level echo in packing (§15).
+- **Per-worker sky sharding**: give each loader worker and DP rank its own
+  aligned pixels to remove the 1.2–2.2× duplicate partition reads (§15).
+- **Sub-field reads**: fix the fsspec/nested-pandas prefetch so dotted
+  struct columns skip unused `ivar` (§15).
 - **`chunk=2`**: not tested after the section-7 re-tune; the win at 4 was
   decisive enough to stop there.
 - **Compute-side MFU (`MFU_busy` ~16-18%)**: a real, wire-independent
