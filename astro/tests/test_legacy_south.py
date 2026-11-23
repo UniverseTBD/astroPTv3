@@ -28,17 +28,12 @@ def _payload():
     shape = (4, 160, 160)
     return {
         "band": ["des-g", "des-r", "des-i", "des-z"],
-        "scale": np.full(4, 0.262, np.float32),
-        "flux": np.full(shape, np.arange(4, dtype=np.float32)[:, None, None] * 0.01),
-        "mask": np.ones(shape, bool),
-        "ivar": np.ones(shape, np.float32),
+        "flux": np.full(shape, np.arange(1, 5, dtype=np.float32)[:, None, None] * 0.01),
     }
 
 
 @pytest.mark.parametrize("field,bad", [
-    ("flux", np.zeros((3, 152, 152))), ("mask", np.zeros((160, 160), bool)),
-    ("ivar", None), ("mask", np.ones((4, 160, 160), np.uint8)),
-    ("scale", [0.262, 0.262, 0.168, 0.262]), ("scale", [0.262]),
+    ("flux", np.zeros((3, 152, 152))), ("flux", None),
     ("band", ["des-g", "des-r", "des-z", "des-i"]),
     ("band", ["des-g", "des-r", "des-z", "des-z"]),
 ])
@@ -47,15 +42,15 @@ def test_rejects_drift(field, bad):
         decode_legacy_south_image({**_payload(), field: bad})
 
 
-def test_packed_south_preserves_measured_zeros_and_all_four_bands(tiny_config):
+def test_packed_south_fills_zeros_and_keeps_all_four_bands(tiny_config):
     image = _payload()
-    image["mask"][0, 32, 32] = False
+    image["flux"][0, 32, 32] = 0
     image["flux"][1, 32, 32] = np.nan
     image["flux"][1, 33, 33] = -0.01
-    image["ivar"][2, 32, 32:35] = [0, -1, np.inf]
     decoded = decode_legacy_south_image(image)
-    assert decoded["fill_mask"].sum() == 5
+    assert set(decoded) == {"flux", "band"}
     assert np.isfinite(decoded["flux"]).all()
+    assert np.isnan(image["flux"][1, 32, 32])  # Do not mutate the decoded input.
     with pytest.raises(ValueError, match="flux has shape"):
         decode_legacy_image(image)
 
@@ -80,11 +75,12 @@ def test_packed_south_preserves_measured_zeros_and_all_four_bands(tiny_config):
         planes.append(unpatchify_image(tokens, 8, 1, 96))
     pixels = torch.cat(planes)
     assert torch.isfinite(pixels).all()
-    torch.testing.assert_close(pixels[:, -1, -1], torch.arange(4, dtype=torch.float32).asinh())
+    torch.testing.assert_close(pixels[:, -1, -1], torch.arange(1, 5, dtype=torch.float32).asinh())
     assert pixels[1, 1, 1] == torch.asinh(torch.tensor(-1.0))
-    assert pixels[0, 0, 0] != 0 and pixels[0, 0, 1] == 0
     expected = torch.from_numpy(decoded["flux"][:, 32:128, 32:128] / 0.01).asinh()
-    assert torch.equal(pixels != expected, torch.from_numpy(decoded["fill_mask"][:, 32:128, 32:128]))
+    assert int((expected == 0).sum()) == 2
+    torch.testing.assert_close(pixels[expected != 0], expected[expected != 0])
+    assert torch.all(pixels[expected == 0] != 0)
 
     flat = flatten_packed_batch(PackedCollator(config, len(obj))([obj]), config, len(obj))
     assert config.vocab_size == 181 and flat["legacy_north_g_values"].shape == (0, 64)
@@ -150,9 +146,11 @@ def test_pinned_south_parquet_row():
     with urlopen(url, timeout=30) as response:
         data = response.read(2_802_724)
     assert len(data) == 2_802_723
-    table = pq.ParquetFile(io.BytesIO(data)).read(columns=["image", "object_id", "FLUX_G"])
+    table = pq.ParquetFile(io.BytesIO(data)).read(
+        columns=["image.band", "image.flux", "object_id", "FLUX_G"],
+    )
     assert len(table) == 4 and table["object_id"][0].as_py() == "2462m200-369"
     assert table["FLUX_G"][1].as_py() == pytest.approx(-0.42972362)
     decoded = decode_legacy_south_image(table["image"][0])
     assert decoded["flux"].shape == (4, 160, 160)
-    np.testing.assert_array_equal((~decoded["fill_mask"]).sum(axis=(1, 2)), [13820] * 4)
+    assert np.isfinite(decoded["flux"]).all()

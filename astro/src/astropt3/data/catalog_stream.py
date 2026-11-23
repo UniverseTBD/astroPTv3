@@ -34,7 +34,7 @@ from .scalar_registry import CATEGORICAL, QUALITY_GATES, _transforms
 # Decoder names describe verified payload contracts, not arbitrary calibrations.
 _PROFILES = {
     "legacy_image": ("image", ("band", "flux"), "image"),
-    "legacy_south_image": ("image", ("band", "flux", "ivar", "mask", "scale"), "image"),
+    "legacy_south_image": ("image", ("band", "flux"), "image"),
     "hsc_image": ("image", ("band", "flux", "scale"), "image"),
     "desi_spectrum": ("spectrum", ("flux", "lambda", "mask"), "spectrum"),
     "sdss_spectrum": ("spectrum", ("flux", "lambda", "mask"), "spectrum"),
@@ -349,10 +349,14 @@ class CatalogStream:
                 ) as cluster, Client(cluster) as client:
                     opened = {}
                     for catalog in self.catalogs:
-                        payload = _PROFILES[catalog["decoder"]][0]
-                        columns = [_ID_COLUMNS.get(catalog["decoder"], "object_id"), "ra", "dec",
-                                   *([payload] if payload else []),
-                                   *catalog["scalar_columns"].values()]
+                        decoder = catalog["decoder"]
+                        payload, fields, family = _PROFILES[decoder]
+                        columns = [_ID_COLUMNS.get(decoder, "object_id"), "ra", "dec"]
+                        if family == "image" and fields:
+                            columns.extend(f"{payload}.{field}" for field in fields)
+                        elif payload:
+                            columns.append(payload)
+                        columns.extend(catalog["scalar_columns"].values())
                         opened[catalog['name']] = open_catalog(
                             f"hf://datasets/{catalog['repo']}", columns=list(dict.fromkeys(columns)),
                         )
