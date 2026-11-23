@@ -29,7 +29,8 @@ HSC_BANDS = {f"hsc_{band}" for band in "grizy"}
 
 
 @pytest.mark.parametrize("count", [1, 4])
-def test_real_lsdb_stream_decodes_local_catalogs(recipe, monkeypatch, tmp_path, count):
+@pytest.mark.parametrize("fixed_sample", [False, True])
+def test_real_lsdb_stream_decodes_local_catalogs(recipe, monkeypatch, tmp_path, count, fixed_sample):
     from lsdb.loaders.dataframe.from_dataframe import from_dataframe
     from lsdb.loaders.hats.read_hats import open_catalog
     from lsdb.streams.catalog_streams import (
@@ -70,8 +71,11 @@ def test_real_lsdb_stream_decodes_local_catalogs(recipe, monkeypatch, tmp_path, 
     monkeypatch.setattr(streaming, "CrossMatchStream", CrossMatchStream)
     monkeypatch.setattr(streaming, "InfiniteStream", InfiniteStream)
     monkeypatch.setattr(streaming, "_restrict_to_footprint", _restrict_to_footprint)
+    if fixed_sample:
+        spec["split"] = "validation"
+        monkeypatch.setattr(streaming, "_split_sky", lambda split: streaming.MOC.new_empty(0).complement())
     stream = streaming.CatalogStream(spec, config)
-    with closing(stream.draws(seed=0, rank=0, worker_id=0)) as draws:
+    with closing(stream.draws(seed=0, rank=0, worker_id=0, rows_per_draw=1 if fixed_sample else None)) as draws:
         _, records = next(draws)
         record, = records
     name = spec['anchors'][0]['name']
@@ -725,6 +729,10 @@ def test_galaxies_with_hats_png_scalars_and_sentinels(recipe):
     offsets = image["flux"].astype(np.float64) * 255 - pixels
     assert offsets.min() > -1e-4 and offsets.max() < 1 + 1e-4  # float32 rounding at the bin top
     assert 0.45 < offsets.mean() < 0.55 and offsets.std() > 0.25
+    first = star.decode_row(row, dequantize_seed=76)["record"]["galaxy_image"]["flux"]
+    second = star.decode_row(row, dequantize_seed=76)["record"]["galaxy_image"]["flux"]
+    np.testing.assert_array_equal(first, second)
+    assert not np.array_equal(image["flux"], first)
     values = ObjectSequencer(config).build(record).values
     tokens = values["galaxies"]
     assert tokens.shape == (256, 768)

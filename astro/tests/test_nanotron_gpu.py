@@ -313,6 +313,28 @@ def test_forward_loss_parity(nt, matched_models, training, frac):
     assert_loss_metrics(nt_out, hf_out, nt_config, flat)
 
 
+def test_validation_disables_noise_and_restores_training(nt, matched_models):
+    from nanotron.astropt3_validation import evaluate_validation_shard
+
+    _, model, nt_config, hf_config = matched_models
+    model.train()
+    model.set_jet_noise_frac(0.0)
+    batch = micro_batch(hf_config, device="cpu")
+    names = nt_config.modality_names()
+    expected = sum(batch[f"{name}_mask"].sum().item() for name in names if nt_config.modality(name)["family"] == "image")
+    metrics = []
+    try:
+        for _ in range(2):
+            result = evaluate_validation_shard(model, [batch], names, "cuda", nt.parallel_context.dp_pg)
+            assert model.training and model.model.token_position_embeddings.pp_block.training
+            assert result["val/image_family_loss_count"] == expected > 0
+            result.pop("val/seconds")
+            metrics.append(result)
+    finally:
+        model.eval()  # shared fixture
+    assert metrics[0] == pytest.approx(metrics[1], rel=0, abs=1e-6)
+
+
 def test_conversion_roundtrip_exact(nt, matched_models):
     from astropt3 import AstroPT3Model
 

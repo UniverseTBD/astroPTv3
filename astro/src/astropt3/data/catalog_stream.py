@@ -8,8 +8,9 @@ import io
 import math
 import re
 import time
+import zlib
 from contextlib import suppress
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any
 
 import numpy as np
@@ -152,7 +153,7 @@ class _Star:
                 ):
                     raise ValueError(f"{name} requires an explicit {flag} scalar column from the same catalog")
 
-    def decode_row(self, mapped):
+    def decode_row(self, mapped, *, dequantize_seed=None):
         row = loader._row_from_map_rows(mapped, self.nested)
         record, source_ids = {}, {}
         for index, catalog in enumerate(self.catalogs):
@@ -197,7 +198,10 @@ class _Star:
                     rgb = np.asarray(png.convert("RGB"), dtype=np.float32)
                 # Uniform dequantization: a continuous likelihood on exact k/255 levels
                 # rewards piling density onto the 8-bit grid instead of modelling galaxies.
-                rgb = (rgb + _DEQUANTIZE.random(rgb.shape, dtype=np.float32)) / 255.0
+                rng = _DEQUANTIZE if dequantize_seed is None else np.random.default_rng(
+                    zlib.crc32(f"{name}:{source_ids[name]}".encode(), dequantize_seed)
+                )
+                rgb = (rgb + rng.random(rgb.shape, dtype=np.float32)) / 255.0
                 result = {"flux": rgb.transpose(2, 0, 1), "band": ["rgb-r", "rgb-g", "rgb-b"]}
             else:
                 result = loader._decode_spectrum(value)
@@ -332,8 +336,11 @@ class CatalogStream:
             streams.append(stream)
         return streams
 
-    def draws(self, *, seed, rank, worker_id):
+    def draws(self, *, seed, rank, worker_id, rows_per_draw=None):
         """Yield (epoch, finite records) with bounded transport retries, no cursor."""
+        fixed_sample = rows_per_draw is not None
+        if fixed_sample and self.spec.get('split') != 'validation':
+            raise ValueError('Fixed panel sampling requires the validation split')
         _unregister_hf_array2d_extension()
         telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in self.catalogs})
         failures: dict[int | None, int] = {}
@@ -377,14 +384,20 @@ class CatalogStream:
                         epoch = draw
                         draw += 1
                         if frame.empty:
+                            if fixed_sample:
+                                yield epoch, iter(())
                             continue
                         star = self.stars[star_index]
-                        decoded = frame.map_rows(star.decode_row, columns=star.columns, infer_nesting=False)
+                        if fixed_sample:
+                            frame = frame.iloc[:rows_per_draw]
+                        decode = partial(star.decode_row, dequantize_seed=seed) if fixed_sample else star.decode_row
+                        decoded = frame.map_rows(decode, columns=star.columns, infer_nesting=False)
                         records = filter(None, decoded["record"].tolist())
                         del decoded, frame
                         yield epoch, records
             except Exception as error:
-                if not loader._retryable(error):
+                # Do not replace any part of a fixed draw sequence after a transport error.
+                if fixed_sample or not loader._retryable(error):
                     raise
                 attempts = failures[star_index] = failures.get(star_index, 0) + 1
                 if attempts > loader._MAX_NET_RETRIES:
