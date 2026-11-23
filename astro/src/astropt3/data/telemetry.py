@@ -41,6 +41,7 @@ from .echo import ECHO_METADATA
 
 TELEMETRY_DIR_ENV = "ASTROPT3_TELEMETRY_DIR"
 ANCHOR_METADATA = "_astropt3_anchors"
+PAIRED_METADATA = "_astropt3_paired"
 
 _CATALOG_SOURCES = {
     "legacy": "hf://datasets/UniverseTBD/mmu_ssl_legacysurvey_north",
@@ -158,6 +159,7 @@ def _blank() -> dict[str, Any]:
         "tokens_total": 0,
         "tokens_nonpad": 0,
         "rows": 0,
+        "paired_rows": 0,
         "loss_tokens": {},
         "target_values": {},
         "anchor_counts": {},
@@ -167,13 +169,14 @@ def _blank() -> dict[str, Any]:
     for prefix in ("fresh", "replayed"):
         record.update({
             f"{prefix}_micro_batches": 0, f"{prefix}_tokens_nonpad": 0,
-            f"{prefix}_rows": 0, f"{prefix}_loss_tokens": {}, f"{prefix}_target_values": {},
+            f"{prefix}_rows": 0, f"{prefix}_paired_rows": 0,
+            f"{prefix}_loss_tokens": {}, f"{prefix}_target_values": {},
             f"{prefix}_anchor_counts": {},
         })
     return record
 
 
-def observe_micro_batch(flat: dict, wait_s: float, *, echo_index=0, echo_factor=1, anchor_counts=None) -> None:
+def observe_micro_batch(flat: dict, wait_s: float, *, echo_index=0, echo_factor=1, anchor_counts=None, paired=False) -> None:
     """Accumulate one flat micro-batch into the current step's counters.
 
     ``{m}_mask`` counts loss-bearing tokens per modality (which is also the
@@ -198,6 +201,7 @@ def observe_micro_batch(flat: dict, wait_s: float, *, echo_index=0, echo_factor=
         "tokens_nonpad": int((input_ids != PAD_ID).sum().item()),
         "rows": int((input_ids == BOS_ID).sum().item()),
     }
+    counts["paired_rows"] = counts["rows"] if paired else 0
     for prefix in prefixes:
         for key, count in counts.items():
             _counters[f"{prefix}{key}"] += count
@@ -293,19 +297,20 @@ class TelemetryLoader:
             except StopIteration:
                 return
             wait_s = time.perf_counter() - began
-            if ECHO_METADATA in batch or ANCHOR_METADATA in batch:
+            if ECHO_METADATA in batch or ANCHOR_METADATA in batch or PAIRED_METADATA in batch:
                 batch = dict(batch)
             self.echo_index, self.echo_factor = batch.pop(ECHO_METADATA, (0, 1))
             anchor_counts = batch.pop(ANCHOR_METADATA, None)
+            paired = batch.pop(PAIRED_METADATA, False)
             if self._enabled:
                 observe_micro_batch(
                     batch, wait_s, echo_index=self.echo_index, echo_factor=self.echo_factor,
-                    anchor_counts=anchor_counts,
+                    anchor_counts=anchor_counts, paired=paired,
                 )
             yield batch
 
 
-def instrument(loader, *, echo_factor=1):
+def instrument(loader, *, echo_factor=1, stratified=False):
     """Strip echo metadata even with counters off; leave plain loaders untouched."""
     enabled = telemetry_dir() is not None
-    return TelemetryLoader(loader, enabled=enabled) if enabled or echo_factor > 1 else loader
+    return TelemetryLoader(loader, enabled=enabled) if enabled or stratified or echo_factor > 1 else loader

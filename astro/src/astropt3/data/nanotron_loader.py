@@ -21,7 +21,13 @@ import torch.distributed as dist
 from ..configuration_astropt3 import AstroPT3Config
 from .echo import echo_draw, validate_echo_factor
 from .packing import ObjectSequencer, PackedCollator
-from .telemetry import ANCHOR_METADATA, install_byte_probe, instrument, telemetry_dir
+from .telemetry import (
+    ANCHOR_METADATA,
+    PAIRED_METADATA,
+    install_byte_probe,
+    instrument,
+    telemetry_dir,
+)
 
 IMAGE_SHAPE = (3, 152, 152)
 _MAX_NET_RETRIES = 60
@@ -224,12 +230,16 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
         rank: int = 0,
         seed: int = 0,
         echo_factor: int = 1,
+        paired_echo_factor: int | None = None,
     ):
         from .catalog_stream import CatalogStream
 
         super().__init__()
         validate_echo_factor(echo_factor)
+        if paired_echo_factor is not None:
+            validate_echo_factor(paired_echo_factor)
         self.echo_factor = echo_factor
+        self.paired_echo_factor = paired_echo_factor
         self.config = config
         self.micro_batch_size = micro_batch_size
         self.seq_len = seq_len
@@ -239,6 +249,10 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
         self._epoch = 0  # InfiniteStream partition-draw nonce for span ordering
         self.sequencer = ObjectSequencer(config)
         self.collator = PackedCollator(config, seq_len=seq_len)
+        self.patch_sources = {
+            name: mod.source for name in self.collator.modality_names
+            if not (mod := self.sequencer.registry.get_config(name)).scalar
+        }
 
     def _open_records(self, worker):
         for records in self._open_draws(worker):
@@ -256,28 +270,42 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
         worker = torch.utils.data.get_worker_info()
         worker_id = worker.id if worker else 0
         install_byte_probe(self.rank, worker.id if worker else None)
-        if self.echo_factor == 1:
-            yield from self._pack_records(self._open_records(worker))
+        if self.echo_factor == 1 and self.paired_echo_factor is None:
+            for _, batch in self._pack_records(self._open_records(worker)):
+                yield batch
             return
         for records in self._open_draws(worker):
-            batches = list(self._pack_records(records, flush_tail=True))
+            bases = list(self._pack_records(records, flush_tail=True))
             yield from echo_draw(
-                batches, self.config, echo_factor=self.echo_factor,
+                [batch for _, batch in bases], self.config, echo_factor=self.echo_factor,
+                batch_factors=[factor for factor, _ in bases] if self.paired_echo_factor is not None else None,
                 seed=consumer_seed(self.seed, self.rank, worker_id, self._epoch),
             )
-            del batches
+            del bases
 
     def _pack_records(self, records, *, flush_tail=False):
-        rows: list[list] = [[] for _ in range(self.micro_batch_size)]
-        used = [0] * self.micro_batch_size
-        track_anchors = telemetry_dir() is not None
-        by_anchor: dict[str, dict[str, int]] = {}
+        def new_bucket():
+            return ([[] for _ in range(self.micro_batch_size)], [0] * self.micro_batch_size, {})
 
-        def flatten(batch):
+        paired_factor = self.paired_echo_factor
+        track_telemetry = telemetry_dir() is not None
+
+        def pack(paired, rows, by_anchor):
+            batch = self.collator.collate_rows(rows)
+            expected_shape = (self.micro_batch_size, self.seq_len)
+            if batch["input_ids"].shape != expected_shape:
+                raise AssertionError(f"packing mismatch: {batch['input_ids'].shape} != {expected_shape}")
             flat = flatten_packed_batch(batch, self.config, self.seq_len)
             if by_anchor:
                 flat[ANCHOR_METADATA] = by_anchor
-            return flat
+            if paired and track_telemetry:
+                flat[PAIRED_METADATA] = True
+            return paired_factor if paired and paired_factor is not None else self.echo_factor, flat
+
+        # shortcut: one padded tail per stratum per draw; revisit if tail waste is high.
+        buckets = {False: new_bucket()}
+        if paired_factor is not None:
+            buckets[True] = new_bucket()
 
         for record in records:
             obj = self.sequencer.build(record, epoch=self._epoch)
@@ -285,27 +313,25 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
                 raise ValueError(
                     f"object of length {len(obj)} exceeds seq_len {self.seq_len}"
                 )
+            paired = paired_factor is not None and len({
+                self.patch_sources[name] for name in obj.values if name in self.patch_sources
+            }) > 1
+            rows, used, by_anchor = buckets[paired]
             row_index = min(range(len(used)), key=lambda row: (used[row], row))
             if used[row_index] + len(obj) > self.seq_len:
-                batch = self.collator.collate_rows(rows)
-                expected_shape = (self.micro_batch_size, self.seq_len)
-                if batch["input_ids"].shape != expected_shape:
-                    raise AssertionError(
-                        f"packing mismatch: {batch['input_ids'].shape} != {expected_shape}"
-                    )
-                yield flatten(batch)
-                by_anchor = {}
-                rows = [[] for _ in range(self.micro_batch_size)]
-                used = [0] * self.micro_batch_size
+                yield pack(paired, rows, by_anchor)
+                buckets[paired] = rows, used, by_anchor = new_bucket()
                 row_index = 0
             rows[row_index].append(obj)
             used[row_index] += len(obj)
-            if track_anchors and (anchor := record.get("anchor_path")) is not None:
+            if track_telemetry and (anchor := record.get("anchor_path")) is not None:
                 counts = by_anchor.setdefault(anchor, {"objects": 0, "tokens_nonpad": 0})
                 counts["objects"] += 1
                 counts["tokens_nonpad"] += len(obj)
-        if flush_tail and any(used):
-            yield flatten(self.collator.collate_rows(rows))
+        if flush_tail:
+            for paired, (rows, used, by_anchor) in buckets.items():
+                if any(used):
+                    yield pack(paired, rows, by_anchor)
 
 
 def build_astropt3_dataloader(
@@ -321,6 +347,7 @@ def build_astropt3_dataloader(
     """Build worker-side draw echoing, then main-process telemetry/device inputs."""
     echo_factor = getattr(dataset_args, "echo_factor", 1)
     validate_echo_factor(echo_factor)
+    paired_echo_factor = getattr(dataset_args, "paired_echo_factor", None)
     # Each DP rank echoes its own draws (rank-seeded shuffle), so DP needs no coordination.
     # With accumulation, two exposures of one batch can share an optimizer update.
     config = hf_config_from_modalities(
@@ -347,6 +374,7 @@ def build_astropt3_dataloader(
         rank=dp_rank,
         seed=seed,
         echo_factor=echo_factor,
+        paired_echo_factor=paired_echo_factor,
         catalog_stream=catalog_stream,
     )
     if num_workers and multiprocessing_context is None:
@@ -358,7 +386,7 @@ def build_astropt3_dataloader(
         pin_memory=torch.cuda.is_available(),
         multiprocessing_context=multiprocessing_context,
     )
-    return instrument(loader, echo_factor=echo_factor)
+    return instrument(loader, echo_factor=echo_factor, stratified=paired_echo_factor is not None)
 
 
 def share_tp_batches(loader_factory, tp_group, world_group):

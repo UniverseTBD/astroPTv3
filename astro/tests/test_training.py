@@ -302,12 +302,14 @@ def test_cli_rejects_invalid_input_before_outputs(monkeypatch, tmp_path, default
     assert not output.exists()
 
 
-def write_resume(path, model_config, *, echo_factor=None, step=64, legacy_crossmatch=None):
+def write_resume(path, model_config, *, echo_factor=None, paired_echo_factor=None, step=64, legacy_crossmatch=None):
     checkpoint = path / str(step)
     checkpoint.mkdir(parents=True)
     (path / "latest.txt").write_text(f"{step}\n")
     (checkpoint / "model_config.json").write_text(json.dumps(model_config))
     dataset = {} if echo_factor is None else {"echo_factor": echo_factor}
+    if paired_echo_factor is not None:
+        dataset["paired_echo_factor"] = paired_echo_factor
     if legacy_crossmatch is not None:
         dataset["crossmatch_desi"] = legacy_crossmatch
     (checkpoint / "config.yaml").write_text(yaml.safe_dump({
@@ -336,6 +338,14 @@ def test_resume_normalizes_modalities_and_preserves_legacy_checkpoint(
     assert dataset["catalog_stream"] == default_stream.spec
     assert "crossmatch_desi" not in dataset
     assert path.read_bytes() == before
+
+
+def test_resume_requires_matching_paired_factor(tmp_path, default_recipe):
+    model = default_recipe["model"]["model_config"]
+    write_resume(tmp_path, model, echo_factor=2, paired_echo_factor=12)
+    assert run.validate_resume(tmp_path, model, paired_echo_factor=12) == 2
+    with pytest.raises(ValueError, match="Checkpoint paired_echo_factor differs"):
+        run.validate_resume(tmp_path, model, paired_echo_factor=4)
 
 
 @pytest.mark.parametrize("field,value", [

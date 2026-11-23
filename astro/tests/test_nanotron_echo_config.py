@@ -13,16 +13,17 @@ AstroPT3StreamingDatasetsArgs = pytest.importorskip(
 ).AstroPT3StreamingDatasetsArgs
 
 
-@pytest.mark.parametrize("factor", [1, 4])
-def test_echo_factor_round_trips_nanotron_yaml(tmp_path, factor):
+@pytest.mark.parametrize("factor, paired_factor", [(1, None), (4, None), (2, 12), (4, 4)])
+def test_echo_factor_round_trips_nanotron_yaml(tmp_path, factor, paired_factor):
     baseline = Path(__file__).resolve().parents[1] / "configs/nanotron/astropt3-70m.yaml"
     raw = yaml.safe_load(baseline.read_text())
-    raw["data_stages"][0]["data"]["dataset"]["echo_factor"] = factor
+    raw["data_stages"][0]["data"]["dataset"].update(echo_factor=factor, paired_echo_factor=paired_factor)
     config = nanotron_config.get_config_from_dict(raw)
     path = tmp_path / "config.yaml"
     config.save_as_yaml(path)
     restored = nanotron_config.get_config_from_file(path)
     assert restored.data_stages[0].data.dataset.echo_factor == factor
+    assert restored.data_stages[0].data.dataset.paired_echo_factor == paired_factor
     assert restored.data_stages[0].data.dataset.catalog_stream == raw["data_stages"][0]["data"]["dataset"]["catalog_stream"]
     assert restored.model.model_config.modalities == raw["model"]["model_config"]["modalities"]
 
@@ -91,3 +92,6 @@ def test_derived_gpu_smoke_keeps_tiny_training_contract(tmp_path):
 def test_nanotron_rejects_invalid_echo_factor(factor):
     with pytest.raises(ValueError, match="positive integer"):
         AstroPT3StreamingDatasetsArgs(echo_factor=factor)
+    if factor is not None:
+        with pytest.raises(ValueError, match="paired_echo_factor must be a positive integer"):
+            AstroPT3StreamingDatasetsArgs(catalog_stream=TINY_CATALOG_STREAM, paired_echo_factor=factor)

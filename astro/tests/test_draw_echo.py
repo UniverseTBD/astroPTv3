@@ -8,6 +8,7 @@ import pytest
 import torch
 from legacy_fixture import TINY_CATALOG_STREAM, make_record
 
+from astropt3.configuration_astropt3 import DEFAULT_MODALITIES
 from astropt3.data import catalog_stream, nanotron_loader, telemetry
 from astropt3.data.echo import ECHO_METADATA, echo_draw
 from astropt3.data.nanotron_loader import (
@@ -179,6 +180,40 @@ def test_two_draws_never_mix_or_fetch_early_and_keep_tail(
         next(iterator)
 
 
+@pytest.mark.parametrize("single,paired", [(2, 12), (4, 4), (1, 1)])
+def test_paired_echo_keeps_exact_exposures_and_fresh_counts(
+    tiny_config, records, single, paired, monkeypatch, tmp_path,
+):
+    config = type(tiny_config)(**{**tiny_config.to_dict(), "modalities": [
+        *tiny_config.modalities, *[m for m in DEFAULT_MODALITIES if m["name"] in {"legacy_north_r", "Z"}],
+    ]})
+    # An ancillary scalar from DESI does not turn multiband North into a pair.
+    image = dict(_only(records[0], "image"), Z=0.2, ZWARN=0)
+    spectrum = _only(records[1], "spectrum")
+    pair = records[2]
+    monkeypatch.setenv(telemetry.TELEMETRY_DIR_ENV, str(tmp_path))
+    dataset = FiniteDraws(
+        config, 1, 512, catalog_stream=TINY_CATALOG_STREAM, draws=[[image, pair, spectrum]],
+        echo_factor=single, paired_echo_factor=paired,
+    )
+    expected = [_pack(config, [[image, spectrum]], 512), _pack(config, [[pair]], 512)]
+    keys = [_payload_key(batch) for batch in expected]
+    seen = Counter()
+    for batch in telemetry.instrument(dataset, stratified=True):
+        assert all(isinstance(value, torch.Tensor) for value in batch.values())
+        index = keys.index(_payload_key(batch))
+        step = telemetry.drain_step()
+        assert step["echo_index"] == seen[index]
+        assert step["echo_factor"] == (single, paired)[index]
+        assert step["paired_rows"] == index
+        assert step["fresh_paired_rows"] == (index if seen[index] == 0 else 0)
+        assert step["replayed_paired_rows"] == (index if seen[index] else 0)
+        assert torch.equal(batch["position_ids"], expected[index]["position_ids"])
+        seen[index] += 1
+    assert seen == {0: single, 1: paired}
+    assert dataset.fetched == [0]
+
+
 @pytest.mark.parametrize("factor", [1, 3])
 def test_empty_draw_helper(tiny_config, factor):
     assert list(echo_draw([], tiny_config, echo_factor=factor, seed=0)) == []
@@ -331,3 +366,7 @@ def test_builder_wires_echo_factor(tiny_config, factor):
     loader = build_astropt3_dataloader(args, tiny_config, 1, 200, 0)
     assert loader.dataset.echo_factor == (factor or 1)
     assert isinstance(loader, telemetry.TelemetryLoader) == (factor == 3)
+    args.paired_echo_factor = 12
+    loader = build_astropt3_dataloader(args, tiny_config, 1, 200, 0)
+    assert loader.dataset.paired_echo_factor == 12
+    assert isinstance(loader, telemetry.TelemetryLoader)

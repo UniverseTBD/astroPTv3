@@ -265,7 +265,7 @@ def test_packing_keeps_each_record_once_and_preserves_base_shuffle(tiny_config):
         tiny_config, 2, len(objects[0]), catalog_stream=TINY_CATALOG_STREAM
     )
     stream._epoch = 7
-    batches = list(stream._pack_records(iter(records)))
+    batches = [batch for _, batch in stream._pack_records(iter(records))]
     assert len(batches) == 2
     for index, batch in enumerate(batches):
         expected = stream.collator.collate_rows(
@@ -296,7 +296,7 @@ def test_unequal_objects_keep_emptiest_first_placement_across_flushes(tiny_confi
     stream._epoch = 7
     # Frozen factor-1 placements from the removed first-fitting/emptiest-row path.
     expected_rows = [[[0, 3], [1, 2, 4]], [[5, 8], [6, 7, 9]]]
-    batches = list(stream._pack_records(iter(records)))
+    batches = [batch for _, batch in stream._pack_records(iter(records))]
     assert len(batches) == len(expected_rows)
     for batch, rows in zip(batches, expected_rows, strict=True):
         packed = stream.collator.collate_rows([[objects[i] for i in row] for row in rows])

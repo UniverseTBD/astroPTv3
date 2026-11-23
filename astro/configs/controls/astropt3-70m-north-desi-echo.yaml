@@ -1,0 +1,154 @@
+# Legacy North × DESI EDR, paired-object echo pilot. For the matched control,
+# set echo_factor and paired_echo_factor both to 4 (keeps stratified packing).
+general:
+  project: astropt3
+  run: astropt3-70m-north-desi-echo
+  seed: 42
+  ignore_sanity_checks: true
+logging:
+  iteration_step_info_interval: 1
+  log_level: info
+  log_level_replica: info
+model:
+  ddp_bucket_cap_mb: 25
+  dtype: bfloat16
+  init_method:
+    std: 0.02
+  make_vocab_size_divisible_by: 1
+  model_config:
+    is_astropt3_config: true
+    jetformer_flow_steps: 8
+    jetformer_flow_hidden: 128
+    jetformer_flow_depth: 4
+    jetformer_flow_heads: 8
+    jetformer_noise_max: 0.1
+    jetformer_noise_min: 0.1
+    modalities:
+      - {name: legacy_north_g, family: image, source: legacy_north,
+         record_keys: [image], band: des-g, token_ids: [160, 161, 162],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96,
+         pre_flow_noise_max: 0.21}
+      - {name: legacy_north_r, family: image, source: legacy_north,
+         record_keys: [image], band: des-r, token_ids: [163, 164, 165],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96,
+         pre_flow_noise_max: 0.37}
+      - {name: legacy_north_z, family: image, source: legacy_north,
+         record_keys: [image], band: des-z, token_ids: [166, 167, 168],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96,
+         pre_flow_noise_max: 1.08}
+      - name: spectra
+        family: spectrum
+        source: desi
+        record_keys: [spectrum]
+        token_ids: [5, 6, 7]
+        input_size: 256
+        patch_size: 256
+        pos_type: continuous
+        pos_input_size: 1
+        max_positions: 1024
+        pre_flow_noise_max: 0.1
+    spiral: true
+    hidden_size: 512
+    num_hidden_layers: 23
+    num_attention_heads: 8
+    num_key_value_heads: 2
+    intermediate_size: 1536
+    max_position_embeddings: 4096
+    rope_theta: 100000.0
+    no_rope_layer: 4
+    rms_norm_eps: 1.0e-06
+    rope_interleaved: false
+    hidden_act: silu
+    attention_bias: false
+    initializer_range: 0.02
+    vocab_size: 256
+    pad_token_id: 0
+    bos_token_id: 1
+    eos_token_id: 1
+    tie_word_embeddings: false
+    use_cache: false
+    _attn_implementation: flash_attention_2
+    _use_qkv_packed: true
+    _use_doc_masking: true
+    _fused_rms_norm: true
+    _fused_rotary_emb: true
+    log_attn_probs: false
+parallelism:
+  dp: 1
+  pp: 1
+  tp: 1
+  context_parallel_size: 1
+  expert_parallel_size: 1
+  pp_engine: 1f1b
+  tp_mode: ALL_REDUCE
+  tp_linear_async_communication: false
+  recompute_layer: false
+data_stages:
+  - name: multimodal
+    start_training_step: 1
+    data:
+      dataset:
+        is_astropt3_streaming: true
+        echo_factor: 2
+        paired_echo_factor: 12
+        catalog_stream:
+          split: train
+          anchors:
+            - name: legacy
+              draw_weight: 1
+              repo: >-
+                UniverseTBD/mmu_ssl_legacysurvey_north@f634744d3c44dd4fde0dee3172d4887c5e3c31c0
+              decoder: legacy_image
+              record_key: image
+          catalogs:
+            - name: desi
+              repo: >-
+                UniverseTBD/mmu_desi_edr_sv3@9fd88ba48233cb9857701ce802a7eade2d4c4a88
+              decoder: desi_spectrum
+              record_key: spectrum
+          how: outer
+          min_catalogs: 2
+          radius_arcsec: 1.0
+          partitions_per_chunk: 1
+          worker_memory_limit: 32GiB
+      seed: 42
+      num_loading_workers: 4
+optimizer:
+  accumulate_grad_in_fp32: true
+  clip_grad: 1.0
+  learning_rate_scheduler:
+    learning_rate: 0.0003
+    lr_warmup_steps: 2000
+    lr_warmup_style: linear
+    lr_decay_style: cosine
+    lr_decay_steps: null
+    lr_decay_starting_step: null
+    min_decay_lr: 0.00003
+  optimizer_factory:
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    name: adamW
+    torch_adam_is_fused: true
+  weight_decay: 0.1
+  weight_decay_exclude_named_params:
+    - .*layernorm.*
+    - .*layer_norm.*
+  zero_stage: 1
+tokens:
+  sequence_length: 4096
+  train_steps: 10000
+  micro_batch_size: 16
+  batch_accumulation_per_replica: 1
+  val_check_interval: 100
+  limit_val_batches: 0
+  limit_test_batches: 0
+checkpoints:
+  checkpoints_path: ../astroPTv3_checkpoints/astropt3-70m-north-desi-echo
+  checkpoint_schedule: pythia
+  checkpoint_interval: 1000
+  save_initial_state: false
+  save_final_state: true
+tokenizer:
+  tokenizer_name_or_path: null
+profiler: null

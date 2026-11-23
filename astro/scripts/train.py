@@ -31,7 +31,7 @@ REPO = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = REPO / "astro/configs/nanotron/astropt3-70m.yaml"
 
 
-def validate_resume(resume_from: Path, model_config: dict) -> int:
+def validate_resume(resume_from: Path, model_config: dict, *, paired_echo_factor=None) -> int:
     step = (resume_from / "latest.txt").read_text().strip()
     # pi-lens-ignore: unchecked-throwing-call-python -- main reports invalid resume before creating outputs
     saved = json.loads((resume_from / step / "model_config.json").read_text())
@@ -43,7 +43,13 @@ def validate_resume(resume_from: Path, model_config: dict) -> int:
         if key not in {"modalities", "is_astropt3_config"} and key in saved and saved[key] != value:
             raise ValueError(f"Checkpoint model setting {key!r} differs from the selected YAML")
     saved_config = yaml.safe_load((resume_from / step / "config.yaml").read_text())
-    factor = saved_config["data_stages"][0]["data"]["dataset"].get("echo_factor", 1)
+    saved_dataset = saved_config["data_stages"][0]["data"]["dataset"]
+    saved_paired_factor = saved_dataset.get("paired_echo_factor")
+    if saved_paired_factor is not None:
+        validate_echo_factor(saved_paired_factor)
+    if saved_paired_factor != paired_echo_factor:
+        raise ValueError("Checkpoint paired_echo_factor differs from the selected YAML")
+    factor = saved_dataset.get("echo_factor", 1)
     validate_echo_factor(factor)
     return factor
 
@@ -70,6 +76,8 @@ def prepare_config(
     dataset = config["data_stages"][0]["data"]["dataset"]
     factor = dataset.get("echo_factor", 1) if echo_factor is None else echo_factor
     validate_echo_factor(factor)
+    if (paired_factor := dataset.get("paired_echo_factor")) is not None:
+        validate_echo_factor(paired_factor)
     if "crossmatch_desi" in dataset:
         raise ValueError("crossmatch_desi is removed; use an explicit catalog_stream")
     model = config["model"]["model_config"]
@@ -147,6 +155,9 @@ class Throughput:
         for prefix in ("fresh", "replayed"):
             for key in ("micro_batches", "tokens_nonpad", "rows"):
                 metrics[f"data/{prefix}_{key}"] = record[f"{prefix}_{key}"]
+        if "paired_rows" in record:
+            for prefix in ("", "fresh_", "replayed_"):
+                metrics[f"data/{prefix}paired_rows"] = record[f"{prefix}paired_rows"]
         total = sum(record["loss_tokens"].values())
         for name in self.modality_names:
             count = record["loss_tokens"].get(name, 0)
@@ -186,7 +197,10 @@ def main():
     output = args.output.resolve()
     try:
         baseline = yaml.safe_load(args.config_file.read_text())
-        resume_factor = validate_resume(args.resume_from, baseline["model"]["model_config"]) if args.resume_from else None
+        paired_factor = baseline["data_stages"][0]["data"]["dataset"].get("paired_echo_factor")
+        resume_factor = validate_resume(
+            args.resume_from, baseline["model"]["model_config"], paired_echo_factor=paired_factor,
+        ) if args.resume_from else None
         config = prepare_config(
             baseline, output, args.resume_from,
             args.echo_factor if args.echo_factor is not None else resume_factor,
@@ -246,6 +260,8 @@ def main():
             "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         },
     }
+    if paired_factor is not None:
+        state["paired_echo_factor"] = paired_factor
     try:
         # Disable only Nanotron's built-in tracker; retain its normal training loop.
         trainer = LoggedTrainer(str(effective), benchmark=True)

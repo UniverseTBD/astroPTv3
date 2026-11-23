@@ -63,8 +63,8 @@ def reshuffle_spans(batch, token_ids, *, identity, seed):
     return echoed
 
 
-def echo_draw(batches, config, *, echo_factor, seed):
-    """Shuffle exactly N exposures per batch, retaining only this draw's payloads.
+def echo_draw(batches, config, *, echo_factor, seed, batch_factors=None):
+    """Shuffle exactly the requested exposures per batch within one draw.
 
     Metadata is worker-to-main only: TelemetryLoader removes it before training.
     Freshness/index follow actual presentation order, not the shuffled tickets.
@@ -72,8 +72,16 @@ def echo_draw(batches, config, *, echo_factor, seed):
     validate_echo_factor(echo_factor)
     registry = config.modality_registry()
     token_ids = {name: registry.get_config(name).token_ids for name in registry.names()}
-    order = list(range(len(batches))) * echo_factor
-    if echo_factor > 1:
+    if batch_factors is None:
+        batch_factors = [echo_factor] * len(batches)
+        order = list(range(len(batches))) * echo_factor
+    else:
+        if len(batch_factors) != len(batches):
+            raise ValueError("Expected one echo factor per batch")
+        for factor in set(batch_factors):
+            validate_echo_factor(factor)
+        order = [index for index, factor in enumerate(batch_factors) for _ in range(factor)]
+    if len(order) > len(batches):
         random.Random(seed).shuffle(order)
     uses = [0] * len(batches)
     for batch_index in order:
@@ -84,5 +92,5 @@ def echo_draw(batches, config, *, echo_factor, seed):
             reshuffle_spans(batch, token_ids, identity=f"{batch_index}:{index}", seed=seed)
             if index else dict(batch)
         )
-        delivered[ECHO_METADATA] = (index, echo_factor)
+        delivered[ECHO_METADATA] = (index, batch_factors[batch_index])
         yield delivered

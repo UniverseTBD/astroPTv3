@@ -306,16 +306,27 @@ CLI > checkpoint factor on resume > recipe/default. It is saved in checkpoint YA
 - The cache adds **one packed draw per worker**, on top of normal prefetch, and
   increases startup latency. Echoes do not fetch data; prefetch can still fetch
   ahead. Stopping mid-draw can leave uneven exposure counts.
-- Remove obsolete `ar_replicas` / `replica_placement` keys from older YAMLs.
+- **Paired-object ablation:** set `paired_echo_factor` to a positive integer
+  to pack paired and other objects separately within each draw. A pair has
+  patch spans from at least two survey sources; bands from one survey and
+  scalar labels do not make a pair. `echo_factor` applies to the other
+  objects. Each stratum can add a padded tail. Leave `paired_echo_factor`
+  unset for standard mixed packing, or set both factors to 4 for a control
+  that keeps the same stratified packing. The [70M North × DESI EDR
+  recipe](../configs/controls/astropt3-70m-north-desi-echo.yaml) tests 2/12
+  for 10,000 steps on the overlap footprint, with an outer join to retain
+  single-source examples. The same recipe with 4/4 isolates the echo change.
 
 Telemetry reports processed and `fresh_*` / `replayed_*` counts and zero-based
-`echo_index`. **Fresh means first use of a delivered batch, not unique objects,
-reads, or bytes.** Rates share a wall-time denominator, excluding ten warmup
+`echo_index`. `paired_rows` and its fresh/replayed splits count paired
+objects when stratification is enabled. **Fresh means first use of a delivered
+batch, not unique objects, reads, or bytes.** Rates share a wall-time denominator, excluding ten warmup
 updates after start/resume but including loading/checkpoint stalls. W&B receives
 only metrics/config: paths, provenance, code, data, and machine metadata stay local.
 
-Resume with the matching `--config-file`, not the default. Model settings and
-modalities are validated; weights/optimizer/scheduler/RNG restore, but **no data
+Resume with the matching `--config-file`, not the default. Model settings,
+modalities and `paired_echo_factor` are validated; weights/optimizer/scheduler/RNG
+restore, but **no data
 cursor or pending echoes are saved**. Ordinary Nanotron launches use their
 supplied YAML.
 
