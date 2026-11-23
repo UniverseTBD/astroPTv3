@@ -34,12 +34,16 @@ def test_explicit_dataset_config_defaults_to_no_echoing():
 
 
 @pytest.mark.parametrize("kwargs", [
-    {}, {"catalog_stream": None}, {"catalog_stream": {}},
-    {"catalog_stream": {"catalogs": []}}, {"catalog_stream": []},
+    {}, {"catalog_stream": None}, {"catalog_stream": {}}, {"catalog_stream": []},
 ])
 def test_nanotron_requires_explicit_catalogs(kwargs):
     with pytest.raises(ValueError, match="catalog_stream.catalogs"):
         AstroPT3StreamingDatasetsArgs(**kwargs)
+
+
+def test_nanotron_accepts_anchor_only_stream():
+    stream = {**TINY_CATALOG_STREAM, "catalogs": []}
+    assert AstroPT3StreamingDatasetsArgs(catalog_stream=stream).catalog_stream["catalogs"] == []
 
 
 @pytest.mark.parametrize("selected", [False, True])

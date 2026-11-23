@@ -215,13 +215,6 @@ def main():
     class LoggedTrainer(DistributedTrainer):
         step_metrics = None
 
-        def save_checkpoint(self):
-            stage = self.metadata.current_stage
-            stage.consumed_tokens_per_dataset_folder = {
-                "catalog-stream": stage.consumed_train_samples * self.sequence_length
-            }
-            return super().save_checkpoint()
-
         def training_step(self, dataloader):
             result = super().training_step(dataloader)
             outputs, loss_avg, _, _ = result

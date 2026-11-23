@@ -355,6 +355,9 @@ def test_50step_live_run_and_checkpoint_conversion(nt, tmp_path_factory):
 
     checkpoint = workdir / "checkpoints" / "50"
     assert (checkpoint / "model_config.json").exists()
+    # resume validates TrainingMetadata's token ledger against consumed_tokens_total
+    meta = nt.serialize.load_meta(parallel_context=nt.parallel_context, root_folder=checkpoint).metas
+    assert meta.data_stages[0].consumed_tokens_per_dataset_folder == {"catalog-stream": meta.consumed_tokens_total}
 
     # convert in a subprocess: the converter builds its own ParallelContext
     save_path = workdir / "hf"
