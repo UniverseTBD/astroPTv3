@@ -14,7 +14,11 @@ import yaml
 from legacy_fixture import make_record, nested_frame
 from PIL import Image
 
-from astropt3.configuration_astropt3 import DEFAULT_MODALITIES, AstroPT3Config
+from astropt3.configuration_astropt3 import (
+    DEFAULT_MODALITIES,
+    LEGACY_SOUTH_MODALITIES,
+    AstroPT3Config,
+)
 from astropt3.data import catalog_stream as streaming
 from astropt3.data import nanotron_loader as loader
 from astropt3.data.packing import ObjectSequencer
@@ -26,8 +30,8 @@ HSC_BANDS = {f"hsc_{band}" for band in "grizy"}
 
 @pytest.mark.parametrize("count", [1, 4])
 def test_real_lsdb_stream_decodes_local_catalogs(recipe, monkeypatch, tmp_path, count):
-    from lsdb import open_catalog
     from lsdb.loaders.dataframe.from_dataframe import from_dataframe
+    from lsdb.loaders.hats.read_hats import open_catalog
     from lsdb.streams.catalog_streams import (
         CrossMatchStream,
         InfiniteStream,
@@ -254,6 +258,28 @@ def test_catalog_count_projection_and_finite_draws(recipe, offline, count):
     assert stream.stars[0].nested == expected_nested
     assert offline.clusters[0]["threads_per_worker"] == spec["partitions_per_chunk"]
     assert offline.clusters[0]["memory_limit"] == spec["worker_memory_limit"]
+
+
+def test_south_draw_without_quality_planes(offline):
+    repo = "offline/south"
+    config = AstroPT3Config(modalities=LEGACY_SOUTH_MODALITIES)
+    stream = streaming.CatalogStream({"anchors": [{
+        "name": "south", "repo": repo, "decoder": "legacy_south_image",
+        "record_key": "legacy_south_image", "draw_weight": 1,
+    }], "catalogs": []}, config)
+    frame = nested_frame([{"object_id": "1", "image": {
+        "band": [f"des-{band}" for band in "griz"],
+        "flux": np.ones((4, 160, 160), dtype=np.float32).tolist(),
+        "scale": [0.262] * 4,
+    }}], ("image",))
+    offline.frames = lambda: [frame]
+    with closing(stream.draws(seed=0, rank=0, worker_id=0)) as draws:
+        _, records = next(draws)
+        record, = records
+    assert offline.opened == [(f"hf://datasets/{repo}", [
+        "object_id", "ra", "dec", "image.band", "image.flux", "image.scale",
+    ])]
+    assert record["legacy_south_image"]["band"] == ["des-g", "des-r", "des-i", "des-z"]
 
 
 def test_draws_drop_hf_array2d_extension_before_opening(recipe, offline):

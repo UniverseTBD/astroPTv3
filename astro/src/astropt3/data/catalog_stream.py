@@ -34,7 +34,7 @@ from .scalar_registry import _transforms
 # Decoder names describe verified payload contracts, not arbitrary calibrations.
 _PROFILES = {
     "legacy_image": ("image", ("band", "flux"), "image"),
-    "legacy_south_image": ("image", ("band", "flux", "ivar", "mask", "scale"), "image"),
+    "legacy_south_image": ("image", ("band", "flux", "scale"), "image"),
     "hsc_image": ("image", ("band", "flux", "scale"), "image"),
     "desi_spectrum": ("spectrum", ("flux", "lambda", "mask"), "spectrum"),
     "sdss_spectrum": ("spectrum", ("flux", "lambda", "mask"), "spectrum"),

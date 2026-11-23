@@ -15,11 +15,11 @@ Inspected the schema and all four rows of [order 10, pixel 11359295][shard], 2,8
 | `scale`, `psf_fwhm` | Four float32 values, respectively arcsec/pixel (0.262 in every band) and arcsec. Row 0 PSF widths: 1.2570, 1.1989, 1.1649, 1.6706. Seeing is metadata, not a flux multiplier. |
 | `mask` | Four boolean 160×160 planes. **True = clean**, not bad. The builder clears pixels with any of bits 0–7, 11, 14, 15; the [MMU exporter][export] repeats the clean sky mask for each band. This is not the top-level `object_mask` (segmentation) or the `rgb`/`blobmodel` preview. |
 
-Row 0 has 13,820 true mask pixels per band out of 25,600, with positive ivar everywhere. Using only ivar would admit 11,780 flagged pixels per plane. Reproduce directly with `pytest -m network tests/test_legacy_south.py`; the canary reads the pinned shard, not a dataset-viewer preview.
+Row 0 has 13,820 true mask pixels per band out of 25,600, with positive ivar everywhere. The loader does not use these quality planes. Run `pytest -m network tests/test_legacy_south.py` to check the image fields it does read against the pinned shard.
 
 ## Decode and pack
 
-Project `image.{band,flux,mask,ivar,scale}`. Reject unexpected bands/order, shape, nonboolean mask or wrong scale. A usable pixel is `mask & isfinite(flux) & isfinite(ivar) & (ivar > 0)`. Bad values are replaced with zero before normalization and carried in a **separate** `fill_mask` (True = fill); a valid zero or negative flux is a measurement. The sequencer crops flux and mask together (`[32:128,32:128]`), applies the checkpoint's physical band normalization (identity rescale, bright clamp, `asinh(flux / image_norm_divisor)`), and uses the existing deterministic channel-noise fill only on invalid pixels. Ivar gates coverage; it does not reweight the loss. North keeps its existing zero-as-no-data behavior. Each filter yields 144 patch-8 tokens of 64 floats and two delimiters, for **585** tokens in a South-only image record including BOS.
+Project `image.{band,flux,scale}`. Reject unexpected band order, shape, or scale. Convert non-finite flux to zero. Like North, the sequencer treats exact zeros as missing and fills them with deterministic channel noise after the 96×96 center crop and physical normalization. Finite negative flux is retained. Pixels with nonzero finite flux are used even if `mask` or `ivar` would flag them. Each filter yields 144 patch-8 tokens of 64 floats and two delimiters, for **585** tokens in a South-only image record including BOS.
 
 ## Selection and scalar quality
 

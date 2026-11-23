@@ -40,8 +40,6 @@ def prepare(out):
         name = repo.split('@')[0].split('/')[-1]
         path = f'datasets/{repo}/{name}/dataset/Norder=4/Dir=0/Npix={pixel}.parquet'
         cols = ['object_id', 'ra', 'dec', 'image.band', 'image.scale', 'image.flux']
-        if side == 'south':
-            cols += ['image.mask', 'image.ivar']
         start = perf_counter()
         with fs.open(path, cache_type='none', block_size=65536) as f:
             pf = pq.ParquetFile(f)

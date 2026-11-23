@@ -144,20 +144,22 @@ def _row_from_map_rows(mapped: Mapping, nested: dict[str, tuple[str, ...]]) -> d
     return row
 
 
-def decode_legacy_image(value: Any) -> dict:
+def decode_legacy_image(value: Any, *, shape: tuple[int, int, int] = IMAGE_SHAPE) -> dict:
     """Decode one LegacySurvey image payload to the ``ObjectSequencer`` contract."""
     image = _as_mapping(value)
     bands = [str(band) for band in image.get("band", ())]
-    flux = _stack_nested(image.get("flux")).astype(np.float32, copy=False)
-    if flux.shape != IMAGE_SHAPE:
-        raise ValueError(f"image flux has shape {flux.shape}, expected {IMAGE_SHAPE}")
-    if len(bands) != IMAGE_SHAPE[0]:
-        raise ValueError(f"image has {len(bands)} bands, expected {IMAGE_SHAPE[0]}")
+    if (values := image.get("flux")) is None:
+        raise ValueError("image is missing flux")
+    flux = _stack_nested(values).astype(np.float32, copy=False)
+    if flux.shape != shape:
+        raise ValueError(f"image flux has shape {flux.shape}, expected {shape}")
+    if len(bands) != shape[0]:
+        raise ValueError(f"image has {len(bands)} bands, expected {shape[0]}")
     return {"flux": flux, "band": bands}
 
 
 def decode_legacy_south_image(value: Any) -> dict:
-    """Decode the DR10 South griz cube. MMU's boolean mask is True for clean pixels."""
+    """Decode the DR10 South griz cube with Legacy's zero-as-missing rule."""
     image = _as_mapping(value)
     bands = list(image.get("band", ()))
     if bands != ["des-g", "des-r", "des-i", "des-z"]:
@@ -165,22 +167,10 @@ def decode_legacy_south_image(value: Any) -> dict:
     scale = np.asarray(image.get("scale"), dtype=np.float32)
     if scale.shape != (4,) or not np.allclose(scale, 0.262, rtol=1e-6, atol=0):
         raise ValueError("Legacy South pixel scale must be 0.262 arcsec/pixel in every band")
-
-    def cube(field):
-        if image.get(field) is None:
-            raise ValueError(f"Legacy South image is missing {field}")
-        array = _stack_nested(image[field])
-        if array.shape != (4, 160, 160):
-            raise ValueError(f"Legacy South {field} has shape {array.shape}, expected (4, 160, 160)")
-        return array
-
-    flux = cube("flux").astype(np.float32, copy=False)
-    clean = cube("mask")
-    if clean.dtype != np.bool_:
-        raise ValueError("Legacy South mask must be boolean (True = clean)")
-    ivar = cube("ivar")
-    good = clean & np.isfinite(flux) & np.isfinite(ivar) & (ivar > 0)
-    return {"flux": np.where(good, flux, np.float32(0)), "band": bands, "fill_mask": ~good}
+    decoded = decode_legacy_image(image, shape=(4, 160, 160))
+    flux = decoded["flux"]
+    decoded["flux"] = np.where(np.isfinite(flux), flux, np.float32(0))
+    return decoded
 
 
 def _decode_spectrum(value: Any) -> dict:
