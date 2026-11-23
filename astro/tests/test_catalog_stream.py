@@ -25,9 +25,14 @@ HSC_BANDS = {f"hsc_{band}" for band in "grizy"}
 
 
 @pytest.mark.parametrize("count", [1, 4])
-def test_real_lsdb_stream_decodes_local_catalogs(recipe, monkeypatch, count):
+def test_real_lsdb_stream_decodes_local_catalogs(recipe, monkeypatch, tmp_path, count):
+    from lsdb import open_catalog
     from lsdb.loaders.dataframe.from_dataframe import from_dataframe
-    from lsdb.streams.catalog_streams import CrossMatchStream, InfiniteStream
+    from lsdb.streams.catalog_streams import (
+        CrossMatchStream,
+        InfiniteStream,
+        _restrict_to_footprint,
+    )
 
     spec, config = _case(recipe, count)
     spec["partitions_per_chunk"] = 1
@@ -35,13 +40,32 @@ def test_real_lsdb_stream_decodes_local_catalogs(recipe, monkeypatch, count):
     for catalog in _catalogs(spec):
         payload = "image" if catalog["decoder"].endswith("image") else "spectrum"
         row = {"ra": 10.0, "dec": 0.0, **_row({"anchors": [catalog], "catalogs": []})}
-        catalogs[f"hf://datasets/{catalog['repo']}"] = from_dataframe(
-            nested_frame([row], (payload,)), catalog_name=catalog["name"],
-        )
-    monkeypatch.setattr(streaming, "open_catalog", lambda url, **kwargs: catalogs[url])
+        if catalog["decoder"] == "hsc_image":
+            row["image"]["ivar"] = row["image"]["flux"]  # Make the unused leaf present on disk.
+        source = from_dataframe(nested_frame([row], (payload,)), catalog_name=catalog["name"])
+        url = f"hf://datasets/{catalog['repo']}"
+        if catalog["decoder"] == "hsc_image":
+            # Read a real Parquet projection for the HSC partner, which needs no margin for a left join.
+            catalog["how"] = "left"
+            path = tmp_path / catalog["name"]
+            source.write_catalog(path, as_collection=False, progress_bar=False, should_write_skymap=False)
+            catalogs[url] = path
+        else:
+            catalogs[url] = source
+
+    def open_local(url, **kwargs):
+        source = catalogs[url]
+        if isinstance(source, Path):
+            catalog = open_catalog(source, **kwargs)
+            assert catalog.meta.get_subcolumns() == ["image.band", "image.flux", "image.scale"]
+            return catalog
+        return source
+
+    monkeypatch.setattr(streaming, "open_catalog", open_local)
     monkeypatch.setattr(streaming, "Client", lambda cluster: nullcontext())
     monkeypatch.setattr(streaming, "CrossMatchStream", CrossMatchStream)
     monkeypatch.setattr(streaming, "InfiniteStream", InfiniteStream)
+    monkeypatch.setattr(streaming, "_restrict_to_footprint", _restrict_to_footprint)
     stream = streaming.CatalogStream(spec, config)
     with closing(stream.draws(seed=0, rank=0, worker_id=0)) as draws:
         _, records = next(draws)
@@ -216,7 +240,11 @@ def test_catalog_count_projection_and_finite_draws(recipe, offline, count):
         decoder = catalog["decoder"]
         payload = [] if decoder == "scalars" else ["image" if decoder.endswith("image") else "spectrum"]
         assert url == f"hf://datasets/{catalog['repo']}"
-        assert columns == ["object_id", "ra", "dec", *payload, *catalog.get("scalar_columns", {}).values()]
+        read_payload = {
+            "legacy_image": ["image.band", "image.flux"],
+            "hsc_image": ["image.band", "image.flux", "image.scale"],
+        }.get(decoder, payload)
+        assert columns == ["object_id", "ra", "dec", *read_payload, *catalog.get("scalar_columns", {}).values()]
         if payload:
             suffix = "" if i == 0 else f"_{catalog['name']}"
             fields = (("band", "flux") if decoder == "legacy_image" else
