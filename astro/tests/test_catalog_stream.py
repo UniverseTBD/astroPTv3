@@ -90,6 +90,15 @@ def _case(recipe, count=4):
     return spec, AstroPT3Config(modalities=modalities)
 
 
+@pytest.mark.parametrize("count, override, expected", [(1, None, 1), (4, None, 4), (1, 2, 2)])
+def test_partition_chunk_defaults(recipe, count, override, expected):
+    spec, config = _case(recipe, count)
+    spec.pop("partitions_per_chunk", None)
+    if override is not None:
+        spec["partitions_per_chunk"] = override
+    assert streaming.CatalogStream(spec, config).spec["partitions_per_chunk"] == expected
+
+
 def _png(index, size=256):
     pixels = (np.arange(size * size * 3, dtype=np.uint32).reshape(size, size, 3) * (index + 1)) % 256
     buffer = io.BytesIO()

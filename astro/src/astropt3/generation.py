@@ -23,6 +23,7 @@ import torch
 import torch.nn.functional as F
 
 from .data.packing import ObjectSeq, PackedCollator
+from .data.scalar_registry import constrain_scalar_sample
 from .flows import flow_object_ids
 
 
@@ -133,7 +134,9 @@ def generate(
             generator=generator,
         )
         # Flows invert only after the entire latent span is sampled; scalar
-        # GMMs predict raw normalized values with no flow (ADR 0008).
+        # GMMs predict normalized values with no flow (ADR 0008).
+        if m_t in model.scalar_names:
+            z = constrain_scalar_sample(m_t, z)
         values[m_t] = torch.cat([values[m_t], z.unsqueeze(1)], dim=1)
 
     for m in generate_modalities - model.scalar_names:

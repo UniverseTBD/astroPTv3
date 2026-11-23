@@ -26,9 +26,8 @@ Set `pre_flow_noise_max` on individual patch modalities in `modalities`
 (HF YAML) or `model.model_config.modalities` (Nanotron YAML). Omitted entries
 use zero; scalars cannot use pre-flow noise. During training, Gaussian noise
 is added to normalized patch values before the flow. Its standard deviation
-cosine-decays from `pre_flow_noise_max` to `pre_flow_noise_max · 3/64`,
-using the floor-to-peak ratio from [JetFormer's image–text recipe](https://arxiv.org/html/2411.19722v2#S4).
-The noised flow pass supplies the latents and logdet for the likelihood.
+cosine-decays from `pre_flow_noise_max` to zero at the final training step.
+The same flow pass supplies the latents and logdet for the likelihood.
 
 The [70M Nanotron recipe](../configs/nanotron/astropt3-70m.yaml) also adds
 Gaussian noise with constant σ = 0.1 to the patch latents fed into the

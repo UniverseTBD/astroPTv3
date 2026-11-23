@@ -169,6 +169,26 @@ def test_unconditional_generation_covers_scalars(single_band_config):
     assert all(torch.isfinite(v).all() for v in sampled.values())
 
 
+def test_sampled_galaxy_zoo_fractions_leave_valid_probability_for_omitted_answer(monkeypatch):
+    from astropt3 import AstroPT3Config, AstroPT3Model, generation
+    from astropt3.data.packing import ObjectSequencer
+
+    name = "gwh_gz_smooth-or-featured"
+    config = AstroPT3Config(
+        hidden_size=32, intermediate_size=64, num_hidden_layers=1,
+        num_attention_heads=4, num_key_value_heads=2,
+        modalities=[{"name": name, "family": "scalar", "source": "galaxies_with_hats",
+                     "input_size": 2, "patch_size": 1, "record_keys": ["smooth", "featured"]}],
+    )
+    model = AstroPT3Model(config)
+    template = ObjectSequencer(config).build({"object_id": "fixture", "smooth": 0.4, "featured": 0.5})
+    monkeypatch.setattr(generation, "sample_gmm", lambda *args, **kwargs: torch.tensor([[-0.2, 0.6], [-2.0, -0.5]]))
+    samples = generation.generate(model, template, {name}, n=2)[name]
+    fractions = scalar_inverse(name, samples[:, 0])
+    torch.testing.assert_close(fractions, torch.tensor([[1 / 3, 2 / 3], [0.0, 0.25]]))
+    assert (fractions >= 0).all() and (1 - fractions.sum(dim=-1) >= 0).all()
+
+
 def test_scalar_head_metrics(single_band_model, single_band_sequencer):
     """Model-side: given objects whose Z span is pinned last, score the head."""
     from legacy_fixture import record_stream
@@ -206,6 +226,11 @@ def test_scalar_predicates_ranges_and_quality_gates():
     from astropt3.data.scalar_registry import scalar_valid
 
     good = {"sdss_ZWARNING": 0.0}
+    assert scalar_valid("sdss_Z", [-0.01], good)
+    assert not scalar_valid("sdss_Z", [-1.0], good)
+    assert not scalar_valid("sdss_Z", [-0.999999999], good)  # rounds to -1 in fp32
+    assert not scalar_valid("Z", [0.3], {"ZWARN": -1})
+    assert not scalar_valid("sdss_Z", [0.3], {"sdss_ZWARNING": -1})
     assert scalar_valid("sdss_vdisp", [150.0], good)
     assert not scalar_valid("sdss_vdisp", [0.0], good)  # 0 = no measurement
     assert not scalar_valid("sdss_vdisp", [850.0], good)  # SDSS cap

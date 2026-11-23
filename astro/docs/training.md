@@ -148,9 +148,9 @@ checkpoints:
   resume_checkpoint_path: <checkpoints dir>   # reads latest.txt
 ```
 
-The run restores model/optimizer/scheduler/RNG **and nothing else**. The
-LSDB stream is cursorless: resume opens a fresh stream and records may be
-revisited immediately. There is no exact-sequence continuation, no replay
+The run restores model/optimizer/scheduler state and the RNG state on the
+same TP/DP topology. The LSDB stream is cursorless: resume opens a fresh
+stream and records may be revisited immediately. There is no exact-sequence continuation, no replay
 audit, and no worker-count constraint on resume.
 
 Resume needs a recipe whose modalities match the checkpoint's. The runner
@@ -272,6 +272,11 @@ and/or `scalar_columns` (**record key → flat catalog column**). Keep existing
 token IDs frozen; new names need non-colliding IDs and sufficient `vocab_size`.
 
 North and [DR10 South](legacy-south.md) each anchor an LSDB star with SDSS, DESI, HSC and galaxies-with-hats outer joins and a PROVABGS left join at 1″. The [pinned Galaxies train collection](https://huggingface.co/datasets/Smith42/galaxies-with-hats/tree/1a2b1ebbbe06c67a15f49385643ab711c5824a0d/train) has a 10″ margin for cross-partition matches. `min_catalogs: 3` selects each anchor's sky where at least two outer partners have coverage. It does not count the alternative anchor, left-only partners, or modalities on a row. Missing modalities are omitted; right-only rows stay separate, and rows with no usable modalities are dropped.
+
+For anchor-only streaming, set `catalogs: []` and `min_catalogs: 1`. When
+omitted, `partitions_per_chunk` defaults to 1 for anchor-only streams and 4
+for joins. Native Nanotron uses one catalog reader group per DP replica and
+broadcasts packed batches to the other TP ranks in that replica.
 
 Scalars need registered transforms (`data/scalar_registry.py`). Values outside `VALID_RANGES` or missing or failing `QUALITY_GATES` flags omit the scalar span. Gated scalars (e.g. DESI `Z`, gated on `ZWARN`) need flag columns from the same catalog. North and South have separate reddening and photometry scalars; galaxies-with-hats supplies a display RGB image and Galaxy Zoo vote fractions.
 

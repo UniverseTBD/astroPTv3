@@ -241,7 +241,11 @@ class CatalogStream:
     def __init__(self, spec, config):
         if not isinstance(spec, dict) or set(spec) - {*_DEFAULTS, "anchors", "catalogs", "min_catalogs", "split"}:
             raise ValueError("catalog_stream has unknown settings or is not a mapping")
-        self.spec = spec = {**_DEFAULTS, "min_catalogs": 1, **copy.deepcopy(spec)}
+        # Concatenating multiple unjoined image partitions can exceed Arrow's offset limit.
+        chunk_default = 1 if spec.get("catalogs") == [] else _DEFAULTS["partitions_per_chunk"]
+        self.spec = spec = {
+            **_DEFAULTS, "min_catalogs": 1, "partitions_per_chunk": chunk_default, **copy.deepcopy(spec),
+        }
         anchors = spec.get("anchors")
         if not isinstance(anchors, list) or not anchors or not all(isinstance(c, dict) for c in anchors):
             raise ValueError("catalog_stream.anchors must be a nonempty list of catalogs with draw_weight")

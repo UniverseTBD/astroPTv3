@@ -113,8 +113,9 @@ def test_noise_curriculum_perturbs_train_only(single_band_config, jet_batch):
 @pytest.mark.parametrize("modality, sigma_max", [("legacy_north_g", 0.4), ("spectra", 0.1)])
 @pytest.mark.parametrize("training, frac, scale", [
     (True, -0.1, 1.0),
-    (True, 1 / 3, 195 / 256),
-    (True, 1.0, 3 / 64),
+    (True, 1 / 3, 0.75),
+    (True, 1.0, 0.0),
+    (True, 1.1, 0.0),
     (False, 0.0, 0.0),
 ])
 def test_pre_flow_noise_scores_noisy_values(

@@ -195,6 +195,7 @@ def smoke_config(nt, workdir):
     stage["name"] = "lsdb-experimental"
     stage["data"]["num_loading_workers"] = 0
     stage["data"]["dataset"]["echo_factor"] = 1
+    stage["data"]["dataset"]["is_astropt3_streaming"] = False  # Loader dispatch, not this flag, sets the ledger.
     config["parallelism"]["dp"] = 1  # the recipe's cluster DP; the smoke run uses one GPU
     config["optimizer"]["zero_stage"] = 0
     config["optimizer"]["learning_rate_scheduler"].update(lr_warmup_steps=10, lr_decay_steps=40)
@@ -288,14 +289,14 @@ def assert_loss_metrics(nt_out, hf_out, config, flat):
             assert f"{family}_family_loss" not in metrics
 
 
-@pytest.mark.parametrize("training", [False, True])
-def test_forward_loss_parity(nt, matched_models, training):
+@pytest.mark.parametrize("training, frac", [(False, 1 / 3), (True, 1 / 3), (True, 1.0)])
+def test_forward_loss_parity(nt, matched_models, training, frac):
     hf_model, nt_model, nt_config, hf_config = matched_models
     flat = micro_batch(hf_config)
     names = hf_config.modality_registry().names()
     for model in (hf_model, nt_model):
         model.train(training)
-        model.set_jet_noise_frac(1 / 3)
+        model.set_jet_noise_frac(frac)
     try:
         with torch.no_grad():
             torch.manual_seed(17)
@@ -364,6 +365,7 @@ def test_50step_live_run_and_checkpoint_conversion(nt, tmp_path_factory):
     assert losses[-1] < losses[0] - 1.0, f"nanotron smoke did not learn: {losses[0]:.4f} -> {losses[-1]:.4f}"
 
     checkpoint = workdir / "checkpoints" / "50"
+    assert (checkpoint.parent / "latest.txt").read_text().strip() == "50"
     assert (checkpoint / "model_config.json").exists()
     # resume validates TrainingMetadata's token ledger against consumed_tokens_total
     meta = nt.serialize.load_meta(parallel_context=nt.parallel_context, root_folder=checkpoint).metas
@@ -444,7 +446,7 @@ def test_categorical_scalar_parity_and_conversion(nt, categorical_label):
     with torch.no_grad():
         nt_out = nt_model(**flat)
         hf_out = hf_model(**regroup(flat, names))
-    assert nt_out["test_label_loss"].item() == pytest.approx(hf_out.modality_losses["test_label"].item(), rel=REL_TOL)
+    assert_loss_metrics(nt_out, hf_out, nt_config, flat)
     assert nt_out["loss"].item() == pytest.approx(hf_out.loss.item(), rel=REL_TOL)
     hf_back = AstroPT3Model(hf_config)
     torch.nn.Module.cuda(hf_back)

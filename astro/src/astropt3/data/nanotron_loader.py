@@ -16,6 +16,7 @@ import httpx
 import numpy as np
 import pandas as pd
 import torch
+import torch.distributed as dist
 
 from ..configuration_astropt3 import AstroPT3Config
 from .echo import echo_draw, validate_echo_factor
@@ -371,3 +372,38 @@ def build_astropt3_dataloader(
         multiprocessing_context=multiprocessing_context,
     )
     return instrument(loader, echo_factor=echo_factor)
+
+
+def share_tp_batches(loader_factory, tp_group, world_group):
+    """Read one stream per DP replica, sharing each flat batch across TP ranks."""
+    source = dist.get_global_rank(tp_group, 0)
+    is_source = dist.get_rank(tp_group) == 0
+    device = torch.device("cuda" if dist.get_backend(tp_group) == "nccl" else "cpu")
+    failed = torch.zeros((), device=device, dtype=torch.int32)
+    batches = None
+    while True:
+        batch: dict[str, torch.Tensor] = {}
+        header: list[list[tuple[str, torch.Size, torch.dtype]] | None] = [None]
+        error = None
+        if is_source:
+            try:
+                if batches is None:
+                    batches = iter(loader_factory())
+                batch = {k: v.to(device, non_blocking=True).contiguous() for k, v in next(batches).items()}
+                header[0] = [(k, v.shape, v.dtype) for k, v in batch.items()]
+            except Exception as exc:
+                error = exc
+        # Fail across DP replicas too, before any rank enters model collectives.
+        failed.fill_(error is not None)
+        dist.all_reduce(failed, op=dist.ReduceOp.MAX, group=world_group)
+        if failed.item():
+            raise RuntimeError("An AstroPT3 catalog reader failed before broadcasting its batch") from error
+
+        dist.broadcast_object_list(header, src=source, group=tp_group, device=device)
+        if not is_source:
+            assert header[0] is not None
+            batch = {k: torch.empty(shape, dtype=dtype, device=device) for k, shape, dtype in header[0]}
+        for tensor in batch.values():
+            if tensor.numel():
+                dist.broadcast(tensor, src=source, group=tp_group)
+        yield batch

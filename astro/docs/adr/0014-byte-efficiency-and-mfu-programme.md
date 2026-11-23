@@ -1048,7 +1048,8 @@ scalars (48 modalities, ids to 147, `vocab_size: 256` for headroom).
 *One predicate for every scalar.* `scalar_registry.scalar_valid` is the single
 gate `has_modality` and the sequencer use: every value finite and inside the
 scalar's open `VALID_RANGES` interval, and every `QUALITY_GATES` flag present
-and at most its limit. A missing flag fails. `CatalogStream` rejects a recipe
+and passing its check. Redshift warning bitmasks must equal zero; other
+quality fields must be at or below their limits. A missing flag fails. `CatalogStream` rejects a recipe
 whose gated scalar lacks its flag column from the same catalogue. The range
 table absorbs the earlier `-99` sentinel list and A8's predicates.
 
@@ -1058,9 +1059,9 @@ table absorbs the earlier `-99` sentinel list and A8's predicates.
 | --- | --- | ---: | --- | --- |
 | `ebv`, `photometry`, `fiberflux`, `psfdepth` | Legacy anchor | 100% | ADR 0008 / A8 | `psfdepth > 0` |
 | `legacy_south_ebv`, `legacy_south_photometry` (`FLUX_{G,R,I,Z}`) | Legacy South anchor | 100% | as `ebv` / `photometry` | finite |
-| `Z` | DESI `Z` | all DESI | `log(1+z)` | `ZWARN ≤ 0` |
-| `sdss_Z` | SDSS `Z` | all SDSS | `log(1+z)` | `ZWARNING ≤ 0` |
-| `sdss_vdisp` | SDSS `VDISP` | 82% | `log10(v) − 2` | `0 < v < 850`, `ZWARNING ≤ 0` |
+| `Z` | DESI `Z` | all DESI | `log(1+z)` | `z > −1`, `ZWARN = 0` |
+| `sdss_Z` | SDSS `Z` | all SDSS | `log(1+z)` | `z > −1`, `ZWARNING = 0` |
+| `sdss_vdisp` | SDSS `VDISP` | 82% | `log10(v) − 2` | `0 < v < 850`, `ZWARNING = 0` |
 | `hsc_cmodel_mag`, `hsc_shape`, `hsc_psf_shape` | HSC (A8) | all HSC | A8 | `10 < m < 30`, each `magerr ≤ 0.1` |
 | `gwh_gz_<question>` ×10 | Zoobot fractions, n−1 per question | 100% / 5.7% follow-ups | `2x − 1` | — |
 | `gwh_total_sfr_median`, `gwh_total_ssfr_median` | MPA-JHU | 11% | unchanged | `> −99`, MPA flag `≤ 0` (drops 12%) |
@@ -1080,8 +1081,9 @@ table absorbs the earlier `-99` sentinel list and A8's predicates.
 fractions sum to 1 to float precision, so a question is one joint span over
 its non-null answers. The dropped answer (no, none, artifact or can't-tell,
 else the last) is `1 − Σ kept`; keeping it would hand the diagonal GMM a
-degenerate direction, and joint samples stay on the simplex the way joint
-`photometry` stays colour-consistent. This is A8's grouping rule (one
+degenerate direction. During generation, negative sampled fractions are
+clipped and the retained fractions are scaled down if their sum exceeds one.
+This is A8's grouping rule (one
 quantity, several components), and it costs 30 tokens per object, not the
 102 of 34 separate spans. Unreached follow-up questions are NaN upstream,
 which is the ordinary absent span.
@@ -1216,4 +1218,3 @@ dimension), scalar tokens are not; present families combine at 1:1:0.1.
 before this amendment. The combined shares under the new rule are not yet
 measured; repeat the measurement on an early checkpoint of the first run
 that uses it.
-

@@ -126,7 +126,13 @@ SCALAR_TRANSFORMS = {
 _ABOVE_FILL = (-99.0, math.inf)
 _POSITIVE = (0.0, math.inf)
 _AB_MAG = (10.0, 30.0)
+# Exclude values that round to -1 in the fp32 tensor passed to log1p.
+_LOG1P_RANGE = (-1.0 + torch.finfo(torch.float32).eps / 4, math.inf)
 VALID_RANGES = {
+    "Z": _LOG1P_RANGE,
+    "sdss_Z": _LOG1P_RANGE,
+    "gwh_redshift": _LOG1P_RANGE,
+    "provabgs_Z_HP": _LOG1P_RANGE,
     "gwh_mass_med_photoz": _ABOVE_FILL,
     "gwh_total_sfr_median": _ABOVE_FILL,
     "gwh_total_ssfr_median": _ABOVE_FILL,
@@ -146,9 +152,9 @@ VALID_RANGES = {
     "gwh_petro_ba": _POSITIVE,
 }
 
-# Scalar -> {record key of a quality flag or error: largest passing value}.
-# The flag must come from the scalar's own catalogue (CatalogStream checks), and
-# a missing flag fails: an unknown quality must not look reliable.
+# Scalar -> {same-catalog quality field: threshold}. Missing flags fail.
+# Redshift warning bitmasks must equal zero rather than pass an upper bound.
+_ZERO_WARNING_FLAGS = {"ZWARN", "sdss_ZWARNING"}
 QUALITY_GATES = {
     "Z": {"ZWARN": 0.0},
     "sdss_Z": {"sdss_ZWARNING": 0.0},
@@ -184,8 +190,13 @@ def scalar_valid(name: str, values, record: dict) -> bool:
         return False
     if name in CATEGORICAL and not all(x.is_integer() and 0 <= x < CATEGORICAL[name] for x in numbers):
         return False
-    return all(record.get(flag) is not None and float(record[flag]) <= limit
-               for flag, limit in QUALITY_GATES.get(name, {}).items())
+    for flag, limit in QUALITY_GATES.get(name, {}).items():
+        if record.get(flag) is None:
+            return False
+        value = float(record[flag])
+        if not (value == limit if flag in _ZERO_WARNING_FLAGS else value <= limit):
+            return False
+    return True
 
 
 def _transforms(name: str):
@@ -207,6 +218,14 @@ def scalar_normalize(name: str, value: torch.Tensor) -> torch.Tensor:
 
 def scalar_inverse(name: str, value: torch.Tensor) -> torch.Tensor:
     return _transforms(name)[1](value)
+
+
+def constrain_scalar_sample(name: str, value: torch.Tensor) -> torch.Tensor:
+    """Keep sampled Galaxy Zoo fractions nonnegative, with mass for the omitted answer."""
+    if name not in _GZ_NAMES:
+        return value
+    fractions = _GZ_FRACTION[1](value.float()).clamp_min(0)
+    return _GZ_FRACTION[0](fractions / fractions.sum(dim=-1, keepdim=True).clamp_min(1))
 
 
 if __name__ == "__main__":

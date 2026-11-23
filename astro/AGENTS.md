@@ -54,10 +54,11 @@ stages is implicit and easy to break, so understand it before editing:
    `min_catalogs` selects sky coverage, not a per-record modality count;
    unknown settings are rejected.
    Each worker owns a dask `LocalCluster`
-   (threads only, `partitions_per_chunk=4`) so the next draw's fetch
-   overlaps the current one's decode; rows decode through
-   `NestedFrame.map_rows`, never `iterrows`. `num_loading_workers` counts
-   concurrent LSDB readers per DP rank — watch box-wide RSS. The stream is
+   (threads only, default `partitions_per_chunk=4` for joins, 1 for anchor-only)
+   so the next draw's fetch overlaps the current one's decode; rows decode
+   through `NestedFrame.map_rows`, never `iterrows`. `num_loading_workers`
+   counts concurrent LSDB readers per DP rank — watch box-wide RSS. Native
+   Nanotron loads on one rank per TP group and broadcasts the packed batch. The stream is
    **cursorless**: checkpoints restore weights/optimizer/scheduler/RNG,
    never the record position, so resume opens a fresh stream and may
    revisit records (ADR 0015; `docs/training.md` §5). Recognized
@@ -119,8 +120,8 @@ stages is implicit and easy to break, so understand it before editing:
    Each family's loss is one mean over all its tokens (patch-token NLL
    divided by `input_size`, i.e. nats per dimension; scalar tokens as-is),
    and present families combine at image:spectrum:scalar 1:1:0.1. Training can
-   add cosine-decayed pre-flow noise (`pre_flow_noise_max` per modality), so
-   the embedded z, target z and logdet use the same noisy input. Separate
+   add pre-flow noise (`pre_flow_noise_max` per modality), cosine-decayed to
+   zero, so the embedded z, target z and logdet use the same flow input. Separate
    linear latent noise (`jetformer_noise_max` -> `_min`) perturbs only the
    embedded z copy. Both schedules use `set_jet_noise_frac`. Scalar modalities
    (`Z`, `ebv`, `photometry`) bypass the flow and go straight to a
