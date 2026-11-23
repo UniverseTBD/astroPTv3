@@ -44,8 +44,9 @@ Facts to know:
 - **Workers and memory.** `num_loading_workers` controls concurrent readers
   per DP rank; each may buffer large image partitions. Monitor box-wide RSS
   and lower the worker count after an observed OOM.
-- **No cursors or coverage guarantee.** Consumer seeds reduce identical
-  draws, but consumers may overlap; retries and resumes can revisit records.
+- **No cursors or coverage guarantee.** Each DP rank × worker owns a
+  disjoint round-robin share of the anchor's HATS partitions (shared only when
+  consumers outnumber partitions); retries and resumes can revisit records.
 - **Provenance.** `uv.lock` records the resolved LSDB dependency, and `[data]`
   startup lines log its version and catalog information when available.
 

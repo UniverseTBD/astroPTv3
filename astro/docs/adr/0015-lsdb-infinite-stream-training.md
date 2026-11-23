@@ -54,10 +54,11 @@ lsdb.open_catalog("hf://datasets/UniverseTBD/mmu_ssl_legacysurvey_north")
 - Retain the current configured 6–8 workers per DP rank.
 - Derive each stream seed from the run seed, DP rank, worker id, and retry
   generation.
-- Accept stochastic partition overlap between consumers, repeated records, no
-  epochs, and no complete-coverage guarantee.
-- Do not implement local HEALPix ownership. Strict distributed ownership is an
-  upstream LSDB concern.
+- Each consumer (DP rank × worker) owns every N-th anchor HATS partition of the
+  footprint, N = DP size × workers, so consumers do not fetch the same anchor
+  files; consumers share partitions only when N exceeds the partition count.
+- Accept repeated records within a consumer, no epochs, and no
+  complete-coverage guarantee.
 
 ### Resume and failures
 
