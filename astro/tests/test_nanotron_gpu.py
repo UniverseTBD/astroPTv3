@@ -264,9 +264,33 @@ def matched_models(nt):
     return hf_model, nt_model, nt_config, hf_config
 
 
+def assert_loss_metrics(nt_out, hf_out, config, flat):
+    from nanotron.astropt3_metrics import FAMILIES, reduce_loss_metrics
+
+    names = config.modality_names()
+    metrics = reduce_loss_metrics([nt_out], names)
+    counts = {name: len(flat[f"{name}_values"]) for name in names}
+    for name in names:
+        assert metrics[f"{name}_loss_count"] == counts[name]
+        if counts[name]:
+            assert metrics[f"{name}_loss"] == pytest.approx(hf_out.modality_losses[name].item(), rel=REL_TOL)
+        else:
+            assert f"{name}_loss" not in metrics
+    for family in FAMILIES:
+        members = [n for n in names if counts[n] and config.modality(n)["family"] == family]
+        count = sum(counts[n] for n in members)
+        assert metrics[f"{family}_family_loss_count"] == count
+        if count:
+            loss_sum = sum(hf_out.modality_losses[n].item() * counts[n]
+                           / (1 if family == "scalar" else config.modality(n)["input_size"]) for n in members)
+            assert metrics[f"{family}_family_loss"] == pytest.approx(loss_sum / count, rel=REL_TOL)
+        else:
+            assert f"{family}_family_loss" not in metrics
+
+
 @pytest.mark.parametrize("training", [False, True])
 def test_forward_loss_parity(nt, matched_models, training):
-    hf_model, nt_model, _, hf_config = matched_models
+    hf_model, nt_model, nt_config, hf_config = matched_models
     flat = micro_batch(hf_config)
     names = hf_config.modality_registry().names()
     for model in (hf_model, nt_model):
@@ -285,21 +309,7 @@ def test_forward_loss_parity(nt, matched_models, training):
     nt_loss = nt_out["loss"].item()
     hf_loss = hf_out.loss.item()
     assert nt_loss == pytest.approx(hf_loss, rel=REL_TOL), f"NT={nt_loss}, HF={hf_loss}"
-    for name in names:
-        nt_mod = nt_out[f"{name}_loss"].item()
-        if name not in hf_out.modality_losses:
-            # absent from this batch: HF omits the key, nanotron reports 0.0
-            assert nt_mod == 0.0, f"{name}: NT={nt_mod} for an absent modality"
-            continue
-        hf_mod = hf_out.modality_losses[name].item()
-        assert nt_mod == pytest.approx(hf_mod, rel=REL_TOL), (
-            f"{name}: NT={nt_mod}, HF={hf_mod}"
-        )
-    for family, hf_family in hf_out.family_losses.items():
-        nt_family = nt_out[f"{family}_family_loss"].item()
-        assert nt_family == pytest.approx(hf_family.item(), rel=REL_TOL), (
-            f"{family}: NT={nt_family}, HF={hf_family.item()}"
-        )
+    assert_loss_metrics(nt_out, hf_out, nt_config, flat)
 
 
 def test_conversion_roundtrip_exact(nt, matched_models):

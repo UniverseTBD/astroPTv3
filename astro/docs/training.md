@@ -157,9 +157,14 @@ Resume needs a recipe whose modalities match the checkpoint's. The runner
 reads the checkpoint's saved YAML only for the echo factor; catalogs come from
 the launch YAML.
 
-Watch the logs: `lm_loss`, per-category losses such as `legacy_north_g_loss`
-and `spectra_loss`, `tokens_per_sec_per_gpu`, `model_tflops_per_gpu`,
-and memory lines. Exact-likelihood losses can be negative.
+`lm_loss` (`train/loss` in the single-GPU launcher) is the optimized objective;
+`grad_norm` is measured before clipping. Diagnostics such as `spectra_loss` and
+`image_family_loss` pool all scored targets across the step's microbatches and
+DP ranks. Each has a `*_loss_count`: zero means no loss is logged, not a loss
+of zero. Modality losses are joint NLL per target; image and spectrum family
+losses divide each patch NLL by its input dimension before pooling. Scalar
+family losses pool the unscaled target NLLs. These diagnostics need not
+reconstruct `lm_loss`; exact-likelihood losses can be negative.
 
 ## 6. Evaluation status
 

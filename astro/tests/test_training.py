@@ -710,6 +710,7 @@ def test_echo_telemetry_counts_and_wait_attribution(echo_batch, monkeypatch, tmp
 def test_main_wires_echo_accounting_and_restarts_mid_group(
     monkeypatch, tmp_path, default_recipe, custom_config, resuming, override, expected_factor, nonfinite,
 ):
+    monkeypatch.syspath_prepend(str(run.REPO / "nanotron/src"))
     source_record = make_record(1, image_only_fraction=0.0)
     source_record.update(spectrum_sdss=sdss_spectrum(), hsc_image=hsc_image())
     config_args = []
@@ -741,7 +742,7 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(
             self.rng_restored = bool(self.init_checkpoint_path)
             self.num_params = {"total": 1}
             self.dataset_args = SimpleNamespace(**config["data_stages"][0]["data"]["dataset"])
-            self.model_config = SimpleNamespace(**config["model"]["model_config"])
+            self.model_config = SimpleNamespace(modality_names=lambda: names, **config["model"]["model_config"])
             self.config = SimpleNamespace(
                 save_as_yaml=lambda path: path.write_text(yaml.safe_dump(config)),
                 optimizer=SimpleNamespace(**config["optimizer"]),
@@ -757,7 +758,12 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(
                 self.grad_norm_unclipped = torch.tensor(
                     float("nan") if nonfinite == "grad" and step == 2 else 2.0,
                 )
-            return [{"loss": loss, f"{names[0]}_loss": loss}], loss, None, None
+            outputs = []
+            for loss_sum, count in ((6, 3), (8, 1), (0, 0)):
+                stats = torch.zeros(len(names) + 3, 2, dtype=torch.float64)
+                stats[0] = torch.tensor([loss_sum, count])
+                outputs.append({"loss_stats": stats})
+            return outputs, loss, None, None
 
         def train_step_logs(self, *args):
             pass
@@ -821,7 +827,11 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(
     assert [record["fresh_micro_batches"] for record in records] == [1, 0]
     assert [step for step, _ in logged] == ([3, 4] if resuming else [1, 2])
     for step, metrics in logged:
-        assert metrics["train/loss"] == metrics[f"train/{names[0]}_loss"] == step
+        assert metrics["train/loss"] == step
+        assert metrics[f"train/{names[0]}_loss"] == 3.5
+        assert metrics[f"train/{names[0]}_loss_count"] == 4
+        assert metrics[f"train/{names[1]}_loss_count"] == 0
+        assert f"train/{names[1]}_loss" not in metrics
         assert metrics["train/lr"] == 0.001
         assert ("train/grad_norm" in metrics) == (default_recipe["optimizer"]["clip_grad"] is not None)
     assert [metrics["data/echo_index"] for _, metrics in logged] == [0, 1]

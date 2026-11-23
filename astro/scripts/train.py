@@ -207,6 +207,7 @@ def main():
 
     sys.path.insert(0, str(REPO / "nanotron"))
     from benchmark_throughput import revision
+    from nanotron.astropt3_metrics import reduce_loss_metrics
     from run_train import (  # pyright: ignore[reportMissingImports] -- nanotron added above
         DistributedTrainer,
         get_dataloader,
@@ -224,9 +225,8 @@ def main():
             }
             if self.config.optimizer.clip_grad is not None:
                 self.step_metrics["train/grad_norm"] = self.grad_norm_unclipped.item()
-            for key in outputs[0]:
-                if key.endswith("_loss") and isinstance(outputs[0][key], torch.Tensor):
-                    self.step_metrics[f"train/{key}"] = torch.stack([item[key] for item in outputs]).mean().item()
+            metrics = reduce_loss_metrics(outputs, self.model_config.modality_names())
+            self.step_metrics.update({f"train/{key}": value for key, value in metrics.items()})
             if not all(math.isfinite(value) for value in self.step_metrics.values()):
                 raise ValueError("Non-finite loss or gradient; refusing to continue or save this step")
             return result
