@@ -29,7 +29,7 @@ from PIL import Image
 from . import nanotron_loader as loader
 from . import telemetry
 from .hf_io import disable_hf_cat_readahead
-from .hf_listing import seed_hf_listing
+from .hf_listing import load_hats_metadata, seed_hf_listing
 from .packing import has_modality
 from .scalar_registry import CATEGORICAL, QUALITY_GATES, _transforms
 
@@ -283,6 +283,25 @@ def _project_anchor_margin(anchor):
     return anchor
 
 
+def _open_from_hats_metadata(hc_catalog, margin_hc_catalog, *, columns, margin_columns=None):
+    """Build an LSDB Catalog directly from broadcast HATS metadata without Hub reads."""
+    import hats as hc
+    from lsdb.catalog.margin_catalog import _validate_margin_catalog
+    from lsdb.loaders.hats.read_hats import _read_dataset
+
+    if isinstance(hc_catalog, hc.catalog.CatalogCollection):
+        catalog = _read_dataset(hc_catalog.main_catalog, columns=columns)
+        catalog.hc_collection = hc_catalog
+    else:
+        catalog = _read_dataset(hc_catalog, columns=columns)
+    if margin_hc_catalog is not None:
+        margin = _read_dataset(margin_hc_catalog, columns=margin_columns or columns)
+        if margin_columns is None:
+            _validate_margin_catalog(margin, catalog)
+        catalog.margin = margin
+    return catalog
+
+
 def _draw_paths(weights, offset):
     while True:
         for turn in range(max(weights)):
@@ -315,6 +334,7 @@ class CatalogStream:
             raise ValueError("catalog_stream.catalogs must be a list of partner catalogs")
         self.catalogs = [*anchors, *partners]
         self.hf_listing: bytes | None = None
+        self.hats_metadata: bytes | None = None
         registry = config.modality_registry()
         self.stars = [_Star([anchor, *partners], registry) for anchor in anchors]
         if len({c['name'] for c in self.catalogs}) != len(self.catalogs):
@@ -400,6 +420,7 @@ class CatalogStream:
         seed_hf_listing(self.hf_listing)
         disable_hf_cat_readahead()
         _unregister_hf_array2d_extension()
+        cached_hats = load_hats_metadata(self.hats_metadata)
         telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in self.catalogs})
         failures: dict[int | None, int] = {}
         generation = draw = 0
@@ -423,11 +444,20 @@ class CatalogStream:
                         elif payload:
                             columns.append(payload)
                         columns.extend(catalog["scalar_columns"].values())
-                        opened_cat = open_catalog(
-                            f"hf://datasets/{catalog['repo']}", columns=list(dict.fromkeys(columns)),
-                        )
-                        if catalog["name"] in anchor_names:
-                            opened_cat = _project_anchor_margin(opened_cat)
+                        dedup_cols = list(dict.fromkeys(columns))
+                        if catalog["repo"] in cached_hats:
+                            hc_cat, margin_hc = cached_hats[catalog["repo"]]
+                            margin_cols = None
+                            if catalog["name"] in anchor_names and margin_hc is not None:
+                                info = margin_hc.catalog_info
+                                margin_cols = [c for c in (info.ra_column, info.dec_column) if c] or None
+                            opened_cat = _open_from_hats_metadata(
+                                hc_cat, margin_hc, columns=dedup_cols, margin_columns=margin_cols
+                            )
+                        else:
+                            opened_cat = open_catalog(f"hf://datasets/{catalog['repo']}", columns=dedup_cols)
+                            if catalog["name"] in anchor_names:
+                                opened_cat = _project_anchor_margin(opened_cat)
                         opened[catalog['name']] = opened_cat
                     reader_seed = loader.consumer_seed(seed, rank, worker_id, generation)
                     streams = self._streams(opened, client, reader_seed, shard)

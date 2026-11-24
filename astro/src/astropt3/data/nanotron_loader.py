@@ -20,8 +20,9 @@ import torch.distributed as dist
 
 from ..configuration_astropt3 import AstroPT3Config
 from .echo import echo_draw, validate_echo_factor
-from .hf_listing import share_hf_listing
+from .hf_listing import share_hats_metadata, share_hf_listing
 from .packing import ObjectSequencer, PackedCollator
+from . import telemetry
 from .telemetry import ANCHOR_METADATA, install_byte_probe, instrument, telemetry_dir
 
 IMAGE_SHAPE = (3, 152, 152)
@@ -358,7 +359,13 @@ def build_astropt3_dataloader(
     )
     if dist.is_initialized():
         stream = dataset.catalog_stream
+        telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in stream.catalogs})
+        if dist.get_world_size() == 1 or dist.get_rank() == 0:
+            install_byte_probe(dp_rank, None)
         stream.hf_listing = share_hf_listing(cat["repo"] for cat in stream.catalogs)
+        stream.hats_metadata = share_hats_metadata(
+            (cat["repo"] for cat in stream.catalogs), listing=stream.hf_listing
+        )
     if num_workers and multiprocessing_context is None:
         multiprocessing_context = "spawn"
     loader = torch.utils.data.DataLoader(
