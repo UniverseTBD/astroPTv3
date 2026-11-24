@@ -418,7 +418,7 @@ class CatalogStream:
                         decoder = catalog["decoder"]
                         payload, fields, family = _PROFILES[decoder]
                         columns = [_ID_COLUMNS.get(decoder, "object_id"), "ra", "dec"]
-                        if family == "image" and fields:
+                        if payload and fields:
                             columns.extend(f"{payload}.{field}" for field in fields)
                         elif payload:
                             columns.append(payload)

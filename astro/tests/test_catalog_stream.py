@@ -46,11 +46,15 @@ def test_real_lsdb_stream_decodes_local_catalogs(recipe, monkeypatch, tmp_path, 
         row = {"ra": 10.0, "dec": 0.0, **_row({"anchors": [catalog], "catalogs": []})}
         if catalog["decoder"] == "hsc_image":
             row["image"]["ivar"] = row["image"]["flux"]  # Make the unused leaf present on disk.
+        elif catalog["decoder"] in ("desi_spectrum", "sdss_spectrum"):
+            row["spectrum"]["ivar"] = row["spectrum"]["flux"]  # Unused spectrum leaf on disk.
         source = from_dataframe(nested_frame([row], (payload,)), catalog_name=catalog["name"])
         url = f"hf://datasets/{catalog['repo']}"
-        if catalog["decoder"] == "hsc_image":
-            # Read a real Parquet projection for the HSC partner, which needs no margin for a left join.
-            catalog["how"] = "left"
+        if catalog["decoder"] in ("hsc_image", "desi_spectrum", "sdss_spectrum"):
+            # Read a real Parquet projection for image and spectrum partners (left join needs no margin).
+            if catalog is not spec["anchors"][0]:
+                catalog["how"] = "left"
+                spec["min_catalogs"] = 1
             path = tmp_path / catalog["name"]
             source.write_catalog(path, as_collection=False, progress_bar=False, should_write_skymap=False)
             catalogs[url] = path
@@ -61,7 +65,10 @@ def test_real_lsdb_stream_decodes_local_catalogs(recipe, monkeypatch, tmp_path, 
         source = catalogs[url]
         if isinstance(source, Path):
             catalog = open_catalog(source, **kwargs)
-            assert catalog.meta.get_subcolumns() == ["image.band", "image.flux", "image.scale"]
+            if source.name == "hsc":
+                assert catalog.meta.get_subcolumns() == ["image.band", "image.flux", "image.scale"]
+            else:
+                assert catalog.meta.get_subcolumns() == ["spectrum.flux", "spectrum.lambda", "spectrum.mask"]
             return catalog
         return source
 
@@ -259,6 +266,8 @@ def test_catalog_count_projection_and_finite_draws(recipe, offline, count):
         read_payload = {
             "legacy_image": ["image.band", "image.flux"],
             "hsc_image": ["image.band", "image.flux", "image.scale"],
+            "desi_spectrum": ["spectrum.flux", "spectrum.lambda", "spectrum.mask"],
+            "sdss_spectrum": ["spectrum.flux", "spectrum.lambda", "spectrum.mask"],
         }.get(decoder, payload)
         assert columns == ["object_id", "ra", "dec", *read_payload, *catalog.get("scalar_columns", {}).values()]
         if payload:
