@@ -93,6 +93,7 @@ def wandb_config(config: dict, max_steps: int | None) -> dict:
     }
     for stage in training["data_stages"]:
         stage["data"]["dataset"].pop("catalog_stream", None)
+    training["tokens"].pop("validation_manifest", None)
     if "path" in training["model"].get("init_method", {}):
         training["model"].pop("init_method")
     training["seed"] = config["general"]["seed"]
@@ -283,6 +284,7 @@ def main():
                 original_write(step, record, rank)
                 metrics = throughput.observe(step, record)
                 metrics.update(trainer.step_metrics or {})
+                metrics.update(trainer.validation_metrics)
                 metrics["gpu/allocated_bytes"] = torch.cuda.memory_allocated()
                 metrics["gpu/peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
                 run.log(metrics, step=step)
@@ -291,7 +293,7 @@ def main():
                     (output / "progress.json").write_text(json.dumps({**state, "metrics": metrics}, indent=2) + "\n")
 
             telemetry.write_step = write_step
-            trainer.train(dataloaders, max_steps=args.max_steps)
+            trainer.train(dataloaders, max_steps=args.max_steps, enable_validation=True)
             state.update(status="startup-check-passed" if args.max_steps else "finished",
                          completed_steps=trainer.metadata.last_train_step)
             if not args.max_steps and state["completed_steps"] != target_steps:

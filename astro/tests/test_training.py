@@ -769,11 +769,13 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(
         def train_step_logs(self, *args):
             pass
 
-        def train(self, dataloaders, max_steps):
+        def train(self, dataloaders, max_steps, enable_validation):
+            assert enable_validation  # still on when using LoggedTrainer(..., benchmark=True)
             with closing(iter(dataloaders["stage"])) as iterator:
-                for _ in range(max_steps):
+                for index in range(max_steps):
                     result = self.training_step(iterator)
                     self.metadata.last_train_step += 1
+                    self.validation_metrics = {"val/image_family_loss": -0.25} if index == 0 else {}
                     if (self.metadata.last_train_step - 1) % self.log_interval == 0:
                         self.train_step_logs(*result)
                     record = {**run.telemetry.drain_step(), "step_seconds": 1.0}
@@ -835,6 +837,7 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(
         assert f"train/{names[1]}_loss" not in metrics
         assert metrics["train/lr"] == 0.001
         assert ("train/grad_norm" in metrics) == (default_recipe["optimizer"]["clip_grad"] is not None)
+    assert [metrics.get("val/image_family_loss") for _, metrics in logged] == [-0.25, None]
     assert [metrics["data/echo_index"] for _, metrics in logged] == [0, 1]
     payload = init.call_args.kwargs["config"]
     assert payload["echo_factor"] == expected_factor

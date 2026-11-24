@@ -158,8 +158,9 @@ in `checkpoint_schedule.py`, lazy-imported by the fork's trainer);
 `latest.txt` is written last, so any step dir it covers is complete.
 Checkpoints carry weights/optimizer/scheduler/RNG and **nothing else** —
 the LSDB stream is cursorless, so resume opens a fresh stream and records
-may be revisited (ADR 0015; `docs/training.md` §5). Evaluation never runs
-in the trainer: convert a checkpoint with the fork's
+may be revisited (ADR 0015; `docs/training.md` §5). The trainer only scores
+the fixed held-out panel (`val/*`, `docs/training.md` §6); for other
+evaluation, convert a checkpoint with the fork's
 `tools/astropt3/convert_nanotron_to_hf.py`, then score the HF artifact
 with `astropt3.eval` (`val_loss`, `linear_probe`, `scalar_head`,
 `samples`).

@@ -2,7 +2,9 @@
 
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.distributed as dist
 from torch.multiprocessing.spawn import spawn
@@ -29,8 +31,46 @@ def _check_dp_metrics(rank, rendezvous):
                 mean = sum(s for s, _ in targets) / expected_count
                 expected.update(patch_loss=mean, image_family_loss=mean / 2)
             assert metrics == expected
+        _check_validation(rank, dp, Path(rendezvous.removeprefix("file://")).parent)
     finally:
         dist.destroy_process_group()
+
+
+def _check_validation(rank, dp, run_dir):
+    from nanotron.astropt3_validation import evaluate_validation_shard, load_validation_shard
+    from astropt3.data import validation_panel
+
+    def load(model_config, objects, seq_len, batch_size, dp_size):
+        assert rank == 0  # only the coordinator reads from the source
+        assert (objects, seq_len, batch_size, dp_size) == (2, 32, 1, 2)
+        return ["catalog:1", "catalog:2"], [[], [{"targets": torch.tensor(t)} for t in ([-2., -2., -2.], [4.])]]
+
+    class Model(torch.nn.Module):
+        def forward(self, targets):
+            assert not self.training and not torch.is_grad_enabled()
+            total, count = targets.sum().item(), targets.numel()
+            return {"loss_stats": torch.tensor([(total, count), (total / 2, count), (0, 0), (0, 0)], dtype=torch.float64)}
+
+    config = SimpleNamespace(
+        tokens=SimpleNamespace(validation_objects=2, sequence_length=32, micro_batch_size=1, validation_manifest=None),
+        checkpoints=SimpleNamespace(checkpoints_path=run_dir),
+    )
+    context = SimpleNamespace(world_pg=dist.group.WORLD, dp_pg=dp, get_local_ranks=lambda r: {"dp": r // 2})
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(validation_panel, "load_validation_panel", load)
+        batches = load_validation_shard(config, None, context, None)
+    assert len(batches) == 2 * (rank // 2)
+    model = Model()
+    for _ in range(2):
+        metrics = evaluate_validation_shard(model, batches, ["patch"], "cpu", dp)
+        assert model.training
+        assert metrics.pop("val/seconds") >= 0
+        assert metrics == {
+            "val/patch_loss": -0.5, "val/image_family_loss": -0.25,
+            "val/patch_loss_count": 4, "val/image_family_loss_count": 4,
+            "val/spectrum_family_loss_count": 0, "val/scalar_family_loss_count": 0,
+        }
+    assert (run_dir / validation_panel.PANEL_FILENAME).is_file()
 
 
 def test_loss_metrics_dp2_tp2(monkeypatch, tmp_path):

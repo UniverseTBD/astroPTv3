@@ -330,7 +330,10 @@ class PackedCollator:
         self.modality_names = config.modality_registry().names()
 
     def __call__(self, objects: list[ObjectSeq]) -> dict:
-        """Greedily pack a flat object list, then collate the rows it makes."""
+        return self.collate_rows(self.pack_rows(objects))
+
+    def pack_rows(self, objects: list[ObjectSeq]) -> list[list[ObjectSeq]]:
+        """Greedily pack a flat object list into rows without materializing tensors."""
         rows: list[list[ObjectSeq]] = [[]]
         used = 0
         for obj in objects:
@@ -345,7 +348,7 @@ class PackedCollator:
             used += len(obj)
         if not rows[-1]:
             rows.pop()
-        return self.collate_rows(rows)
+        return rows
 
     def collate_rows(self, rows: list[list[ObjectSeq]]) -> dict:
         """Collate rows the caller has already formed.

@@ -706,8 +706,9 @@ tokens:
   micro_batch_size: 16
   batch_accumulation_per_replica: 1
   val_check_interval: 100
-  limit_val_batches: 0 # eval never runs in the trainer (ADR 0015 defers
-  limit_test_batches: 0 # source-backed val/probe sweeps)
+  validation_objects: 256 # pilot panel; calibrate across seeds before LR comparisons
+  limit_val_batches: 0
+  limit_test_batches: 0
 checkpoints:
   checkpoints_path: ../astroPTv3_checkpoints/astropt3-70m-dual-anchor
   checkpoint_schedule: pythia # steps 1,2,4,...,512 + every interval

@@ -167,10 +167,43 @@ losses divide each patch NLL by its input dimension before pooling. Scalar
 family losses pool the unscaled target NLLs. These diagnostics need not
 reconstruct `lm_loss`; exact-likelihood losses can be negative.
 
-## 6. Evaluation status
+## 6. Held-out validation and checkpoint evaluation
 
-Source-backed validation/probe checkpoint sweeps are deferred.
-`astropt3.eval` keeps model-side functions — `evaluate` (loss on provided
+The 70M recipe scores a pilot panel of 256 unique held-out objects every 100
+completed optimizer steps, including on resume. Set `tokens.validation_objects: 0`
+to disable it. To enable it on another ladder size, use the same object count
+and a positive `tokens.val_check_interval`. The panel has its own
+[pinned catalog spec](../src/astropt3/data/validation_catalogs.yaml), fixed seed,
+and `split: validation`; it does not use the training seed, stream, or echo mix.
+Use the same modalities and tokenization when comparing curves.
+
+Rank zero streams the panel from HF once at startup, replaying the whole load
+up to twice after a transport error; each DP replica retains
+its shard in CPU memory and TP peers score identical inputs. No payloads are
+saved. `<checkpoints_path>/validation-panel.json` records the seed and ordered
+IDs. A resume checks the prior manifest when available. Set
+`tokens.validation_manifest` to a previous run's JSON to require the exact
+same IDs in a new run; startup fails on a mismatch instead of substituting
+objects. Keep the object count, source revisions and package pins fixed.
+
+Both launchers log `val/<name>_loss` and `val/<name>_loss_count` to W&B, with
+`image_family`, `spectrum_family`, and `scalar_family` following the same pooled
+NLL units as the training diagnostics. A zero count omits the loss. Eval mode
+turns off the training-time flow noise; span order, missing-value fills and
+RGB dequantization are fixed. `val/seconds` measures the validation pass on the
+logging rank, excluding panel startup and checkpoint I/O.
+
+**70M calibration (#76):** The panel size and per-family tolerances are not yet
+calibrated. Run one 70M recipe with two training seeds, using the same panel
+manifest and comparing checkpoint steps at the same training budget. Check
+coverage via the family counts. Record `abs(NLL_seed1 - NLL_seed2)` for each
+family at the comparison steps in `astro/EXPERIMENTS.md` and use the observed
+absolute gap in nats (nats/dimension for image and spectrum families) as the
+near-tie tolerance. Do not use a percentage: NLL can be negative. Confirm
+`val/*` in W&B and sum `val/seconds` against elapsed training wall time on the
+same window (target <5%); record panel startup separately.
+
+`astropt3.eval` keeps model-side checkpoint functions — `evaluate` (loss on provided
 batches), `embed_objects` + `ridge_r2` (probe on supplied objects),
 `scalar_head_metrics`, and sampling/rendering. `scripts/generate.py` remains
 a separate live-sample CLI; it is **not** a fixed validation suite or an
