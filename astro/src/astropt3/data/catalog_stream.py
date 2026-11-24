@@ -28,6 +28,7 @@ from PIL import Image
 
 from . import nanotron_loader as loader
 from . import telemetry
+from .hf_listing import seed_hf_listing
 from .packing import has_modality
 from .scalar_registry import CATEGORICAL, QUALITY_GATES, _transforms
 
@@ -272,6 +273,7 @@ class CatalogStream:
         if not isinstance(partners, list):
             raise ValueError("catalog_stream.catalogs must be a list of partner catalogs")
         self.catalogs = [*anchors, *partners]
+        self.hf_listing: bytes | None = None
         registry = config.modality_registry()
         self.stars = [_Star([anchor, *partners], registry) for anchor in anchors]
         if len({c['name'] for c in self.catalogs}) != len(self.catalogs):
@@ -354,6 +356,7 @@ class CatalogStream:
 
         ``shard=(index, count)`` keeps only every count-th anchor partition, from index.
         """
+        seed_hf_listing(self.hf_listing)
         _unregister_hf_array2d_extension()
         telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in self.catalogs})
         failures: dict[int | None, int] = {}
