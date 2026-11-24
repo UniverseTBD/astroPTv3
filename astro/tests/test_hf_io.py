@@ -140,6 +140,8 @@ def test_concurrent_cat_ranges_and_chunked_fetch_range(monkeypatch):
     monkeypatch.setattr(HfFileSystemFile, "_fetch_range", orig_fetch)
 
 
+# TODO(upstream): Delete the two coalesced-Parquet workaround tests below once
+# lincc-frameworks/nested-pandas#586 and #589 are merged, released, and required.
 def test_coalesced_parquet_prunes_leaves_and_row_groups(tmp_path, monkeypatch):
     rng = np.random.default_rng(7)
     size = 1000

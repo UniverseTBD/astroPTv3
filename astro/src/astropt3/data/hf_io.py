@@ -146,6 +146,16 @@ def enable_hf_concurrent_ranges(
         HfFileSystemFile._fetch_range = _fetch_range
 
 
+# ---------------------------------------------------------------------------
+# TODO(upstream): Temporary workaround — delete everything below (plus the
+# `enable_hf_coalesced_parquet_reads()` call in `catalog_stream.py` and its
+# tests in `test_hf_io.py`) once BOTH upstream `nested-pandas` PRs land and
+# are required by `astro/pyproject.toml`:
+#   - https://github.com/lincc-frameworks/nested-pandas/pull/586
+#   - https://github.com/lincc-frameworks/nested-pandas/pull/589
+# ---------------------------------------------------------------------------
+
+
 class _CoalescedReadUnsupported(Exception):
     """Raised when a Parquet read should fall back to HATS / nested-pandas."""
 
