@@ -37,7 +37,7 @@ from PIL import Image
 
 from . import nanotron_loader as loader
 from . import telemetry
-from .hf_io import enable_hf_concurrent_ranges
+from .hf_io import enable_hf_coalesced_parquet_reads, enable_hf_concurrent_ranges
 from .hf_listing import load_hats_metadata, seed_hf_listing
 from .packing import has_modality
 from .scalar_registry import CATEGORICAL, QUALITY_GATES, _transforms
@@ -546,6 +546,8 @@ class CatalogStream:
         """
         seed_hf_listing(self.hf_listing)
         enable_hf_concurrent_ranges()
+        # TODO(upstream): Remove once nested-pandas#586 & #589 are merged and released.
+        enable_hf_coalesced_parquet_reads()
         _unregister_hf_array2d_extension()
         cached_hats = load_hats_metadata(self.hats_metadata)
         telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in self.catalogs})
