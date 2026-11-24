@@ -81,6 +81,8 @@ def test_yaml_uses_current_modalities(path):
     original = control["data_stages"][0]["data"]["dataset"]["catalog_stream"]
     assert original["split"] == "train"
     assert "gz10" not in {catalog["name"] for catalog in original["catalogs"]}
+    sdss = next(catalog for catalog in original["catalogs"] if catalog["name"] == "sdss")
+    assert sdss["repo"] == "UniverseTBD/mmu_sdss_dr17@091f56aa923837b7672586f6076fda490a6062dc"
     for stage in raw["data_stages"]:
         stream = stage["data"]["dataset"]["catalog_stream"]
         north, south = stream["anchors"]

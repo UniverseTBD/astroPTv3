@@ -54,10 +54,13 @@ def test_non_default_divisor_changes_output_and_roundtrips():
 
 
 def test_sdss_log_grid_roundtrips_and_rejects_wrong_steps():
-    lam = 10 ** (torch.log10(torch.tensor(3800.0)) + 1e-4 * torch.arange(3800))
-    flux = torch.randn(len(lam), dtype=torch.float64)
-    tokens = spectral_normalize(flux, lam, source="sdss")
-    assert torch.allclose(spectral_inverse(tokens, lam, source="sdss"), flux, atol=1e-9)
+    for start, bins in ((3800.0, 3800), (3553.0, 4664)):  # SDSS-I/II and DR17 BOSS/eBOSS
+        lam = (
+            10.0 ** (torch.log10(torch.tensor(start, dtype=torch.float64)) + 1e-4 * torch.arange(bins, dtype=torch.float64))
+        ).float()
+        flux = torch.randn(len(lam), dtype=torch.float64)
+        tokens = spectral_normalize(flux, lam, source="sdss")
+        assert torch.allclose(spectral_inverse(tokens, lam, source="sdss"), flux, atol=1e-9)
     with pytest.raises(NotImplementedError, match="SDSS"):
         spectral_normalize(flux, lam + torch.linspace(0, 10, len(lam)), source="sdss")
     with pytest.raises(NotImplementedError, match="unknown spectrum source"):
