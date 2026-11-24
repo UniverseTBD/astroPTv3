@@ -20,7 +20,9 @@ import torch.distributed as dist
 
 from ..configuration_astropt3 import AstroPT3Config
 from .echo import echo_draw, validate_echo_factor
+from .hf_listing import share_hats_metadata, share_hf_listing
 from .packing import ObjectSequencer, PackedCollator
+from . import telemetry
 from .telemetry import ANCHOR_METADATA, install_byte_probe, instrument, telemetry_dir
 
 IMAGE_SHAPE = (3, 152, 152)
@@ -323,7 +325,7 @@ def build_astropt3_dataloader(
     seed: int = 0,
     multiprocessing_context: str | None = None,
 ) -> Any:
-    """Build worker-side draw echoing, then main-process telemetry/device inputs."""
+    """Build the loader, collectively on all ranks when training under torch.distributed."""
     echo_factor = getattr(dataset_args, "echo_factor", 1)
     validate_echo_factor(echo_factor)
     # Each DP rank echoes its own draws (rank-seeded shuffle), so DP needs no coordination.
@@ -355,6 +357,15 @@ def build_astropt3_dataloader(
         echo_factor=echo_factor,
         catalog_stream=catalog_stream,
     )
+    if dist.is_initialized():
+        stream = dataset.catalog_stream
+        telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in stream.catalogs})
+        if dist.get_world_size() == 1 or dist.get_rank() == 0:
+            install_byte_probe(dp_rank, None)
+        stream.hf_listing = share_hf_listing(cat["repo"] for cat in stream.catalogs)
+        stream.hats_metadata = share_hats_metadata(
+            (cat["repo"] for cat in stream.catalogs), listing=stream.hf_listing
+        )
     if num_workers and multiprocessing_context is None:
         multiprocessing_context = "spawn"
     loader = torch.utils.data.DataLoader(
@@ -369,20 +380,24 @@ def build_astropt3_dataloader(
 
 
 def share_tp_batches(loader_factory, tp_group, world_group):
-    """Read one stream per DP replica, sharing each flat batch across TP ranks."""
+    """Build collectively, then read one stream per DP replica and share its batches."""
     source = dist.get_global_rank(tp_group, 0)
     is_source = dist.get_rank(tp_group) == 0
     device = torch.device("cuda" if dist.get_backend(tp_group) == "nccl" else "cpu")
     failed = torch.zeros((), device=device, dtype=torch.int32)
-    batches = None
+    batches = setup_error = None
+    try:
+        loader = loader_factory()  # All ranks receive the listing; only TP leaders start workers.
+        batches = iter(loader) if is_source else None
+        del loader
+    except Exception as exc:
+        setup_error = exc
     while True:
         batch: dict[str, torch.Tensor] = {}
         header: list[list[tuple[str, torch.Size, torch.dtype]] | None] = [None]
-        error = None
-        if is_source:
+        error = setup_error
+        if batches is not None:
             try:
-                if batches is None:
-                    batches = iter(loader_factory())
                 batch = {k: v.to(device, non_blocking=True).contiguous() for k, v in next(batches).items()}
                 header[0] = [(k, v.shape, v.dtype) for k, v in batch.items()]
             except Exception as exc:

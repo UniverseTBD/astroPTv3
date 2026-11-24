@@ -5,6 +5,7 @@ import torch
 import torch.distributed as dist
 from torch.multiprocessing.spawn import spawn
 
+from astropt3.data import hf_listing
 from astropt3.data.nanotron_loader import share_tp_batches
 
 
@@ -14,9 +15,24 @@ def _check_tp_stream(rank, rendezvous):
         groups = [dist.new_group(ranks) for ranks in ([0, 1], [2, 3])]
         builds = []
         reads = []
+        listings = []
+        root = "datasets/offline/catalog@" + "a" * 40
+
+        class FakeHub:
+            def __init__(self, *, skip_instance_cache):
+                assert rank == 0 and skip_instance_cache
+                self.dircache = {}
+                self._repo_and_revision_exists_cache = {}
+
+            def find(self, path):
+                listings.append(path)
+                self.dircache[path] = []
+
+        hf_listing.HfFileSystem = FakeHub
 
         def build_loader():
             builds.append(rank)
+            assert hf_listing.share_hf_listing([root.removeprefix("datasets/")])
 
             def read_batches():
                 for i in range(2):
@@ -41,7 +57,8 @@ def _check_tp_stream(rank, rendezvous):
             next(batches)
         if rank == 2:
             assert isinstance(failure.value.__cause__, ValueError)
-        assert builds == ([rank] if rank % 2 == 0 else [])
+        assert builds == [rank]
+        assert listings == ([root] if rank == 0 else [])
         assert reads == ([0, 1] if rank % 2 == 0 else [])
     finally:
         dist.destroy_process_group()
