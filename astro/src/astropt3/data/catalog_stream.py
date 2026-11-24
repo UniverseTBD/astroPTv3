@@ -28,7 +28,7 @@ from PIL import Image
 
 from . import nanotron_loader as loader
 from . import telemetry
-from .hf_io import disable_hf_cat_readahead
+from .hf_io import enable_hf_concurrent_ranges
 from .hf_listing import load_hats_metadata, seed_hf_listing
 from .packing import has_modality
 from .scalar_registry import CATEGORICAL, QUALITY_GATES, _transforms
@@ -418,7 +418,7 @@ class CatalogStream:
         ``shard=(index, count)`` keeps only every count-th anchor partition, from index.
         """
         seed_hf_listing(self.hf_listing)
-        disable_hf_cat_readahead()
+        enable_hf_concurrent_ranges()
         _unregister_hf_array2d_extension()
         cached_hats = load_hats_metadata(self.hats_metadata)
         telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in self.catalogs})
