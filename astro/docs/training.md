@@ -177,7 +177,8 @@ and a positive `tokens.val_check_interval`. The panel has its own
 and `split: validation`; it does not use the training seed, stream, or echo mix.
 Use the same modalities and tokenization when comparing curves.
 
-Rank zero streams the panel from HF once at startup; each DP replica retains
+Rank zero streams the panel from HF once at startup, replaying the whole load
+up to twice after a transport error; each DP replica retains
 its shard in CPU memory and TP peers score identical inputs. No payloads are
 saved. `<checkpoints_path>/validation-panel.json` records the seed and ordered
 IDs. A resume checks the prior manifest when available. Set

@@ -60,6 +60,24 @@ def test_validation_panel_replays_and_keeps_every_target(monkeypatch, tmp_path, 
         panel.save_validation_manifest(destination, ids[::-1], reference=reference)
 
 
+def test_validation_panel_replays_after_transport_error(monkeypatch, panel_config):
+    records = [make_record(i) for i in range(2)]
+    errors = [OSError("connection reset"), ValueError("bad row")]
+
+    def draws(self, **kwargs):
+        yield 0, records[:1]
+        if errors:
+            raise errors.pop(0)
+        yield 1, records[1:]
+
+    monkeypatch.setattr(panel.CatalogStream, "draws", draws)
+    monkeypatch.setattr(panel.time, "sleep", lambda seconds: None)
+    with pytest.raises(ValueError, match="bad row"):  # replays the OSError, not a decode error
+        panel.load_validation_panel(panel_config, 2, 500, 1, 1)
+    ids, _ = panel.load_validation_panel(panel_config, 2, 500, 1, 1)
+    assert ids == [record["object_id"] for record in records]
+
+
 def test_validation_panel_fails_if_too_few_unique_objects(monkeypatch, panel_config):
     def draws(self, **kwargs):
         for epoch in range(2):

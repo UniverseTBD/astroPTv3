@@ -3,6 +3,8 @@
 split: validation
 min_catalogs: 3
 partitions_per_chunk: 1
+# Dask's auto limit (RAM / cores) pauses this one-thread worker mid-load.
+worker_memory_limit: 64GiB
 anchors:
   - name: legacy
     draw_weight: 1
@@ -35,7 +37,7 @@ anchors:
       legacy_south_flux_z: FLUX_Z
 catalogs:
   - name: sdss
-    repo: UniverseTBD/mmu_sdss_sdss@da175ca9bb931f4301ab950431922ba9f99089ba
+    repo: UniverseTBD/mmu_sdss_dr17@091f56aa923837b7672586f6076fda490a6062dc
     decoder: sdss_spectrum
     record_key: spectrum_sdss
     scalar_columns:

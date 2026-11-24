@@ -1,6 +1,7 @@
 """A replayable held-out panel; only its ID manifest is written to disk."""
 
 import json
+import time
 from contextlib import closing
 from itertools import islice
 from pathlib import Path
@@ -8,12 +9,14 @@ from pathlib import Path
 import yaml
 
 from .catalog_stream import CatalogStream
-from .nanotron_loader import flatten_packed_batch, hf_config_from_modalities
+from .nanotron_loader import _retryable, flatten_packed_batch, hf_config_from_modalities
 from .packing import ObjectSequencer, PackedCollator
 
 PANEL_FILENAME = "validation-panel.json"
 PANEL_SEED = 76
-_ROWS_PER_DRAW = 16
+_ROWS_PER_DRAW = 32
+# Few full replays: the other ranks wait at most 30 minutes for rank zero.
+_RETRIES = 2
 
 
 def load_validation_panel(model_config, objects, seq_len, batch_size, dp_size):
@@ -27,18 +30,26 @@ def load_validation_panel(model_config, objects, seq_len, batch_size, dp_size):
     spec = yaml.safe_load(Path(__file__).with_name("validation_catalogs.yaml").read_text())
     stream = CatalogStream(spec, config)
     sequencer = ObjectSequencer(config)
-    panel = {}
-    # Bound the scan if the footprint is sparse or objects repeat across draws.
-    with closing(stream.draws(seed=PANEL_SEED, rank=0, worker_id=0, rows_per_draw=_ROWS_PER_DRAW)) as draws:
-        for _, records in islice(draws, objects):
-            for record in records:
-                object_id = record["object_id"]
-                if object_id not in panel:
-                    panel[object_id] = sequencer.build(record, epoch=PANEL_SEED)
-                if len(panel) == objects:
-                    break
-            if len(panel) == objects:
-                break
+    for attempt in range(_RETRIES + 1):
+        panel = {}
+        try:
+            # Bound the scan if the footprint is sparse or objects repeat across draws.
+            with closing(stream.draws(seed=PANEL_SEED, rank=0, worker_id=0, rows_per_draw=_ROWS_PER_DRAW)) as draws:
+                for _, records in islice(draws, objects):
+                    for record in records:
+                        object_id = record["object_id"]
+                        if object_id not in panel:
+                            panel[object_id] = sequencer.build(record, epoch=PANEL_SEED)
+                        if len(panel) == objects:
+                            break
+                    if len(panel) == objects:
+                        break
+            break
+        except Exception as error:
+            # A fresh stream replays the same draws from the start; the manifest catches drift.
+            if attempt == _RETRIES or not _retryable(error):
+                raise
+            time.sleep(5 * 2**attempt)
     if len(panel) != objects:
         raise ValueError(f"Validation panel found only {len(panel)} of {objects} unique objects")
 
