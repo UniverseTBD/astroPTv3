@@ -243,6 +243,46 @@ def _shard_sky(anchor, footprint, index, count):
     return footprint.intersection(cells)
 
 
+def _project_anchor_margin(anchor):
+    """Strip payload columns from an anchor's margin catalog.
+
+    In outer crossmatches, LSDB only uses ``left.margin`` coordinates to suppress
+    unmatched right rows near a partition seam; every visitor match is dropped before
+    output assembly, so payload columns on ``anchor.margin`` are fetched only to be
+    discarded.
+    """
+    margin = getattr(anchor, "margin", None)
+    if (
+        margin is None
+        or not hasattr(margin, "hc_structure")
+        or not getattr(margin._operation, "is_reloadable", False)
+        or margin.hc_structure.catalog_base_dir is None
+        or margin.hc_structure.original_schema is None
+    ):
+        return anchor
+    info = margin.hc_structure.catalog_info
+    coords = [col for col in (info.ra_column, info.dec_column) if col]
+    if not coords or list(margin.columns) == coords:
+        return anchor
+    import hats as hc
+    from lsdb.loaders.hats.hats_loading_config import HatsLoadingConfig
+    from lsdb.loaders.hats.read_hats import _load_catalog
+
+    old = getattr(margin, "loading_config", None)
+    hc_margin = margin._create_modified_hc_structure(updated_schema=margin.hc_structure.original_schema)
+    config = HatsLoadingConfig(
+        columns=coords,
+        margin_cache=None,
+        error_empty_filter=False,
+        path_generator=old.path_generator if old and old.path_generator else hc.io.pixel_catalog_file,
+        filters=old.filters if old else None,
+        kwargs=dict(old.kwargs) if old and old.kwargs else {},
+        show_statistics=old.show_statistics if old else False,
+    )
+    anchor.margin = _load_catalog(hc_margin, config)
+    return anchor
+
+
 def _draw_paths(weights, offset):
     while True:
         for turn in range(max(weights)):
@@ -373,6 +413,7 @@ class CatalogStream:
                     protocol="inproc", memory_limit=self.spec["worker_memory_limit"],
                 ) as cluster, Client(cluster) as client:
                     opened = {}
+                    anchor_names = {star.catalogs[0]["name"] for star in self.stars}
                     for catalog in self.catalogs:
                         decoder = catalog["decoder"]
                         payload, fields, family = _PROFILES[decoder]
@@ -382,9 +423,12 @@ class CatalogStream:
                         elif payload:
                             columns.append(payload)
                         columns.extend(catalog["scalar_columns"].values())
-                        opened[catalog['name']] = open_catalog(
+                        opened_cat = open_catalog(
                             f"hf://datasets/{catalog['repo']}", columns=list(dict.fromkeys(columns)),
                         )
+                        if catalog["name"] in anchor_names:
+                            opened_cat = _project_anchor_margin(opened_cat)
+                        opened[catalog['name']] = opened_cat
                     reader_seed = loader.consumer_seed(seed, rank, worker_id, generation)
                     streams = self._streams(opened, client, reader_seed, shard)
                     failures.pop(None, None)
