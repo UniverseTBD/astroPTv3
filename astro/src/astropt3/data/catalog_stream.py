@@ -15,14 +15,23 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+from dask._task_spec import Task, TaskRef
+from dask.delayed import Delayed, delayed
 from dask.distributed import Client, LocalCluster
+from hats.pixel_math.healpix_pixel import HealpixPixel
 from lsdb.loaders.hats.read_hats import open_catalog
 from lsdb.streams.catalog_streams import (
     CrossMatchStream,
     InfiniteStream,
+    _assemble_star_pixel,
     _data_coverage,
+    _partition_delayeds,
     _restrict_to_footprint,
 )
+
+_LSDB_CROSSMATCH_STREAM = CrossMatchStream
+_MAX_ROWGROUP_FILTERS = 10
+_ORDER0_PIXEL_ARCSEC = 210_962.0  # sqrt(4*pi / 12) in arcseconds
 from mocpy import MOC
 from PIL import Image
 
@@ -302,6 +311,119 @@ def _open_from_hats_metadata(hc_catalog, margin_hc_catalog, *, columns, margin_c
     return catalog
 
 
+def _healpix_29_filters_for_pixel(
+    pixel: HealpixPixel, radius_arcsec: float, index_column: str = "_healpix_29"
+) -> list[list[tuple[str, str, int]]]:
+    """Return DNF ``_healpix_29`` row-group bounds covering ``pixel`` plus a >=4x collar."""
+    collar_order = int(math.floor(math.log2(_ORDER0_PIXEL_ARCSEC / max(4.0 * radius_arcsec, 1.0))))
+    collar_order = max(pixel.order, min(14, collar_order))
+    moc = MOC.from_healpix_cells(
+        np.array([pixel.pixel], dtype=np.uint64),
+        np.array([pixel.order], dtype=np.uint8),
+        pixel.order,
+    ).to_order(collar_order).extended()
+    ranges = moc.to_depth29_ranges
+    if len(ranges) > _MAX_ROWGROUP_FILTERS:
+        starts, ends = ranges[:, 0], ranges[:, 1]
+        gaps = starts[1:] - ends[:-1]
+        cuts = np.sort(
+            np.argpartition(gaps, -(_MAX_ROWGROUP_FILTERS - 1))[-(_MAX_ROWGROUP_FILTERS - 1):]
+        )
+        merged = []
+        prev = 0
+        for cut in cuts:
+            merged.append((int(starts[prev]), int(ends[cut])))
+            prev = int(cut) + 1
+        merged.append((int(starts[prev]), int(ends[-1])))
+        return [[(index_column, ">=", lo), (index_column, "<", hi)] for lo, hi in merged]
+    return [[(index_column, ">=", int(lo)), (index_column, "<", int(hi))] for lo, hi in ranges]
+
+
+def _remap_task_refs(obj: Any, key_map: dict) -> Any:
+    if isinstance(obj, TaskRef):
+        return TaskRef(key_map.get(obj.key, obj.key))
+    if isinstance(obj, tuple):
+        return tuple(_remap_task_refs(item, key_map) for item in obj)
+    if isinstance(obj, list):
+        return [_remap_task_refs(item, key_map) for item in obj]
+    if isinstance(obj, dict):
+        return {k: _remap_task_refs(v, key_map) for k, v in obj.items()}
+    return obj
+
+
+def _push_coarse_pixel_filters(
+    part: Delayed, target_pixel: HealpixPixel, radius_arcsec: float
+) -> Delayed:
+    """Push ``target_pixel``'s collared ``_healpix_29`` bounds into coarser ``read_pixel`` tasks."""
+    graph = dict(part.dask)
+    rewritten: dict[Any, list[list[tuple[str, str, int]]]] = {}
+    cached_filters: dict[str, list[list[tuple[str, str, int]]]] = {}
+    for key, node in graph.items():
+        if not isinstance(node, Task) or not node.args:
+            continue
+        part_pixel = node.args[0]
+        if not isinstance(part_pixel, HealpixPixel) or part_pixel.order >= target_pixel.order:
+            continue
+        if "filters" not in node.kwargs:
+            continue
+        index_col = node.kwargs.get("index_column")
+        schema = node.kwargs.get("schema")
+        if index_col != "_healpix_29" or schema is None or index_col not in schema.names:
+            continue
+        if index_col not in cached_filters:
+            cached_filters[index_col] = _healpix_29_filters_for_pixel(
+                target_pixel, radius_arcsec, index_column=index_col
+            )
+        rewritten[key] = cached_filters[index_col]
+
+    if not rewritten:
+        return part
+
+    # Propagate rekeying to every downstream task so sibling pixels in one chunk never collide.
+    dirty = set(rewritten)
+    changed = True
+    while changed:
+        changed = False
+        for key, node in graph.items():
+            if key not in dirty and isinstance(node, Task) and (node.dependencies & dirty):
+                dirty.add(key)
+                changed = True
+
+    tag = (target_pixel.order, target_pixel.pixel)
+    key_map = {key: (key, tag) for key in dirty}
+    new_graph = {}
+    for key, node in graph.items():
+        if key not in dirty:
+            new_graph[key] = node
+            continue
+        new_key = key_map[key]
+        new_args = _remap_task_refs(node.args, key_map)
+        new_kwargs = _remap_task_refs(node.kwargs, key_map)
+        if key in rewritten:
+            new_kwargs = {**new_kwargs, "filters": rewritten[key]}
+        new_graph[new_key] = Task(new_key, node.func, *new_args, **new_kwargs)
+    return Delayed(key_map.get(part.key, part.key), new_graph)
+
+
+class _FilteredCrossMatchStream(CrossMatchStream):
+    """CrossMatchStream that pushes fine aligned-pixel bounds into coarser Parquet reads."""
+
+    def __init__(self, *args, radius_arcsec: float = 1.0, **kwargs):
+        self._pushdown_radius_arcsec = radius_arcsec
+        super().__init__(*args, **kwargs)
+
+    def _delayed_partition(self, pixel: HealpixPixel) -> Delayed:
+        right_parts = [
+            [_push_coarse_pixel_filters(p, pixel, self._pushdown_radius_arcsec) for p in _partition_delayeds(result, pixel)]
+            for result in self._results
+        ]
+        anchor_parts = [
+            _push_coarse_pixel_filters(p, pixel, self._pushdown_radius_arcsec)
+            for p in _partition_delayeds(self._anchor, pixel)
+        ]
+        return delayed(_assemble_star_pixel)(pixel, anchor_parts, right_parts, self._assembly)
+
+
 def _draw_paths(weights, offset):
     while True:
         for turn in range(max(weights)):
@@ -404,7 +526,12 @@ class CatalogStream:
             if joins:
                 if footprint is not None:
                     kwargs['footprint'] = footprint
-                stream = CrossMatchStream(anchor, *joins, min_catalogs=minimum, **kwargs)
+                if CrossMatchStream is _LSDB_CROSSMATCH_STREAM:
+                    stream = _FilteredCrossMatchStream(
+                        anchor, *joins, min_catalogs=minimum, radius_arcsec=self.spec['radius_arcsec'], **kwargs
+                    )
+                else:
+                    stream = CrossMatchStream(anchor, *joins, min_catalogs=minimum, **kwargs)
             else:
                 stream = InfiniteStream(anchor if footprint is None else anchor.moc_search(footprint), **kwargs)
             if not stream.npartitions:

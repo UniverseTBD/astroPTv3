@@ -842,3 +842,65 @@ def test_project_anchor_margin_strips_payload_columns_on_disk(tmp_path, monkeypa
     assert margin_cols == {("ra", "dec")}
     right_margin_cols = {cols for path, cols in calls if "right_300arcs" in path}
     assert right_margin_cols == {("object_id", "ra", "dec", "z")}
+
+
+def test_filtered_crossmatch_stream_pushes_healpix_rowgroup_filters(tmp_path, monkeypatch):
+    """Fine aligned pixels push collared _healpix_29 bounds into coarser partner reads."""
+    import lsdb
+    import nested_pandas as npd
+    import pyarrow as pa
+    from lsdb.loaders.hats import read_hats as lsdb_rh
+    from lsdb.streams.catalog_streams import CrossMatchStream
+
+    rng = np.random.default_rng(11)
+    n = 160
+    ra, dec = rng.uniform(10.0, 22.0, n), rng.uniform(10.0, 22.0, n)
+    left_tbl = pa.table({
+        "object_id": [f"L{i}" for i in range(n)],
+        "ra": ra,
+        "dec": dec,
+    })
+    right_tbl = pa.table({
+        "object_id": [f"R{i}" for i in range(n)],
+        "ra": np.concatenate([ra[:120] + 1e-5, rng.uniform(10.0, 22.0, 40)]),
+        "dec": np.concatenate([dec[:120] + 1e-5, rng.uniform(10.0, 22.0, 40)]),
+        "z": np.linspace(0.1, 0.9, n).astype(np.float32),
+    })
+    lsdb.from_dataframe(
+        npd.from_pyarrow(left_tbl), catalog_name="fine_left", margin_threshold=300.0, highest_order=5, partition_rows=20
+    ).write_catalog(tmp_path / "fine_left", as_collection=True)
+    lsdb.from_dataframe(
+        npd.from_pyarrow(right_tbl), catalog_name="coarse_right", margin_threshold=300.0, highest_order=2, partition_rows=300
+    ).write_catalog(tmp_path / "coarse_right", as_collection=True)
+
+    l_ref = lsdb.open_catalog(tmp_path / "fine_left")
+    r_ref = lsdb.open_catalog(tmp_path / "coarse_right")
+    fp = l_ref.hc_structure.pixel_tree.to_moc()
+    ref_stream = CrossMatchStream(
+        l_ref, {"other": r_ref, "how": "outer", "suffixes": ("", "_right"), "radius_arcsec": 1.0},
+        footprint=fp, partitions_per_chunk=4, seed=0,
+    )
+    ref_df = next(iter(ref_stream))
+
+    seen_filters: list[tuple[str, int, object]] = []
+    orig_read_pixel = lsdb_rh.read_pixel
+
+    def spy_read_pixel(pixel, *args, **kwargs):
+        seen_filters.append((Path(str(kwargs["catalog_base_dir"])).name, pixel.order, kwargs.get("filters")))
+        return orig_read_pixel(pixel, *args, **kwargs)
+
+    monkeypatch.setattr(lsdb_rh, "read_pixel", spy_read_pixel)
+    l_opt = lsdb.open_catalog(tmp_path / "fine_left")
+    r_opt = lsdb.open_catalog(tmp_path / "coarse_right")
+    opt_stream = streaming._FilteredCrossMatchStream(
+        l_opt, {"other": r_opt, "how": "outer", "suffixes": ("", "_right"), "radius_arcsec": 1.0},
+        footprint=fp, partitions_per_chunk=4, seed=0, radius_arcsec=1.0,
+    )
+    opt_df = next(iter(opt_stream))
+
+    # Multiple fine siblings in one chunk share the coarse partition without key collisions
+    # and match unmodified CrossMatchStream bit-for-bit.
+    assert ref_df.sort_index().to_pyarrow().equals(opt_df.sort_index().to_pyarrow())
+    coarse_calls = [f for name, order, f in seen_filters if name == "coarse_right"]
+    assert len(coarse_calls) >= 4
+    assert all(f is not None and all(term[0] == "_healpix_29" for conj in f for term in conj) for f in coarse_calls)
