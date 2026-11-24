@@ -334,7 +334,7 @@ def test_configured_loader_preserves_alignment_across_echoes(recipe, offline):
     dataset_args = {**recipe["data_stages"][0]["data"]["dataset"], "catalog_stream": spec}
     batches = loader.build_astropt3_dataloader(
         SimpleNamespace(**dataset_args), config,
-        micro_batch_size=1, sequence_length=1536, dp_rank=0, num_workers=0,
+        micro_batch_size=1, sequence_length=1536, dp_rank=0, dp_size=1, num_workers=0,
     )
     stream = batches.dataset.catalog_stream
     assert stream.spec == streaming.CatalogStream(spec, config).spec
@@ -370,7 +370,7 @@ def test_recipe_and_shared_builder(recipe, offline):
     assert len(recipe["model"]["model_config"]["modalities"]) == 51
     batches = loader.build_astropt3_dataloader(
         SimpleNamespace(**dataset_args), SimpleNamespace(**recipe["model"]["model_config"]),
-        micro_batch_size=1, sequence_length=2048, dp_rank=0, num_workers=0,
+        micro_batch_size=1, sequence_length=2048, dp_rank=0, dp_size=1, num_workers=0,
     )
     expected = streaming.CatalogStream(dataset_args["catalog_stream"], batches.dataset.config).spec
     assert batches.dataset.catalog_stream.spec == expected

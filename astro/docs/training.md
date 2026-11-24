@@ -44,8 +44,9 @@ Facts to know:
 - **Workers and memory.** `num_loading_workers` controls concurrent readers
   per DP rank; each may buffer large image partitions. Monitor box-wide RSS
   and lower the worker count after an observed OOM.
-- **No cursors or coverage guarantee.** Consumer seeds reduce identical
-  draws, but consumers may overlap; retries and resumes can revisit records.
+- **No cursors or coverage guarantee.** Each DP rank × worker owns a
+  disjoint round-robin share of the anchor's HATS partitions (shared only when
+  consumers outnumber partitions); retries and resumes can revisit records.
 - **Provenance.** `uv.lock` records the resolved LSDB dependency, and `[data]`
   startup lines log its version and catalog information when available.
 
@@ -303,7 +304,7 @@ modality `record_keys` match catalog outputs. A catalog supplies `record_key`
 and/or `scalar_columns` (**record key → flat catalog column**). Keep existing
 token IDs frozen; new names need non-colliding IDs and sufficient `vocab_size`.
 
-North and [DR10 South](legacy-south.md) each anchor an LSDB star with SDSS, DESI, HSC and galaxies-with-hats outer joins and a PROVABGS left join at 1″. The [pinned Galaxies train collection](https://huggingface.co/datasets/Smith42/galaxies-with-hats/tree/1a2b1ebbbe06c67a15f49385643ab711c5824a0d/train) has a 10″ margin for cross-partition matches. `min_catalogs: 3` selects each anchor's sky where at least two outer partners have coverage. It does not count the alternative anchor, left-only partners, or modalities on a row. Missing modalities are omitted; right-only rows stay separate, and rows with no usable modalities are dropped.
+North and [DR10 South](legacy-south.md) each anchor an LSDB star with SDSS DR17, DESI, HSC and galaxies-with-hats outer joins and a PROVABGS left join at 1″. The [pinned Galaxies train collection](https://huggingface.co/datasets/Smith42/galaxies-with-hats/tree/1a2b1ebbbe06c67a15f49385643ab711c5824a0d/train) has a 10″ margin for cross-partition matches. `min_catalogs: 3` selects each anchor's sky where at least two outer partners have coverage. It does not count the alternative anchor, left-only partners, or modalities on a row. Missing modalities are omitted; right-only rows stay separate, and rows with no usable modalities are dropped.
 
 For anchor-only streaming, set `catalogs: []` and `min_catalogs: 1`. When
 omitted, `partitions_per_chunk` defaults to 1 for anchor-only streams and 4

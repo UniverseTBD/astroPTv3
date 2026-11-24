@@ -521,7 +521,7 @@ data_stages:
           catalogs:
             - name: sdss
               repo: >-
-                UniverseTBD/mmu_sdss_sdss@da175ca9bb931f4301ab950431922ba9f99089ba
+                UniverseTBD/mmu_sdss_dr17@091f56aa923837b7672586f6076fda490a6062dc
               decoder: sdss_spectrum
               record_key: spectrum_sdss
               scalar_columns:
