@@ -46,11 +46,15 @@ def test_real_lsdb_stream_decodes_local_catalogs(recipe, monkeypatch, tmp_path, 
         row = {"ra": 10.0, "dec": 0.0, **_row({"anchors": [catalog], "catalogs": []})}
         if catalog["decoder"] == "hsc_image":
             row["image"]["ivar"] = row["image"]["flux"]  # Make the unused leaf present on disk.
+        elif catalog["decoder"] in ("desi_spectrum", "sdss_spectrum"):
+            row["spectrum"]["ivar"] = row["spectrum"]["flux"]  # Unused spectrum leaf on disk.
         source = from_dataframe(nested_frame([row], (payload,)), catalog_name=catalog["name"])
         url = f"hf://datasets/{catalog['repo']}"
-        if catalog["decoder"] == "hsc_image":
-            # Read a real Parquet projection for the HSC partner, which needs no margin for a left join.
-            catalog["how"] = "left"
+        if catalog["decoder"] in ("hsc_image", "desi_spectrum", "sdss_spectrum"):
+            # Read a real Parquet projection for image and spectrum partners (left join needs no margin).
+            if catalog is not spec["anchors"][0]:
+                catalog["how"] = "left"
+                spec["min_catalogs"] = 1
             path = tmp_path / catalog["name"]
             source.write_catalog(path, as_collection=False, progress_bar=False, should_write_skymap=False)
             catalogs[url] = path
@@ -61,7 +65,10 @@ def test_real_lsdb_stream_decodes_local_catalogs(recipe, monkeypatch, tmp_path, 
         source = catalogs[url]
         if isinstance(source, Path):
             catalog = open_catalog(source, **kwargs)
-            assert catalog.meta.get_subcolumns() == ["image.band", "image.flux", "image.scale"]
+            if source.name == "hsc":
+                assert catalog.meta.get_subcolumns() == ["image.band", "image.flux", "image.scale"]
+            else:
+                assert catalog.meta.get_subcolumns() == ["spectrum.flux", "spectrum.lambda", "spectrum.mask"]
             return catalog
         return source
 
@@ -259,6 +266,8 @@ def test_catalog_count_projection_and_finite_draws(recipe, offline, count):
         read_payload = {
             "legacy_image": ["image.band", "image.flux"],
             "hsc_image": ["image.band", "image.flux", "image.scale"],
+            "desi_spectrum": ["spectrum.flux", "spectrum.lambda", "spectrum.mask"],
+            "sdss_spectrum": ["spectrum.flux", "spectrum.lambda", "spectrum.mask"],
         }.get(decoder, payload)
         assert columns == ["object_id", "ra", "dec", *read_payload, *catalog.get("scalar_columns", {}).values()]
         if payload:
@@ -765,3 +774,133 @@ def test_unmatched_galaxy_keeps_its_identity_and_modalities(recipe):
     gwh = {m["name"] for m in config.modalities if m["source"] == "galaxies_with_hats"}
     assert "galaxies" in gwh & set(matched)
     assert set(ObjectSequencer(config).build(record).values) == gwh & set(matched)
+
+
+def test_project_anchor_margin_strips_payload_columns_on_disk(tmp_path, monkeypatch):
+    """Left-anchor margins fetch only coordinate columns while preserving outer-join output."""
+    import lsdb
+    import nested_pandas as npd
+    import pyarrow as pa
+    from lsdb.loaders.hats import read_hats as lsdb_rh
+    from lsdb.streams.catalog_streams import CrossMatchStream
+
+    rng = np.random.default_rng(7)
+    n = 120
+    ra, dec = rng.uniform(10.0, 20.0, n), rng.uniform(10.0, 20.0, n)
+    left_tbl = pa.table({
+        "object_id": [f"L{i}" for i in range(n)],
+        "ra": ra,
+        "dec": dec,
+        "ebv": np.linspace(0.01, 0.05, n).astype(np.float32),
+        "image": pa.StructArray.from_arrays(
+            [
+                pa.array([["des-g", "des-r"]] * n),
+                pa.array([[[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]] * n),
+            ],
+            names=["band", "flux"],
+        ),
+    })
+    right_tbl = pa.table({
+        "object_id": [f"R{i}" for i in range(n)],
+        "ra": np.concatenate([ra[:90] + 1e-5, rng.uniform(10.0, 22.0, 30)]),
+        "dec": np.concatenate([dec[:90] + 1e-5, rng.uniform(10.0, 22.0, 30)]),
+        "z": np.linspace(0.1, 0.5, n).astype(np.float32),
+    })
+    lsdb.from_dataframe(
+        npd.from_pyarrow(left_tbl), catalog_name="left", margin_threshold=300.0, highest_order=5, partition_rows=30
+    ).write_catalog(tmp_path / "left", as_collection=True)
+    lsdb.from_dataframe(
+        npd.from_pyarrow(right_tbl), catalog_name="right", margin_threshold=300.0, highest_order=5, partition_rows=30
+    ).write_catalog(tmp_path / "right", as_collection=True)
+
+    left_full = lsdb.open_catalog(tmp_path / "left", columns=["object_id", "ra", "dec", "image.band", "image.flux", "ebv"])
+    right_full = lsdb.open_catalog(tmp_path / "right", columns=["object_id", "ra", "dec", "z"])
+    fp = left_full.hc_structure.pixel_tree.to_moc()
+    ref = next(iter(CrossMatchStream(
+        left_full, {"other": right_full, "how": "outer", "suffixes": ("", "_right"), "radius_arcsec": 1.0},
+        footprint=fp, partitions_per_chunk=50, seed=0,
+    )))
+
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    orig_read_pixel = lsdb_rh.read_pixel
+
+    def spy_read_pixel(*args, **kwargs):
+        calls.append((str(kwargs["catalog_base_dir"]), tuple(kwargs.get("columns") or ())))
+        return orig_read_pixel(*args, **kwargs)
+
+    monkeypatch.setattr(lsdb_rh, "read_pixel", spy_read_pixel)
+    left_proj = streaming._project_anchor_margin(
+        lsdb.open_catalog(tmp_path / "left", columns=["object_id", "ra", "dec", "image.band", "image.flux", "ebv"])
+    )
+    right_proj = lsdb.open_catalog(tmp_path / "right", columns=["object_id", "ra", "dec", "z"])
+    out = next(iter(CrossMatchStream(
+        left_proj, {"other": right_proj, "how": "outer", "suffixes": ("", "_right"), "radius_arcsec": 1.0},
+        footprint=fp, partitions_per_chunk=50, seed=0,
+    )))
+    assert ref.sort_index().to_pyarrow().equals(out.sort_index().to_pyarrow())
+    margin_cols = {cols for path, cols in calls if "left_300arcs" in path}
+    assert margin_cols == {("ra", "dec")}
+    right_margin_cols = {cols for path, cols in calls if "right_300arcs" in path}
+    assert right_margin_cols == {("object_id", "ra", "dec", "z")}
+
+
+def test_filtered_crossmatch_stream_pushes_healpix_rowgroup_filters(tmp_path, monkeypatch):
+    """Fine aligned pixels push collared _healpix_29 bounds into coarser partner reads."""
+    import lsdb
+    import nested_pandas as npd
+    import pyarrow as pa
+    from lsdb.loaders.hats import read_hats as lsdb_rh
+    from lsdb.streams.catalog_streams import CrossMatchStream
+
+    rng = np.random.default_rng(11)
+    n = 160
+    ra, dec = rng.uniform(10.0, 22.0, n), rng.uniform(10.0, 22.0, n)
+    left_tbl = pa.table({
+        "object_id": [f"L{i}" for i in range(n)],
+        "ra": ra,
+        "dec": dec,
+    })
+    right_tbl = pa.table({
+        "object_id": [f"R{i}" for i in range(n)],
+        "ra": np.concatenate([ra[:120] + 1e-5, rng.uniform(10.0, 22.0, 40)]),
+        "dec": np.concatenate([dec[:120] + 1e-5, rng.uniform(10.0, 22.0, 40)]),
+        "z": np.linspace(0.1, 0.9, n).astype(np.float32),
+    })
+    lsdb.from_dataframe(
+        npd.from_pyarrow(left_tbl), catalog_name="fine_left", margin_threshold=300.0, highest_order=5, partition_rows=20
+    ).write_catalog(tmp_path / "fine_left", as_collection=True)
+    lsdb.from_dataframe(
+        npd.from_pyarrow(right_tbl), catalog_name="coarse_right", margin_threshold=300.0, highest_order=2, partition_rows=300
+    ).write_catalog(tmp_path / "coarse_right", as_collection=True)
+
+    l_ref = lsdb.open_catalog(tmp_path / "fine_left")
+    r_ref = lsdb.open_catalog(tmp_path / "coarse_right")
+    fp = l_ref.hc_structure.pixel_tree.to_moc()
+    ref_stream = CrossMatchStream(
+        l_ref, {"other": r_ref, "how": "outer", "suffixes": ("", "_right"), "radius_arcsec": 1.0},
+        footprint=fp, partitions_per_chunk=4, seed=0,
+    )
+    ref_df = next(iter(ref_stream))
+
+    seen_filters: list[tuple[str, int, object]] = []
+    orig_read_pixel = lsdb_rh.read_pixel
+
+    def spy_read_pixel(pixel, *args, **kwargs):
+        seen_filters.append((Path(str(kwargs["catalog_base_dir"])).name, pixel.order, kwargs.get("filters")))
+        return orig_read_pixel(pixel, *args, **kwargs)
+
+    monkeypatch.setattr(lsdb_rh, "read_pixel", spy_read_pixel)
+    l_opt = lsdb.open_catalog(tmp_path / "fine_left")
+    r_opt = lsdb.open_catalog(tmp_path / "coarse_right")
+    opt_stream = streaming._FilteredCrossMatchStream(
+        l_opt, {"other": r_opt, "how": "outer", "suffixes": ("", "_right"), "radius_arcsec": 1.0},
+        footprint=fp, partitions_per_chunk=4, seed=0, radius_arcsec=1.0,
+    )
+    opt_df = next(iter(opt_stream))
+
+    # Multiple fine siblings in one chunk share the coarse partition without key collisions
+    # and match unmodified CrossMatchStream bit-for-bit.
+    assert ref_df.sort_index().to_pyarrow().equals(opt_df.sort_index().to_pyarrow())
+    coarse_calls = [f for name, order, f in seen_filters if name == "coarse_right"]
+    assert len(coarse_calls) >= 4
+    assert all(f is not None and all(term[0] == "_healpix_29" for conj in f for term in conj) for f in coarse_calls)
