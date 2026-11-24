@@ -132,7 +132,7 @@ def test_image_only_records_ship_empty_spectra_tensors(tiny_config, tiny_model, 
 
 def test_open_draws_delegates_identity_and_epoch(tiny_config, fake_lsdb):
     stream = _stream(tiny_config, rank=2, seed=19)
-    with closing(stream._open_draws(SimpleNamespace(id=3))) as draws:
+    with closing(stream._open_draws(SimpleNamespace(id=3, num_workers=1))) as draws:
         for epoch in range(2):
             records = list(next(draws))
             assert len(records) == 6
@@ -140,6 +140,29 @@ def test_open_draws_delegates_identity_and_epoch(tiny_config, fake_lsdb):
             assert stream._epoch == epoch
     assert len(fake_lsdb.streams) == 1
     assert fake_lsdb.streams[0].seed == consumer_seed(19, 2, 3, 0)
+
+
+def test_open_draws_shards_by_rank_and_worker(tiny_config, monkeypatch):
+    stream = _stream(tiny_config, rank=2, dp_size=3)
+    shards = []
+    monkeypatch.setattr(stream.catalog_stream, "draws", lambda **kw: shards.append(kw["shard"]) or iter(()))
+    list(stream._open_draws(SimpleNamespace(id=1, num_workers=4)))
+    assert shards == [(9, 12)]
+
+
+@pytest.mark.parametrize("count", [3, 10_000])
+def test_shard_sky_splits_whole_partitions(count):
+    from lsdb import generate_catalog
+
+    anchor = generate_catalog(500, 10, seed=1)
+    footprint = catalog_stream._data_coverage(anchor)
+    every = set(anchor.get_healpix_pixels())
+    owned = [set(anchor.moc_search(catalog_stream._shard_sky(anchor, footprint, i, count)).get_healpix_pixels())
+             for i in range(min(count, len(every)))]
+    assert set().union(*owned) == every
+    assert sum(map(len, owned)) == len(every)  # disjoint
+    assert catalog_stream._shard_sky(anchor, footprint, len(every), count) == footprint.intersection(
+        catalog_stream._shard_sky(anchor, footprint, 0, count))  # wraps past the partition count
 
 
 def test_seeds_differ_across_rank_worker_and_retry():
@@ -319,7 +342,7 @@ def test_missing_or_invalid_catalogs_are_rejected(tiny_config, spec):
 def test_builder_rejects_missing_catalogs_and_old_selection(tiny_config):
     for args in (SimpleNamespace(), SimpleNamespace(crossmatch_desi=True)):
         with pytest.raises(ValueError, match="catalog_stream"):
-            build_astropt3_dataloader(args, tiny_config, MBS, SEQ_LEN, 0)
+            build_astropt3_dataloader(args, tiny_config, MBS, SEQ_LEN, 0, 1)
 
 
 @pytest.mark.parametrize("obsolete", [

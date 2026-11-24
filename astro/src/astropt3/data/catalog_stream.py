@@ -226,6 +226,21 @@ def _split_sky(split):
     return validation if split == "validation" else validation.to_order(10).extended().complement()
 
 
+def _shard_sky(anchor, footprint, index, count):
+    # Whole HATS partitions (similar row counts) per consumer, so no two consumers fetch
+    # the same anchor file; more consumers than partitions share them round-robin.
+    # shortcut: no seam collar, so an outer partner row within radius_arcsec of a shard
+    # seam can appear in two shards; add a guard like the anchors' if that matters.
+    pixels = anchor.moc_search(footprint).get_healpix_pixels()
+    step = min(count, len(pixels))
+    if not step:
+        return footprint
+    mine = pixels[index % step::step]
+    orders = np.array([p.order for p in mine], dtype=np.uint8)
+    cells = MOC.from_healpix_cells(np.array([p.pixel for p in mine], dtype=np.uint64), orders, int(orders.max(initial=0)))
+    return footprint.intersection(cells)
+
+
 def _draw_paths(weights, offset):
     while True:
         for turn in range(max(weights)):
@@ -288,7 +303,7 @@ class CatalogStream:
         if partners and 'min_catalogs' not in inspect.signature(CrossMatchStream).parameters:
             raise ValueError("configured catalog streams require LSDB's multi-catalog/min_catalogs API")
 
-    def _streams(self, opened, client, seed):
+    def _streams(self, opened, client, seed, shard=(0, 1)):
         claimed = None
         streams = []
         minimum = self.spec['min_catalogs']
@@ -302,7 +317,7 @@ class CatalogStream:
             footprint = None
             if minimum > 1 and len(outer) != len(rights):
                 _, footprint = _restrict_to_footprint(anchor, None, outer, minimum)
-            if len(self.stars) > 1 or 'split' in self.spec:
+            if len(self.stars) > 1 or 'split' in self.spec or shard[1] > 1:
                 if footprint is None:
                     if minimum > 1:
                         _, footprint = _restrict_to_footprint(anchor, None, outer, minimum)
@@ -317,6 +332,8 @@ class CatalogStream:
                     claimed = guard if claimed is None else claimed.union(guard)
                 if 'split' in self.spec:
                     footprint = footprint.intersection(_split_sky(self.spec['split']))
+                if shard[1] > 1:
+                    footprint = _shard_sky(anchor, footprint, *shard)
                 if footprint.empty():
                     raise ValueError(f"The selected {root['name']} footprint contains no partitions")
             kwargs: dict[str, Any] = {'client': client, 'partitions_per_chunk': self.spec['partitions_per_chunk'],
@@ -332,8 +349,11 @@ class CatalogStream:
             streams.append(stream)
         return streams
 
-    def draws(self, *, seed, rank, worker_id):
-        """Yield (epoch, finite records) with bounded transport retries, no cursor."""
+    def draws(self, *, seed, rank, worker_id, shard=(0, 1)):
+        """Yield (epoch, finite records) with bounded transport retries, no cursor.
+
+        ``shard=(index, count)`` keeps only every count-th anchor partition, from index.
+        """
         _unregister_hf_array2d_extension()
         telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in self.catalogs})
         failures: dict[int | None, int] = {}
@@ -361,9 +381,9 @@ class CatalogStream:
                             f"hf://datasets/{catalog['repo']}", columns=list(dict.fromkeys(columns)),
                         )
                     reader_seed = loader.consumer_seed(seed, rank, worker_id, generation)
-                    streams = self._streams(opened, client, reader_seed)
+                    streams = self._streams(opened, client, reader_seed, shard)
                     failures.pop(None, None)
-                    print(f"[catalog-stream] worker={worker_id} pixels={[s.npartitions for s in streams]} "
+                    print(f"[catalog-stream] worker={worker_id} shard={shard} pixels={[s.npartitions for s in streams]} "
                           f"generation={generation} catalogs={len(opened)} "
                           f"min_catalogs={self.spec['min_catalogs']}", flush=True)
                     readers = {}

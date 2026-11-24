@@ -222,6 +222,7 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
         *,
         catalog_stream: dict,
         rank: int = 0,
+        dp_size: int = 1,
         seed: int = 0,
         echo_factor: int = 1,
     ):
@@ -234,6 +235,7 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
         self.micro_batch_size = micro_batch_size
         self.seq_len = seq_len
         self.rank = rank
+        self.dp_size = dp_size
         self.seed = seed
         self.catalog_stream = CatalogStream(catalog_stream, config)
         self._epoch = 0  # InfiniteStream partition-draw nonce for span ordering
@@ -246,8 +248,10 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
 
     def _open_draws(self, worker):
         """Yield finite record iterators, one per upstream catalog draw."""
+        worker_id, workers = (worker.id, worker.num_workers) if worker else (0, 1)
         for epoch, records in self.catalog_stream.draws(
-            seed=self.seed, rank=self.rank, worker_id=worker.id if worker else 0,
+            seed=self.seed, rank=self.rank, worker_id=worker_id,
+            shard=(self.rank * workers + worker_id, self.dp_size * workers),
         ):
             self._epoch = epoch
             yield records
@@ -314,6 +318,7 @@ def build_astropt3_dataloader(
     micro_batch_size: int,
     sequence_length: int,
     dp_rank: int,
+    dp_size: int,
     num_workers: int = 0,
     seed: int = 0,
     multiprocessing_context: str | None = None,
@@ -345,6 +350,7 @@ def build_astropt3_dataloader(
         micro_batch_size,
         sequence_length,
         rank=dp_rank,
+        dp_size=dp_size,
         seed=seed,
         echo_factor=echo_factor,
         catalog_stream=catalog_stream,
@@ -357,6 +363,7 @@ def build_astropt3_dataloader(
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
         multiprocessing_context=multiprocessing_context,
+        in_order=False,  # each worker owns a fixed sky shard; a sparse one must not stall the rest
     )
     return instrument(loader, echo_factor=echo_factor)
 

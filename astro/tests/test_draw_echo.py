@@ -303,7 +303,7 @@ def test_invalid_factors_fail_before_data_open(tiny_config, factor):
             tiny_config, 1, 200, catalog_stream=TINY_CATALOG_STREAM, echo_factor=factor
         )
     with pytest.raises(ValueError, match="positive integer"):
-        build_astropt3_dataloader(SimpleNamespace(echo_factor=factor), object(), 1, 200, 0)
+        build_astropt3_dataloader(SimpleNamespace(echo_factor=factor), object(), 1, 200, 0, 1)
 
 
 def test_dp_ranks_echo_their_draws_independently(tiny_config, records, monkeypatch):
@@ -328,6 +328,6 @@ def test_builder_wires_echo_factor(tiny_config, factor):
     args = SimpleNamespace(catalog_stream=TINY_CATALOG_STREAM)
     if factor is not None:
         args.echo_factor = factor
-    loader = build_astropt3_dataloader(args, tiny_config, 1, 200, 0)
+    loader = build_astropt3_dataloader(args, tiny_config, 1, 200, 0, 1)
     assert loader.dataset.echo_factor == (factor or 1)
     assert isinstance(loader, telemetry.TelemetryLoader) == (factor == 3)
