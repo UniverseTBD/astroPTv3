@@ -51,6 +51,28 @@ def test_dual_ownership_and_realized_cycle(monkeypatch):
     assert north['partner:1']['anchor'] is south['partner:3']['anchor'] is None
 
 
+def test_sky_shards_partition_the_unsharded_dual_anchor_rows(monkeypatch):
+    # The North guard must come from North's whole footprint, not its shard; otherwise
+    # South shards re-claim sky other consumers' North shards own and rows train twice.
+    rng = np.random.default_rng(0)
+    tables = {}
+    for name, ra_max in (('north', 90.), ('south', 360.)):
+        rows = pd.DataFrame({'ra': rng.uniform(0, ra_max, 2000), 'dec': rng.uniform(-20, 20, 2000),
+                             'value': 0.25, 'object_id': [f'{name}:{i}' for i in range(2000)]})
+        tables[name] = from_dataframe(rows, catalog_name=name, lowest_order=2, partition_rows=100)
+    assert min(t.npartitions for t in tables.values()) > 4
+    monkeypatch.setattr(stream, 'InfiniteStream', lambda cat, **kw: SimpleNamespace(npartitions=1, cat=cat))
+    spec = {'anchors': [survey('north', 'ebv', 1), survey('south', 'south_value', 1)], 'catalogs': []}
+    catalog = stream.CatalogStream(spec, AstroPT3Config(modalities=[m for m in DEFAULT_MODALITIES if m['name'] == 'ebv']))
+
+    def owned(shard):
+        return [ids for s in catalog._streams(tables, None, 0, shard) for ids in s.cat.compute()['object_id']]
+
+    whole = owned((0, 1))
+    shards = [ids for i in range(4) for ids in owned((i, 4))]
+    assert len(shards) == len(set(shards)) and set(shards) == set(whole)
+
+
 def test_healthy_anchor_does_not_reset_south_retries(monkeypatch):
     spec = {'anchors': [survey('north', 'ebv', 1), survey('south', 'south_value', 2)], 'catalogs': []}
     config = AstroPT3Config(modalities=[m for m in DEFAULT_MODALITIES if m['name'] == 'ebv'])

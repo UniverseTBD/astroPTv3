@@ -363,6 +363,7 @@ def build_astropt3_dataloader(
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
         multiprocessing_context=multiprocessing_context,
+        in_order=False,  # each worker owns a fixed sky shard; a sparse one must not stall the rest
     )
     return instrument(loader, echo_factor=echo_factor)
 
