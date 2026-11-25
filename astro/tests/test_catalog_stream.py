@@ -395,6 +395,8 @@ def test_recipe_and_shared_builder(recipe, offline):
             assert "_astropt3_echo" not in batch
             for name in NORTH_BANDS | HSC_BANDS:
                 assert batch[f"{name}_values"].shape == (144, 64)
+            assert batch["spectra_values"].shape == (122, 64)
+            assert batch["sdss_spectra_values"].shape == (8, 64)
             assert batch["galaxies_values"].shape == (256, 768)
             assert batch["gwh_redshift_values"].shape == (1, 1)
     assert len(offline.streams) == 1
@@ -424,8 +426,8 @@ def test_renamed_sdss_modality_and_padding(recipe, offline):
     offline.frames = lambda: [frame]
     with closing(iter(dataset)) as batches:
         batch = next(batches)
-    assert batch["input_ids"][0, :5].tolist() == [1, 35, 36, 36, 37]
-    assert batch["optical_flux_values"].shape == (2, 256)
+    assert batch["input_ids"][0, :11].tolist() == [1, 35, *([36] * 8), 37]
+    assert batch["optical_flux_values"].shape == (8, 64)
     from astropt3.data.spectral import spectral_normalize
 
     values = batch["optical_flux_values"].flatten()[:512]
@@ -434,7 +436,8 @@ def test_renamed_sdss_modality_and_padding(recipe, offline):
         torch.as_tensor(np.asarray(original["lambda"], np.float32)), source="sdss")
     keep = ~torch.as_tensor(np.asarray(original["mask"], bool))
     torch.testing.assert_close(values[keep].float(), expected[keep])  # real bins stay aligned
-    assert values[0] != 0  # masked bin 0 is fill noise, not an exact zero
+    assert values[0] != 0  # masked bin 0 is continuum-centered fill noise, not an exact zero
+    assert abs(values[0].item() - expected[keep][:16].median().item()) < 0.25
 
 
 @pytest.mark.parametrize("catalog_index", range(4))

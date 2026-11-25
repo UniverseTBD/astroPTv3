@@ -32,8 +32,8 @@ model:
     jetformer_flow_hidden: 16
     jetformer_flow_depth: 1
     jetformer_flow_heads: 2
-    # modalities omitted -> pinned pilot defaults (images 361x192 patch 8,
-    # spectra 31x256 patch 256 with continuous wavelength positions)
+    # modalities omitted -> pinned pilot defaults (images 144x64 patch 8 per band,
+    # spectra 122x64 patch 64 with continuous wavelength positions)
     spiral: true # center-outward image patch order (ADR 0004)
     hidden_size: 64
     num_hidden_layers: 4

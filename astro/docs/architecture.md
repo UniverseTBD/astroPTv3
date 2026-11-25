@@ -50,19 +50,21 @@ survey data to model input (using LegacySurvey and DESI as examples):
    so tokens are O(1)). No data-driven calibration; unknown bands
    raise, `rgb-*` composites pass through raw. Invertible up to the clamp
    (`physical_inverse`). Spectra get the symmetric treatment
-   (`data/spectral.py`, ADR 0007): masked bins zeroed → DESI f_λ converted
+   (`data/spectral.py`, ADR 0007): masked and exact-zero bins zeroed → DESI f_λ converted
    to AB nanomaggies per-pixel (`f_ν = f_λ·λ²/c`; the DESI grid is a format
    constant, 3600–9824 Å × 0.8 Å, so the map inverts with no side info) →
-   `arcsinh(f_ν/10)` (knee = 10 nMgy, the fiber sky-noise scale). Exactly
-   invertible (`spectral_inverse`); unknown grids raise.
-   **Noise fill** (`packing.noise_fill`): after normalization, masked
-   spectral bins, the last spectral patch's tail padding and exact-zero
-   (no-data) image pixels are replaced with N(0, σ) noise at the channel's
-   own pixel-noise level (floor 0.01), seeded on `(object_id, modality,
-   epoch)`. Exact constants are point masses the continuous likelihood can
-   drive to −∞; on the 70M run they took ~95% of the gradient norm by
-   step 10k. Filled entries carry no signal, so invertibility on real data
-   is unchanged.
+   clamped to ±10,000 nMgy (`CLAMP_FNU_NMGY`) →
+   `arcsinh(f_ν/10)` (knee = 10 nMgy, the fiber sky-noise scale). Invertible up
+   to the clamp (`spectral_inverse`, which applies the matching symmetric token
+   clamp before `sinh`); unknown grids raise.
+   **Noise fill** (`packing.noise_fill`): exact-zero (no-data) image pixels
+   are replaced with N(0, σ) noise at the channel's own pixel-noise level
+   (floor 0.01), seeded on `(object_id, modality, epoch)`, because exact
+   constants are point masses a continuous likelihood can drive to −∞. Masked,
+   exact-zero, and tail-padded spectral bins use the same seeded pixel noise
+   centered on the linearly interpolated local continuum (holding robust end
+   medians on leading/tail padding) rather than zero, avoiding a spurious
+   zero-flux mode while keeping invertibility on real bins unchanged.
 
 3. **Patchify** (`tokenization.py`):
    - calibrated images → select a channel by its configured `band` label,
@@ -71,7 +73,7 @@ survey data to model input (using LegacySurvey and DESI as examples):
    - display RGB (`image_format: rgb`) → keep all three channels together.
      Galaxies-with-hats uses the whole 256×256 image:
      **256 patches of 768 floats** (16×16×3);
-   - spectra → pad 7781→7936 → **31 patches of 256 floats**, each with a
+   - spectra → pad 7781→7808 → **122 patches of 64 floats**, each with a
      *continuous* position: the patch's mean wavelength, normalized
      `(λ−3000)/7000`.
 
@@ -84,7 +86,7 @@ survey data to model input (using LegacySurvey and DESI as examples):
    `legacy_north_g`, `legacy_south_g` and `hsc_g` are separate categories
    regardless of patch index or span order. Absent sources contribute no spans;
    a present cube must contain each configured band exactly once. A DESI
-   spectrum contributes 31 patches and an optional scalar contributes one token.
+   spectrum contributes 122 patches and an optional scalar contributes one token.
    See [image categories](#image-categories-and-checkpoints) for the token budget.
 
 5. **Packing** (`PackedCollator`): whole objects (never split) are packed

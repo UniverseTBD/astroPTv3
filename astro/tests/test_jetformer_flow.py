@@ -206,7 +206,7 @@ def test_generation_uses_latent_prefixes_and_complete_span_inverse(single_band_c
     # Only spectra are generated; images/scalars are conditioned on when preceding them.
     first = generate(model, obj, {"spectra"}, n=2, generator=torch.Generator().manual_seed(5))
     second = generate(model, obj, {"spectra"}, n=2, generator=torch.Generator().manual_seed(5))
-    assert first["spectra"].shape == (2, 31, 256)
+    assert first["spectra"].shape == (2, 122, 64)
     assert torch.isfinite(first["spectra"]).all()
     torch.testing.assert_close(first["spectra"], second["spectra"], atol=0, rtol=0)
     reconstructed = reconstruct(model, obj)
@@ -228,9 +228,9 @@ def test_flow_width_follows_trunk_rule(recipe):
 
 
 @pytest.mark.parametrize("name,flow", [
-    ("../controls/astropt3-70m-north", 74_013_696),
-    ("astropt3-70m", 100_381_696),
-    ("astropt3-410m", 389_490_688),
+    ("../controls/astropt3-70m-north", 73_420_800),
+    ("astropt3-70m", 99_788_800),
+    ("astropt3-410m", 388_307_968),
 ])
 def test_recipe_flow_parameter_counts(name, flow):
     config = load_recipe(f"{name}.yaml")["model"]["model_config"]
