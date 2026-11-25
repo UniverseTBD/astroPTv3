@@ -34,8 +34,8 @@ def test_validation_panel_replays_and_keeps_every_target(monkeypatch, tmp_path, 
             closed.append(True)
 
     monkeypatch.setattr(panel.CatalogStream, "draws", draws)
-    ids, shards = panel.load_validation_panel(panel_config, 3, 500, 2, 1)
-    other_ids, other_shards = panel.load_validation_panel(panel_config, 3, 500, 1, 4)
+    ids, shards = panel.load_validation_panel(panel_config, 3, 640, 2, 1)
+    other_ids, other_shards = panel.load_validation_panel(panel_config, 3, 640, 1, 4)
     assert ids == other_ids == [record["object_id"] for record in records]
     assert closed == [True, True]
     assert [batch["input_ids"].shape[0] for batch in shards[0]] == [2, 1]
@@ -73,8 +73,8 @@ def test_validation_panel_replays_after_transport_error(monkeypatch, panel_confi
     monkeypatch.setattr(panel.CatalogStream, "draws", draws)
     monkeypatch.setattr(panel.time, "sleep", lambda seconds: None)
     with pytest.raises(ValueError, match="bad row"):  # replays the OSError, not a decode error
-        panel.load_validation_panel(panel_config, 2, 500, 1, 1)
-    ids, _ = panel.load_validation_panel(panel_config, 2, 500, 1, 1)
+        panel.load_validation_panel(panel_config, 2, 640, 1, 1)
+    ids, _ = panel.load_validation_panel(panel_config, 2, 640, 1, 1)
     assert ids == [record["object_id"] for record in records]
 
 
@@ -85,4 +85,4 @@ def test_validation_panel_fails_if_too_few_unique_objects(monkeypatch, panel_con
 
     monkeypatch.setattr(panel.CatalogStream, "draws", draws)
     with pytest.raises(ValueError, match="only 1 of 2 unique objects"):
-        panel.load_validation_panel(panel_config, 2, 500, 1, 1)
+        panel.load_validation_panel(panel_config, 2, 640, 1, 1)

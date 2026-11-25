@@ -8,7 +8,7 @@ automatically allocated modalities take free blocks below 64 first.
 Patchification is pinned to the verified MMU schemas:
 - images:  float32 (3, 152, 152) cubes, center-cropped to 96x96 by the
   sequencer -> 144 patch-8 tokens of 64 floats per band
-- spectra: float32 (7781,) flux -> pad to 7936 -> 31 patches of 256 floats
+- spectra: float32 (7781,) flux -> pad to 7808 -> 122 patches of 64 floats
 """
 
 from __future__ import annotations
