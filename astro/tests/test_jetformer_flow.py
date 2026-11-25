@@ -228,9 +228,9 @@ def test_flow_width_follows_trunk_rule(recipe):
 
 
 @pytest.mark.parametrize("name,flow", [
-    ("../controls/astropt3-70m-north", 73_420_800),
-    ("astropt3-70m", 99_788_800),
-    ("astropt3-410m", 388_307_968),
+    ("../controls/astropt3-70m-north", 72_531_456),
+    ("astropt3-70m", 98_899_456),
+    ("astropt3-410m", 386_533_888),
 ])
 def test_recipe_flow_parameter_counts(name, flow):
     config = load_recipe(f"{name}.yaml")["model"]["model_config"]

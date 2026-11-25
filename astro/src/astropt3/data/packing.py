@@ -40,6 +40,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from ..configuration_astropt3 import AstroPT3Config
 from ..modalities import ModalityConfig
@@ -195,6 +196,18 @@ class ObjectSequencer:
             flux = flux[region]
             if fill is not None:
                 fill = fill[region]
+        resize = mod.image_resize  # 0 keeps the native/cropped size
+        if resize:
+            h, w = flux.shape[-2:]
+            if h < resize or w < resize:
+                raise ValueError(
+                    f"image modality {name!r} input size {(h, w)} is smaller than image_resize {resize}"
+                )
+            if (h, w) != (resize, resize):
+                flux = F.interpolate(flux.unsqueeze(0), size=(resize, resize), mode="area").squeeze(0)
+                if fill is not None:
+                    # Any invalid source pixel invalidates the averaged output pixel.
+                    fill = F.interpolate(fill.float().unsqueeze(0), size=(resize, resize), mode="area").squeeze(0) > 0
         flux = physical_normalize(flux, bands[selected], divisor=self.image_norm_divisor)
         # Use the published pixel validity when available; do not erase measured zeros.
         flux = noise_fill(flux, flux == 0 if fill is None else fill, seed)

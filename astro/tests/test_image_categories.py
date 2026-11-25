@@ -7,7 +7,7 @@ import torch
 import yaml
 
 from astropt3.configuration_astropt3 import DEFAULT_MODALITIES, AstroPT3Config
-from astropt3.data.band_registry import physical_normalize
+from astropt3.data.band_registry import RGB_SCALE, physical_normalize
 from astropt3.data.nanotron_loader import (
     flatten_packed_batch,
     hf_config_from_modalities,
@@ -77,8 +77,8 @@ def test_image_token_budget_and_packed_utilization(config):
     by_source = [sequencer.build({key: payload}) for key, payload in sources.items()]
     rgb = by_source[-1]
     assert set(rgb.masks) == {"galaxies"}
-    assert rgb.values["galaxies"].shape == (256, 768)
-    assert torch.equal(rgb.values["galaxies"][0, :3], sources["galaxy_image"]["flux"][:, 0, 0])
+    assert rgb.values["galaxies"].shape == (256, 192)
+    torch.testing.assert_close(rgb.values["galaxies"][0, :3], sources["galaxy_image"]["flux"][:, 0, 0] * RGB_SCALE)
     partners = {key: sources[key] for key in ("hsc_image", "galaxy_image")}
     matched = [sequencer.build({key: sources[key], **partners}) for key in ("image", "legacy_south_image")]
     # A live object comes from one anchor path, never both Legacy surveys.

@@ -187,3 +187,48 @@ def test_image_config_requires_band_and_single_channel_width():
         ModalityConfig(input_size=192, band="des-g", **base)
     with pytest.raises(ValueError, match="for images"):
         ModalityConfig(**{**base, "family": "spectrum", "input_size": 64, "band": "des-g"})
+    with pytest.raises(ValueError, match="for images"):
+        ModalityConfig(**{**base, "family": "spectrum", "input_size": 64, "image_resize": 128})
+    with pytest.raises(ValueError, match="image_resize"):
+        ModalityConfig(input_size=64, band="des-g", image_resize=-8, **base)
+    with pytest.raises(ValueError, match="divisible by patch_size"):
+        ModalityConfig(input_size=64, band="des-g", image_resize=10, **base)
+    with pytest.raises(ValueError, match="max_positions"):
+        ModalityConfig(input_size=64, band="des-g", max_positions=16, image_resize=64, **base)
+
+
+def test_image_resize_downsamples_full_frame_and_propagates_fill_mask():
+    from astropt3 import AstroPT3Config
+    from astropt3.data.band_registry import RGB_SCALE
+    from astropt3.data.packing import ObjectSequencer
+    from astropt3.tokenization import antispiralise, unpatchify_image
+
+    rgb = {
+        "name": "galaxies",
+        "family": "image",
+        "source": "galaxies_with_hats",
+        "record_keys": ["galaxy_image"],
+        "image_format": "rgb",
+        "token_ids": [23, 24, 25],
+        "input_size": 192,
+        "patch_size": 8,
+        "max_positions": 256,
+        "image_crop": 0,
+        "image_resize": 128,
+    }
+    sequencer = ObjectSequencer(AstroPT3Config(modalities=[rgb], spiral=True))
+    # Distinct corner values verify full-frame area averaging rather than a center crop.
+    flux = torch.linspace(0.1, 0.9, 3 * 256 * 256, dtype=torch.float32).reshape(3, 256, 256)
+    fill_mask = torch.zeros_like(flux, dtype=torch.bool)
+    fill_mask[0, 0, 1] = True  # one invalid pixel in the top-left 2x2 block
+    seq = sequencer.build({"object_id": "g1", "galaxy_image": {"band": ["rgb-r", "rgb-g", "rgb-b"], "flux": flux, "fill_mask": fill_mask}})
+    assert seq.values["galaxies"].shape == (256, 192)
+    recovered = unpatchify_image(antispiralise(seq.values["galaxies"]), patch_size=8, channels=3, side=128)
+    expected = torch.nn.functional.avg_pool2d(flux, 2) * RGB_SCALE
+    torch.testing.assert_close(recovered[1:], expected[1:])
+    torch.testing.assert_close(recovered[0, 1:], expected[0, 1:])
+    assert not torch.isclose(recovered[0, 0, 0], expected[0, 0, 0])  # invalidated block was noise-filled
+
+    small = torch.full((3, 64, 64), 0.5)
+    with pytest.raises(ValueError, match="smaller than image_resize"):
+        sequencer.build({"object_id": "g2", "galaxy_image": {"band": ["rgb-r", "rgb-g", "rgb-b"], "flux": small}})

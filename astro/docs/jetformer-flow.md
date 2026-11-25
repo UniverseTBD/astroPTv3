@@ -15,7 +15,7 @@ while growing the trunk. Ours is a convention: 8 stages, depth 4, 8 heads, and
     jetformer_flow_hidden = min(hidden_size // 4, 512)
 
 Flow parameters scale as width², like a trunk layer. The training recipes
-have one flow per calibrated band, one for the 768-wide RGB display patches,
+have one flow per calibrated band, one for the 192-wide RGB display patches,
 and one per spectrum source. `tests/test_jetformer_flow.py` enforces the
 width rule on every `configs/nanotron/*.yaml`. `scripts/count_params.py`
 reports the HF size configs' flows separately from the nominal-size check.
@@ -43,7 +43,7 @@ Legacy North at `(0.21, 0.37, 1.08)` for `g, r, z`, Legacy South at
 robust pixel scatter in the outer regions of 23 North and 26 HSC training
 cutouts and valid pixels from 70 South cutouts across three sampled fields.
 They are not a dedicated blank-sky calibration. Galaxies-with-hats RGB uses
-one shared starting σ of `0.04`.
+one shared starting σ of `0.20`.
 
 DESI and SDSS start at σ = 0.1 in normalized flux units, based on robust
 scatter between adjacent bins in archived training spectra. The SDSS estimate

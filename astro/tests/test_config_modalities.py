@@ -51,7 +51,7 @@ def test_yaml_uses_current_modalities(path):
     rgb = images["galaxies"]
     assert rgb["image_format"] == "rgb" and "band" not in rgb
     assert rgb["token_ids"] == [23, 24, 25]
-    assert (rgb["input_size"], rgb["patch_size"], rgb["max_positions"]) == (768, 16, 256)
+    assert (rgb["input_size"], rgb["patch_size"], rgb["max_positions"], rgb["image_resize"]) == (192, 8, 256, 128)
     spectra = {m["name"]: m for m in expected if m["family"] == "spectrum"}
     assert set(spectra) == {"spectra", "sdss_spectra"}
     for spec_mod in spectra.values():
@@ -103,5 +103,5 @@ def test_70m_recipe_combines_pre_flow_and_constant_latent_noise():
         "legacy_north_g": 0.21, "legacy_north_r": 0.37, "legacy_north_z": 1.08,
         "legacy_south_g": 0.15, "legacy_south_r": 0.14, "legacy_south_i": 0.45, "legacy_south_z": 0.64,
         "hsc_g": 0.15, "hsc_r": 0.20, "hsc_i": 0.32, "hsc_z": 0.49, "hsc_y": 0.93,
-        "galaxies": 0.04, "spectra": 0.1, "sdss_spectra": 0.1,
+        "galaxies": 0.20, "spectra": 0.1, "sdss_spectra": 0.1,
     }

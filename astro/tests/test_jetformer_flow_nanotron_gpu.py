@@ -1,7 +1,7 @@
 """JetFormer flow GPU gates: real trainer init, checkpoint reconstruction, HF parity, DP=2.
 
 Uses tiny conditioners/backbone with all recipe patch dimensions, including
-fused RGB's 768-wide integer permutations. Batches are local tensors, never LSDB reads.
+fused RGB's 192-wide integer permutations. Batches are local tensors, never LSDB reads.
 Run only on an explicitly reserved device: pytest -m gpu tests/test_jetformer_flow_nanotron_gpu.py
 """
 
@@ -122,8 +122,8 @@ def _assert_permutations(flows):
             assert torch.equal(block.permutation.cpu(), expected)
             assert torch.equal(block.inverse_permutation.cpu(), expected.argsort())
     rgb = flows["galaxies"].blocks[0].permutation
-    assert rgb.numel() == rgb.unique().numel() == 768
-    assert rgb.max().item() == 767  # bf16 would round this and corrupt indexing.
+    assert rgb.numel() == rgb.unique().numel() == 192
+    assert rgb.max().item() == 191
 
 
 def test_full_trainer_initializes_zero_outputs_and_integer_buffers(nt, tmp_path):
