@@ -52,6 +52,10 @@ def test_yaml_uses_current_modalities(path):
     assert rgb["image_format"] == "rgb" and "band" not in rgb
     assert rgb["token_ids"] == [23, 24, 25]
     assert (rgb["input_size"], rgb["patch_size"], rgb["max_positions"], rgb["image_resize"]) == (192, 8, 256, 128)
+    spectra = {m["name"]: m for m in expected if m["family"] == "spectrum"}
+    assert set(spectra) == {"spectra", "sdss_spectra"}
+    for spec_mod in spectra.values():
+        assert (spec_mod["input_size"], spec_mod["patch_size"], spec_mod["max_positions"]) == (64, 64, 256)
     raw = yaml.safe_load(path.read_text())
     assert Path(raw["checkpoints"]["checkpoints_path"]).name == f"{path.stem}-dual-anchor"
     model = raw["model"]["model_config"]

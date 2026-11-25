@@ -108,7 +108,7 @@ def test_family_loss_pools_tokens_and_normalizes_patch_dims(
     scalar = (n["Z"] * losses["Z"] + n["ebv"] * losses["ebv"] + n["photometry"] * losses["photometry"]) / 5
     torch.testing.assert_close(out.family_losses["scalar"], scalar)
     torch.testing.assert_close(out.family_losses["image"], losses["legacy_north_g"] / 64)
-    torch.testing.assert_close(out.family_losses["spectrum"], losses["spectra"] / 256)
+    torch.testing.assert_close(out.family_losses["spectrum"], losses["spectra"] / 64)
     expected = (out.family_losses["image"] + out.family_losses["spectrum"] + 0.1 * out.family_losses["scalar"]) / 2.1
     torch.testing.assert_close(out.loss, expected)
 
@@ -138,7 +138,7 @@ def test_loss_matches_manual_computation(
             )
             logits_pi, mu, log_sigma = single_band_model.decoders[m](hidden)
             nll = gmm_nll(z, logits_pi, mu, log_sigma)
-            # pooled per family, per dimension: one patch modality per family here
+            # patch-token NLL divided by input_size (nats per dimension)
             manual.append((nll - logdet).mean() / single_band_model.modality_input_sizes[m])
     expected = torch.stack(manual).mean()
     assert torch.allclose(out.loss, expected, atol=1e-6)

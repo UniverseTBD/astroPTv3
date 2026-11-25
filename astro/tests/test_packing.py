@@ -14,12 +14,12 @@ def test_object_sequence_structure(sequencer, full_record):
     # omit the scalar spans — their layout is covered by test_scalar_modalities
     order = [*NORTH_BANDS, "spectra"]
     obj = sequencer.build(full_record, modality_order=order, include_scalars=False)
-    assert len(obj) == 472  # 1 bos + 3 * (1+144+1) image bands + (1+31+1) spectra
+    assert len(obj) == 563  # 1 bos + 3 * (1+144+1) image bands + (1+122+1) spectra
     ids = obj.input_ids
     assert ids[0] == BOS_ID
     offset = 1
     for name in order:
-        count, width = (31, 256) if name == "spectra" else (144, 64)
+        count, width = (122, 64) if name == "spectra" else (144, 64)
         begin, placeholder, end = modality_token_ids(name)
         assert ids[offset] == begin and ids[offset + count + 1] == end
         assert (ids[offset + 1 : offset + count + 1] == placeholder).all()
@@ -30,7 +30,7 @@ def test_object_sequence_structure(sequencer, full_record):
         offset += count + 2
     # spectra positions are normalized wavelengths in ~[0, 1]
     pos = obj.positions["spectra"]
-    assert pos.shape == (31, 1) and (pos > 0).all() and (pos < 1.1).all()
+    assert pos.shape == (122, 1) and (pos > 0).all() and (pos < 1.1).all()
 
 
 def test_image_only_object(sequencer, image_only_record):
@@ -42,16 +42,18 @@ def test_image_only_object(sequencer, image_only_record):
 
 def test_spectrum_only_object(sequencer, spectrum_only_record):
     obj = sequencer.build(spectrum_only_record)
-    # 1 bos + (1+31+1) spectra block + (1+1+1) Z span (ADR 0008)
-    assert len(obj) == 37
+    # 1 bos + (1+122+1) spectra block + (1+1+1) Z span (ADR 0008)
+    assert len(obj) == 128
     # image bands and image-catalog scalars are absent on non-crossmatched rows
     assert set(obj.masks) == {"spectra", "Z"}
-    assert obj.masks["spectra"].sum() == 31 and obj.values["spectra"].shape == (31, 256)
+    assert obj.masks["spectra"].sum() == 122 and obj.values["spectra"].shape == (122, 64)
     assert obj.masks["Z"].sum() == 1 and obj.values["Z"].shape == (1, 1)
 
 
-def test_masked_padded_and_no_data_values_are_noise_not_exact_zeros(sequencer, full_record):
-    # exact constants are point masses the likelihood can exploit without bound
+def test_masked_zeroed_padded_spectra_follow_continuum_and_images_noise_filled(sequencer, full_record):
+    # Masked, exact-zero, and tail-padded spectral bins are filled around the local
+    # continuum with seeded pixel noise (no point mass, no zero-flux dropout);
+    # no-data image pixels stay noise-filled around zero.
     import copy
 
     from astropt3.data.spectral import spectral_normalize
@@ -60,6 +62,9 @@ def test_masked_padded_and_no_data_values_are_noise_not_exact_zeros(sequencer, f
     spec, image = record["spectrum"], record["image"]
     spec["mask"] = spec["mask"].copy()
     spec["mask"][1000:1600] = True
+    spec["flux"] = spec["flux"].copy() + 20.0  # clear nonzero continuum
+    spec["flux"][1000:1600] = 1e6  # masked garbage must be ignored
+    spec["flux"][2000:2050] = 0.0  # unmasked exact-zero bins
     image["flux"] = image["flux"].copy()
     image["flux"][:, 60:90, 60:90] = 0.0  # no-data block inside the 96x96 crop
     obj = sequencer.build(record)
@@ -68,20 +73,29 @@ def test_masked_padded_and_no_data_values_are_noise_not_exact_zeros(sequencer, f
     n = len(spec["flux"])
     flux = torch.as_tensor(spec["flux"])
     expected = spectral_normalize(flux, torch.as_tensor(spec["lambda"]))
-    keep = ~torch.as_tensor(spec["mask"])
+    keep = ~torch.as_tensor(spec["mask"]) & (flux != 0)
     assert torch.equal(flat[:n][keep], expected[keep])  # real bins untouched
-    filled = torch.cat([flat[:n][~keep], flat[n:]])  # masked bins + tail padding
-    assert len(flat) > n and torch.isfinite(filled).all()
-    assert (filled != 0).all() and len(filled.unique()) == len(filled)
-    assert filled.std() > 0.005
+    # Filled interior, exact-zero, and tail-pad bins sit on the local continuum with nonzero spread.
+    for filled, ref in (
+        (flat[1000:1600], 0.5 * (expected[999] + expected[1600])),
+        (flat[2000:2050], 0.5 * (expected[1999] + expected[2050])),
+        (flat[n:], expected[:n][keep][-16:].median()),
+    ):
+        assert torch.isfinite(filled).all()
+        assert abs(filled.mean().item() - ref.item()) < 0.25
+        assert filled.mean().item() > 1.0  # stays on continuum, not pulled to 0
+        assert filled.std().item() >= 0.005  # no constant point mass
     for name in NORTH_BANDS:
         patches = obj.values[name]
         assert (patches != 0).all() and torch.isfinite(patches).all()
 
-    again = sequencer.build(record)
-    assert torch.equal(again.values["spectra"], obj.values["spectra"])  # deterministic
+    # Garbage in masked bins must not leak into tokens; fill is deterministic per epoch.
+    alt = copy.deepcopy(record)
+    alt["spectrum"]["flux"][1000:1600] = -1e6
+    assert torch.equal(sequencer.build(alt).values["spectra"], obj.values["spectra"])
     other_epoch = sequencer.build(record, epoch=1)
-    assert not torch.equal(other_epoch.values["spectra"].flatten()[n:], flat[n:])
+    assert not torch.equal(other_epoch.values["spectra"], obj.values["spectra"])
+    assert not torch.equal(other_epoch.values["legacy_north_g"], obj.values["legacy_north_g"])
 
 
 def test_collator_packs_whole_objects(sequencer, tiny_config):

@@ -74,8 +74,8 @@ stages is implicit and easy to break, so understand it before editing:
    O(1) values, keyed on the record's band names — no per-corpus
    calibration; unknown bands raise; spectra get the symmetric ADR 0007
    treatment in `data/spectral.py`: DESI f_λ → AB nMgy via `f_ν = f_λ·λ²/c`
-   on the fixed DESI grid, then `arcsinh(f_ν/10 nMgy)`, invertible with no
-   side info; unknown grids raise) + patchify (`tokenization.py`) per
+   on the fixed DESI grid, clamped to ±10,000 nMgy, then `arcsinh(f_ν/10 nMgy)`,
+   invertible up to the clamp with no side info; unknown grids raise) + patchify (`tokenization.py`) per
    modality — no per-patch standardization: the jetformer tokeniser's
    exact-likelihood loss needs an invertible record -> token map, and
    standardization would discard each patch's mean/std — wrapped in frozen
@@ -85,8 +85,9 @@ stages is implicit and easy to break, so understand it before editing:
    conditional among the present spans lands in training; ADR 0008,
    generalizing 0005's bimodal 50/50 flip). Calibrated images have separate
    source-and-band spans, each with 144 patch-8 tokens (64 floats); display
-   RGB stays one span. DESI spectra → 31 patch-256 tokens with normalized per-patch
-   mean wavelength as a continuous position; ADR 0008 adds one-token
+   RGB stays one span. DESI spectra → 122 patch-64 tokens with normalized per-patch
+   mean wavelength as a continuous position (masked, exact-zero, and tail-padded
+   bins are noise-filled along the linearly interpolated local continuum); ADR 0008 adds one-token
    **scalar modalities** (`Z` gated on ZWARN==0, `ebv`, joint 3-band
    `photometry`; `data/scalar_registry.py` fixed transforms; the scalar family
    is weighted 0.1) predicted by `GMMHead`s (`scalar_gmm_k`) directly (categorical scalars, `categories > 0`, take a one-hot input and a `CategoricalHead` with cross-entropy instead) — no flow, no

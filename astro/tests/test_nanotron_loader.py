@@ -119,7 +119,7 @@ def test_image_only_records_ship_empty_spectra_tensors(tiny_config, tiny_model, 
     with closing(iter(_stream(tiny_config))) as batches:
         flat = next(batches)
     assert not flat["spectra_mask"].any()
-    assert flat["spectra_values"].shape == (0, 256)
+    assert flat["spectra_values"].shape == (0, 64)
     assert flat["spectra_values"].dtype == torch.float32
     assert flat["spectra_positions"].shape == (0, 1)
     assert flat["Z_values"].shape == (0, 1)
@@ -313,9 +313,9 @@ def test_unequal_objects_keep_emptiest_first_placement_across_flushes(tiny_confi
                                 if kind == "both" or key == kind}}
         for i, kind in enumerate(kinds)
     ]
-    stream = PackedMicroBatches(config, 2, 360, catalog_stream=TINY_CATALOG_STREAM)
+    stream = PackedMicroBatches(config, 2, 542, catalog_stream=TINY_CATALOG_STREAM)
     objects = [stream.sequencer.build(record, epoch=7) for record in records]
-    assert [len(obj) for obj in objects[:4]] == [147, 34, 147, 180]
+    assert [len(obj) for obj in objects[:4]] == [147, 125, 147, 271]
     stream._epoch = 7
     # Frozen factor-1 placements from the removed first-fitting/emptiest-row path.
     expected_rows = [[[0, 3], [1, 2, 4]], [[5, 8], [6, 7, 9]]]
@@ -323,7 +323,7 @@ def test_unequal_objects_keep_emptiest_first_placement_across_flushes(tiny_confi
     assert len(batches) == len(expected_rows)
     for batch, rows in zip(batches, expected_rows, strict=True):
         packed = stream.collator.collate_rows([[objects[i] for i in row] for row in rows])
-        expected = nanotron_loader.flatten_packed_batch(packed, config, 360)
+        expected = nanotron_loader.flatten_packed_batch(packed, config, 542)
         for key in batch:
             assert torch.equal(batch[key], expected[key])
 

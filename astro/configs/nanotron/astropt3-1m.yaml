@@ -40,21 +40,21 @@ model:
         source: desi
         record_keys: [spectrum]
         token_ids: [5, 6, 7]
-        input_size: 256
-        patch_size: 256
+        input_size: 64
+        patch_size: 64
         pos_type: continuous
         pos_input_size: 1
-        max_positions: 1024
+        max_positions: 256
       - name: sdss_spectra
         family: spectrum
         source: sdss
         record_keys: [spectrum_sdss]
         token_ids: [17, 18, 19]
-        input_size: 256
-        patch_size: 256
+        input_size: 64
+        patch_size: 64
         pos_type: continuous
         pos_input_size: 1
-        max_positions: 1024
+        max_positions: 256
       - {name: hsc_g, family: image, source: hsc,
          record_keys: [hsc_image], band: hsc-g, token_ids: [181, 182, 183],
          input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}

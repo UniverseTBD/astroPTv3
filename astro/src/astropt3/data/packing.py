@@ -3,7 +3,7 @@
 Per object (only the modalities present):
 
     <|bos|> <|begin_legacy_north_g|> p0 ... p143 <|end_legacy_north_g|>
-            <|begin_spectra|> s0 ... s30 <|end_spectra|>
+            <|begin_spectra|> s0 ... s121 <|end_spectra|>
             <|begin_Z|> z <|end_Z|> ...
 
 Multi-span objects serialize their spans in a UNIFORM random order, seeded
@@ -38,6 +38,7 @@ import zlib
 from collections.abc import Collection
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -91,14 +92,20 @@ def span_order(names, object_id: str, epoch: int = 0) -> list[str]:
 FILL_SIGMA_MIN = 0.01
 
 
-def noise_fill(values: torch.Tensor, fill: torch.Tensor, seed: int) -> torch.Tensor:
-    """Replace ``fill`` entries of ``values`` (C, ...) with N(0, sigma_c) noise.
+def noise_fill(
+    values: torch.Tensor,
+    fill: torch.Tensor,
+    seed: int,
+    center: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Replace ``fill`` entries of ``values`` (C, ...) with N(center, sigma_c) noise.
 
     Masked bins, tail padding and no-data pixels are exact constants: point
     masses whose continuous likelihood the model can drive to -inf, which
     eventually dominates the gradient. Noise at each channel's own pixel-noise
     level (robust std of last-axis neighbour differences / sqrt 2, floored at
-    ``FILL_SIGMA_MIN``) bounds it. Filled entries carried no signal, so the map
+    ``FILL_SIGMA_MIN``) bounds it; optional ``center`` shifts the fill onto a
+    local continuum baseline. Filled entries carried no signal, so the map
     stays invertible on real data. Seeded, so tokens remain a pure function of
     the record (resume-exact, deterministic eval).
     """
@@ -112,6 +119,8 @@ def noise_fill(values: torch.Tensor, fill: torch.Tensor, seed: int) -> torch.Ten
     sigma = torch.nan_to_num(sigma, nan=FILL_SIGMA_MIN).clamp(min=FILL_SIGMA_MIN)
     gen = torch.Generator().manual_seed(seed)
     noise = torch.randn(values.shape, generator=gen) * sigma.view(-1, *[1] * (values.ndim - 1))
+    if center is not None:
+        noise = noise + center
     return torch.where(fill, noise.to(values.dtype), values)
 
 
@@ -214,16 +223,34 @@ class ObjectSequencer:
         flux = torch.as_tensor(spec["flux"], dtype=torch.float32)
         lam = torch.as_tensor(spec["lambda"], dtype=torch.float32)
         mask = torch.as_tensor(spec["mask"], dtype=torch.bool)
-        # zero first so masked garbage never reaches the normalization
-        flux = torch.where(mask, torch.zeros_like(flux), flux)
+        # Masked and exact-zero bins carry no measurement; zero before normalization
+        # so masked garbage never reaches arcsinh, then fill along the local continuum.
+        invalid = mask | (flux == 0)
+        flux = torch.where(invalid, torch.zeros_like(flux), flux)
         flux = spectral_normalize(
             flux, lam, divisor=self.spectra_norm_divisor, source=mod.source or ""
         )
         patches, lam_mean = patchify_spectrum(flux, lam, mod.patch_size)
-        # masked bins and the last patch's tail padding become noise, not exact zeros
         fill = torch.ones(patches.numel(), dtype=torch.bool)
-        fill[: len(mask)] = mask
-        patches = noise_fill(patches.reshape(1, -1), fill.reshape(1, -1), seed).view_as(patches)
+        fill[: len(invalid)] = invalid
+        flat = patches.reshape(-1)
+        center = None
+        if fill.any() and (~fill).any():
+            # Linearly interpolate across interior masked bins (and hold robust end
+            # medians on leading/tail padding) so noise_fill tracks the local continuum
+            # instead of teaching a zero-flux mode.
+            idx = np.arange(flat.numel())
+            valid_idx = idx[(~fill).numpy()]
+            valid_vals = flat.numpy()[valid_idx]
+            interp = np.interp(
+                idx,
+                valid_idx,
+                valid_vals,
+                left=float(np.median(valid_vals[:16])),
+                right=float(np.median(valid_vals[-16:])),
+            ).astype(np.float32)
+            center = torch.from_numpy(interp).unsqueeze(0)
+        patches = noise_fill(flat.unsqueeze(0), fill.unsqueeze(0), seed, center=center).view_as(patches)
         positions = normalize_wavelength(lam_mean).unsqueeze(-1)
         return patches, positions
 

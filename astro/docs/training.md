@@ -161,7 +161,7 @@ the launch YAML.
 `lm_loss` (`train/loss` in the single-GPU launcher) is the optimized objective;
 `grad_norm` is measured before clipping. Diagnostics such as `spectra_loss` and
 `image_family_loss` pool all scored targets across the step's microbatches and
-DP ranks. Each has a `*_loss_count`: zero means no loss is logged, not a loss
+DP ranks. Each logs a `loss_count/<name>` count in its own W&B section: zero means no loss is logged, not a loss
 of zero. Modality losses are joint NLL per target; image and spectrum family
 losses divide each patch NLL by its input dimension before pooling. Scalar
 family losses pool the unscaled target NLLs. These diagnostics need not
@@ -186,7 +186,7 @@ IDs. A resume checks the prior manifest when available. Set
 same IDs in a new run; startup fails on a mismatch instead of substituting
 objects. Keep the object count, source revisions and package pins fixed.
 
-Both launchers log `val/<name>_loss` and `val/<name>_loss_count` to W&B, with
+Both launchers log `val/<name>_loss` and `loss_count/val/<name>` to W&B, with
 `image_family`, `spectrum_family`, and `scalar_family` following the same pooled
 NLL units as the training diagnostics. A zero count omits the loss. Eval mode
 turns off the training-time flow noise; span order, missing-value fills and

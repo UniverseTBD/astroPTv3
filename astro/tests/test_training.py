@@ -834,8 +834,8 @@ def test_main_wires_echo_accounting_and_restarts_mid_group(
     for step, metrics in logged:
         assert metrics["train/loss"] == step
         assert metrics[f"train/{names[0]}_loss"] == 3.5
-        assert metrics[f"train/{names[0]}_loss_count"] == 4
-        assert metrics[f"train/{names[1]}_loss_count"] == 0
+        assert metrics[f"loss_count/{names[0]}"] == 4
+        assert metrics[f"loss_count/{names[1]}"] == 0
         assert f"train/{names[1]}_loss" not in metrics
         assert metrics["train/lr"] == 0.001
         assert ("train/grad_norm" in metrics) == (default_recipe["optimizer"]["clip_grad"] is not None)

@@ -272,7 +272,7 @@ def assert_loss_metrics(nt_out, hf_out, config, flat):
     metrics = reduce_loss_metrics([nt_out], names)
     counts = {name: len(flat[f"{name}_values"]) for name in names}
     for name in names:
-        assert metrics[f"{name}_loss_count"] == counts[name]
+        assert metrics[f"loss_count/{name}"] == counts[name]
         if counts[name]:
             assert metrics[f"{name}_loss"] == pytest.approx(hf_out.modality_losses[name].item(), rel=REL_TOL)
         else:
@@ -280,7 +280,7 @@ def assert_loss_metrics(nt_out, hf_out, config, flat):
     for family in FAMILIES:
         members = [n for n in names if counts[n] and config.modality(n)["family"] == family]
         count = sum(counts[n] for n in members)
-        assert metrics[f"{family}_family_loss_count"] == count
+        assert metrics[f"loss_count/{family}_family"] == count
         if count:
             loss_sum = sum(hf_out.modality_losses[n].item() * counts[n]
                            / (1 if family == "scalar" else config.modality(n)["input_size"]) for n in members)
@@ -313,6 +313,32 @@ def test_forward_loss_parity(nt, matched_models, training, frac):
     assert_loss_metrics(nt_out, hf_out, nt_config, flat)
 
 
+def test_heavily_padded_large_microbatch_forward_and_parity(nt, matched_models):
+    """32x4096 (>65,535 pad tokens) stays under FA2's CUDA grid limit and matches unpadded loss."""
+    _, nt_model, nt_config, hf_config = matched_models
+    base = micro_batch(hf_config, device="cuda")
+    mbs, seq_len = 32, 4096
+    padded = {}
+    for key, val in base.items():
+        if key in ("input_ids", "position_ids") or key.endswith("_mask"):
+            full = torch.zeros((mbs, seq_len), dtype=val.dtype, device=val.device)
+            full[: val.shape[0], : val.shape[1]] = val
+            padded[key] = full
+        else:
+            padded[key] = val
+
+    with torch.no_grad():
+        base_out = nt_model(**base)
+        padded_out = nt_model(**padded)
+
+    assert torch.isfinite(padded_out["loss"])
+    assert padded_out["loss"].item() == pytest.approx(base_out["loss"].item(), rel=1e-3)
+    # Also verify backward succeeds on >65,535 pad tokens (FA2 varlen backward uses the same cu_seqlens grid).
+    nt_model.zero_grad(set_to_none=True)
+    nt_model(**padded)["loss"].backward()
+    nt_model.zero_grad(set_to_none=True)
+
+
 def test_validation_disables_noise_and_restores_training(nt, matched_models):
     from nanotron.astropt3_validation import evaluate_validation_shard
 
@@ -327,7 +353,7 @@ def test_validation_disables_noise_and_restores_training(nt, matched_models):
         for _ in range(2):
             result = evaluate_validation_shard(model, [batch], names, "cuda", nt.parallel_context.dp_pg)
             assert model.training and model.model.token_position_embeddings.pp_block.training
-            assert result["val/image_family_loss_count"] == expected > 0
+            assert result["loss_count/val/image_family"] == expected > 0
             result.pop("val/seconds")
             metrics.append(result)
     finally:
