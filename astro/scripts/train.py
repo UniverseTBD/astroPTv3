@@ -226,8 +226,8 @@ def main():
             }
             if self.config.optimizer.clip_grad is not None:
                 self.step_metrics["train/grad_norm"] = self.grad_norm_unclipped.item()
-            metrics = reduce_loss_metrics(outputs, self.model_config.modality_names())
-            self.step_metrics.update({f"train/{key}": value for key, value in metrics.items()})
+            metrics = reduce_loss_metrics(outputs, self.model_config.modality_names(), loss_prefix="train/")
+            self.step_metrics.update(metrics)
             if not all(math.isfinite(value) for value in self.step_metrics.values()):
                 raise ValueError("Non-finite loss or gradient; refusing to continue or save this step")
             return result

@@ -272,7 +272,7 @@ def assert_loss_metrics(nt_out, hf_out, config, flat):
     metrics = reduce_loss_metrics([nt_out], names)
     counts = {name: len(flat[f"{name}_values"]) for name in names}
     for name in names:
-        assert metrics[f"{name}_loss_count"] == counts[name]
+        assert metrics[f"loss_count/{name}"] == counts[name]
         if counts[name]:
             assert metrics[f"{name}_loss"] == pytest.approx(hf_out.modality_losses[name].item(), rel=REL_TOL)
         else:
@@ -280,7 +280,7 @@ def assert_loss_metrics(nt_out, hf_out, config, flat):
     for family in FAMILIES:
         members = [n for n in names if counts[n] and config.modality(n)["family"] == family]
         count = sum(counts[n] for n in members)
-        assert metrics[f"{family}_family_loss_count"] == count
+        assert metrics[f"loss_count/{family}_family"] == count
         if count:
             loss_sum = sum(hf_out.modality_losses[n].item() * counts[n]
                            / (1 if family == "scalar" else config.modality(n)["input_size"]) for n in members)
@@ -327,7 +327,7 @@ def test_validation_disables_noise_and_restores_training(nt, matched_models):
         for _ in range(2):
             result = evaluate_validation_shard(model, [batch], names, "cuda", nt.parallel_context.dp_pg)
             assert model.training and model.model.token_position_embeddings.pp_block.training
-            assert result["val/image_family_loss_count"] == expected > 0
+            assert result["loss_count/val/image_family"] == expected > 0
             result.pop("val/seconds")
             metrics.append(result)
     finally:

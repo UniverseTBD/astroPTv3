@@ -24,8 +24,8 @@ def _check_dp_metrics(rank, rendezvous):
             metrics = reduce_loss_metrics(outputs, ["patch"], dp)
             expected_count = sum(n for _, n in targets)
             expected: dict[str, float] = {
-                "patch_loss_count": expected_count, "image_family_loss_count": expected_count,
-                "spectrum_family_loss_count": 0, "scalar_family_loss_count": 0,
+                "loss_count/patch": expected_count, "loss_count/image_family": expected_count,
+                "loss_count/spectrum_family": 0, "loss_count/scalar_family": 0,
             }
             if expected_count:
                 mean = sum(s for s, _ in targets) / expected_count
@@ -67,8 +67,8 @@ def _check_validation(rank, dp, run_dir):
         assert metrics.pop("val/seconds") >= 0
         assert metrics == {
             "val/patch_loss": -0.5, "val/image_family_loss": -0.25,
-            "val/patch_loss_count": 4, "val/image_family_loss_count": 4,
-            "val/spectrum_family_loss_count": 0, "val/scalar_family_loss_count": 0,
+            "loss_count/val/patch": 4, "loss_count/val/image_family": 4,
+            "loss_count/val/spectrum_family": 0, "loss_count/val/scalar_family": 0,
         }
     assert (run_dir / validation_panel.PANEL_FILENAME).is_file()
 
