@@ -9,6 +9,7 @@ from test_model import single_band_config as single_band_config
 from astropt3.data.band_registry import (
     _DIV_FACTOR,
     BAND_REGISTRY,
+    RGB_SCALE,
     clamp_flux,
     physical_inverse,
     physical_normalize,
@@ -59,11 +60,13 @@ def test_normalize_des_is_arcsinh_over_divisor():
     assert out.abs().max() <= ceiling
 
 
-def test_raw_bands_pass_through():
-    flux = torch.randn(3, 4, 4) * 100
-    out = physical_normalize(flux, ["rgb-r", "rgb-g", "rgb-b"])
-    assert out is flux
-    assert physical_inverse(flux, ["rgb-r", "rgb-g", "rgb-b"]) is flux
+def test_raw_bands_rescale_and_roundtrip():
+    flux = torch.linspace(0.0, 1.0, 48, dtype=torch.float64).reshape(3, 4, 4)
+    rgb = ["rgb-r", "rgb-g", "rgb-b"]
+    out = physical_normalize(flux, rgb)
+    torch.testing.assert_close(out, flux * RGB_SCALE)
+    assert out[0, 0, 0].item() == 0.0  # preserves zero so noise_fill never fires on nonzero RGB
+    torch.testing.assert_close(physical_inverse(out, rgb), flux)
 
 
 def test_unknown_band_raises():

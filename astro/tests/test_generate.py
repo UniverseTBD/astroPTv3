@@ -267,3 +267,52 @@ def test_sample_checkpoint_generates_one_south_band(jet_config, tmp_path):
                              band="legacy_south_i", n=1, out_dir=tmp_path / "samples", device="cpu")
     assert set(pngs) == {"spectra-to-images/legacy_south_i/south-match", "image-to-spectra/spectra/south-match"}
     assert all(Path(p).stat().st_size > 0 for p in pngs.values())
+
+
+def test_render_sampled_tokens_inverts_rgb_rescale_and_size(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from astropt3.eval import samples as samples_mod
+
+    rgb = {
+        "name": "galaxies",
+        "family": "image",
+        "source": "galaxies_with_hats",
+        "record_keys": ["galaxy_image"],
+        "image_format": "rgb",
+        "token_ids": [23, 24, 25],
+        "input_size": 192,
+        "patch_size": 8,
+        "max_positions": 256,
+        "image_crop": 0,
+        "image_resize": 128,
+    }
+    config = AstroPT3Config(modalities=[rgb], spiral=True)
+    flux = torch.linspace(0.1, 0.9, 3 * 256 * 256, dtype=torch.float32).reshape(3, 256, 256)
+    record = {"object_id": "g-rgb", "galaxy_image": {"band": ["rgb-r", "rgb-g", "rgb-b"], "flux": flux}}
+    template = ObjectSequencer(config).build(record)
+
+    captured = {}
+    orig_save = samples_mod.save_image_png
+
+    def spy_save(values, path, title, truth=None, truth_label="truth"):
+        captured["values"] = values
+        captured["truth"] = truth
+        return orig_save(values, path, title, truth=truth, truth_label=truth_label)
+
+    monkeypatch.setattr(samples_mod, "save_image_png", spy_save)
+    pngs = render_sampled_tokens(
+        SimpleNamespace(config=config),
+        record,
+        template,
+        {"galaxies": template.values["galaxies"].unsqueeze(0)},
+        out_dir=tmp_path,
+        tag="rgb",
+        show_truth=True,
+    )
+    expected = torch.nn.functional.avg_pool2d(flux, 2).numpy()
+    assert captured["values"].shape == (1, 3, 128, 128)
+    assert captured["truth"].shape == (3, 128, 128)
+    np.testing.assert_allclose(captured["values"][0], expected, atol=1e-6)
+    np.testing.assert_allclose(captured["truth"], expected, atol=1e-6)
+    assert pngs["galaxies"].stat().st_size > 0

@@ -48,7 +48,8 @@ survey data to model input (using LegacySurvey and DESI as examples):
    clamp survey-flagged bright pixels (per-band `m_bright` ceiling) →
    `arcsinh(flux/0.01)` (flux in knee units: 0.01 nMgy = 10 picomaggies,
    so tokens are O(1)). No data-driven calibration; unknown bands
-   raise, `rgb-*` composites pass through raw. Invertible up to the clamp
+   raise, `rgb-*` composites are scaled by `RGB_SCALE` (5.0, matching the
+   physical bands' token scale and inverted in `physical_inverse`). Invertible up to the clamp
    (`physical_inverse`). Spectra get the symmetric treatment
    (`data/spectral.py`, ADR 0007): masked bins zeroed → DESI f_λ converted
    to AB nanomaggies per-pixel (`f_ν = f_λ·λ²/c`; the DESI grid is a format
@@ -69,8 +70,8 @@ survey data to model input (using LegacySurvey and DESI as examples):
      crop to 96×96, then form **144 patches of 64 floats per band** (8×8),
      with integer positions restarting at zero for each band;
    - display RGB (`image_format: rgb`) → keep all three channels together.
-     Galaxies-with-hats uses the whole 256×256 image:
-     **256 patches of 768 floats** (16×16×3);
+     Galaxies-with-hats area-downsamples the full 256×256 frame to 128×128:
+     **256 patches of 192 floats** (8×8×3);
    - spectra → pad 7781→7936 → **31 patches of 256 floats**, each with a
      *continuous* position: the patch's mean wavelength, normalized
      `(λ−3000)/7000`.

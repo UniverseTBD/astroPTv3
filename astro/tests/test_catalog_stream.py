@@ -21,6 +21,7 @@ from astropt3.configuration_astropt3 import (
 )
 from astropt3.data import catalog_stream as streaming
 from astropt3.data import nanotron_loader as loader
+from astropt3.data.band_registry import RGB_SCALE
 from astropt3.data.packing import ObjectSequencer
 from astropt3.tokenization import antispiralise, patchify_image
 
@@ -395,7 +396,7 @@ def test_recipe_and_shared_builder(recipe, offline):
             assert "_astropt3_echo" not in batch
             for name in NORTH_BANDS | HSC_BANDS:
                 assert batch[f"{name}_values"].shape == (144, 64)
-            assert batch["galaxies_values"].shape == (256, 768)
+            assert batch["galaxies_values"].shape == (256, 192)
             assert batch["gwh_redshift_values"].shape == (1, 1)
     assert len(offline.streams) == 1
     assert offline.closed == ["client", "cluster"]
@@ -744,8 +745,9 @@ def test_galaxies_with_hats_png_scalars_and_sentinels(recipe):
     assert not np.array_equal(image["flux"], first)
     values = ObjectSequencer(config).build(record).values
     tokens = values["galaxies"]
-    assert tokens.shape == (256, 768)
-    torch.testing.assert_close(antispiralise(tokens), patchify_image(torch.from_numpy(image["flux"]), 16))
+    assert tokens.shape == (256, 192)
+    resized = torch.nn.functional.avg_pool2d(torch.from_numpy(image["flux"]), 2)
+    torch.testing.assert_close(antispiralise(tokens), patchify_image(resized * RGB_SCALE, 8))
     torch.testing.assert_close(values["gwh_redshift"], torch.log1p(torch.tensor([[0.1]])))
     assert values["gwh_gz_bar"].shape == (1, 2)  # one joint span per Galaxy Zoo question
     torch.testing.assert_close(values["gwh_gz_bar"], torch.tensor([[-0.5, 0.0]]))

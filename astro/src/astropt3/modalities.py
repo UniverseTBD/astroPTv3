@@ -41,6 +41,8 @@ class ModalityConfig:
         image_format: ``physical`` for one calibrated band, ``rgb`` for a display composite.
         image_crop: central crop side in pixels before patchify (0 keeps the
             whole image); 96 turns 152x152 survey cutouts into 144 patch-8 tokens.
+        image_resize: target square side in pixels after optional crop via area
+            downsampling (0 keeps the native/cropped size).
         pre_flow_noise_max: initial Gaussian sigma in normalized patch units,
             cosine-annealed to zero during training. Zero disables it.
         ADR 0008 scalar modality (``family == "scalar"``) — a one-token span holding a
@@ -68,6 +70,7 @@ class ModalityConfig:
     band: str | None = None
     image_format: str = "physical"
     image_crop: int = 96
+    image_resize: int = 0
     categories: int = 0
     pre_flow_noise_max: float = 0.0
 
@@ -87,10 +90,14 @@ class ModalityConfig:
             self._validate_patch_modality()
         if type(self.image_crop) is not int or self.image_crop < 0:
             raise ValueError(f"modality {self.name!r} image_crop must be a nonnegative integer")
+        if type(self.image_resize) is not int or self.image_resize < 0:
+            raise ValueError(f"modality {self.name!r} image_resize must be a nonnegative integer")
         if self.family == "image":
             self._validate_image()
-        elif self.band is not None or self.image_format != "physical":
-            raise ValueError(f"modality {self.name!r} may only declare band or image_format for images")
+        elif self.band is not None or self.image_format != "physical" or self.image_resize:
+            raise ValueError(
+                f"modality {self.name!r} may only declare band, image_format, or image_resize for images"
+            )
         if fixed := FIXED_IMAGE_CATEGORIES.get(self.name):
             source, band, _ = fixed
             image_format = "rgb" if band is None else "physical"
@@ -144,6 +151,17 @@ class ModalityConfig:
             raise ValueError(f"image modality {self.name!r} patch_size must be a positive integer")
         if self.input_size != (3 if self.image_format == "rgb" else 1) * self.patch_size**2:
             raise ValueError(f"image modality {self.name!r} input_size does not match its patch dimensions")
+        if self.image_resize:
+            if self.image_resize % self.patch_size:
+                raise ValueError(
+                    f"image modality {self.name!r} image_resize ({self.image_resize}) "
+                    f"must be divisible by patch_size ({self.patch_size})"
+                )
+            if (self.image_resize // self.patch_size) ** 2 > self.max_positions:
+                raise ValueError(
+                    f"image modality {self.name!r} image_resize ({self.image_resize}) "
+                    f"exceeds max_positions ({self.max_positions})"
+                )
         keys = self.record_keys
         if not isinstance(keys, (list, tuple)) or len(keys) != 1 or not isinstance(keys[0], str) or not keys[0].strip():
             raise ValueError(f"image modality {self.name!r} must declare one nonempty record key")
@@ -167,6 +185,7 @@ class ModalityConfig:
             **({"band": self.band} if self.band is not None else {}),
             **({"image_format": "rgb"} if self.image_format == "rgb" else {}),
             "image_crop": self.image_crop,
+            **({"image_resize": self.image_resize} if self.image_resize else {}),
             "categories": self.categories,
             "pre_flow_noise_max": self.pre_flow_noise_max,
         }

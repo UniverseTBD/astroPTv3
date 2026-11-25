@@ -92,13 +92,14 @@ model:
         record_keys: [galaxy_image]
         image_format: rgb
         token_ids: [23, 24, 25]
-        input_size: 768 # 16 * 16 * 3: 8-bit RGB PNG scaled to [0, 1]
-        patch_size: 16
+        input_size: 192 # 8 * 8 * 3: 8-bit RGB PNG rescaled to [0, 5]
+        patch_size: 8
         pos_type: index
         pos_input_size: 1
-        max_positions: 256 # whole 256x256 image, (256 / 16)^2 patches
+        max_positions: 256 # full 256x256 frame downsampled to 128x128, (128 / 8)^2 patches
         image_crop: 0 # keep the whole image (the galaxy fills the frame)
-        pre_flow_noise_max: 0.04
+        image_resize: 128
+        pre_flow_noise_max: 0.20
       - name: Z
         family: scalar
         source: desi

@@ -72,7 +72,9 @@ def test_default_recipe_keeps_reserved_modality_tokens(default_recipe):
     rgb = modalities["galaxies"]
     assert rgb["image_format"] == "rgb" and "band" not in rgb
     assert rgb["token_ids"] == [23, 24, 25]
-    assert (rgb["input_size"], rgb["patch_size"], rgb["max_positions"], rgb["image_crop"]) == (768, 16, 256, 0)
+    assert (rgb["input_size"], rgb["patch_size"], rgb["max_positions"], rgb["image_crop"], rgb["image_resize"]) == (
+        192, 8, 256, 0, 128,
+    )
     used_ids = {i for m in modalities.values() for i in m["token_ids"]}
     assert used_ids.isdisjoint(range(38, 56))
     assert used_ids.isdisjoint(range(142, 148))
