@@ -41,6 +41,9 @@ FIXED_IMAGE_CATEGORIES = {
     "hsc_i": ("hsc", "hsc-i", 187),
     "hsc_z": ("hsc", "hsc-z", 190),
     "hsc_y": ("hsc", "hsc-y", 193),
+    "galaxies_r": ("galaxies_with_hats", "rgb-r", 217),
+    "galaxies_g": ("galaxies_with_hats", "rgb-g", 220),
+    "galaxies_b": ("galaxies_with_hats", "rgb-b", 223),
 }
 _MODALITY_ID_BLOCKS = {
     "spectra": 5,  # begin=5, placeholder=6, end=7

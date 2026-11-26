@@ -169,7 +169,11 @@ class ObjectSequencer:
         if mod.image_format == "rgb":
             if tuple(bands) != RGB_CHANNELS:
                 raise ValueError(f"RGB modality {name!r} requires channels {RGB_CHANNELS}; got {bands}")
-            selected = slice(None)
+            if mod.band is None:
+                selected = slice(None)
+            else:
+                channel = bands.index(mod.band)
+                selected = slice(channel, channel + 1)
         else:
             validate_physical_bands(bands)
             band = mod.band

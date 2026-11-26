@@ -121,9 +121,9 @@ def _assert_permutations(flows):
             assert block.permutation.device.type == "cuda"
             assert torch.equal(block.permutation.cpu(), expected)
             assert torch.equal(block.inverse_permutation.cpu(), expected.argsort())
-    rgb = flows["galaxies"].blocks[0].permutation
-    assert rgb.numel() == rgb.unique().numel() == 192
-    assert rgb.max().item() == 191
+    rgb = flows["galaxies_r"].blocks[0].permutation
+    assert rgb.numel() == rgb.unique().numel() == 64
+    assert rgb.max().item() == 63
 
 
 def test_full_trainer_initializes_zero_outputs_and_integer_buffers(nt, tmp_path):
@@ -312,7 +312,8 @@ def test_hf_nanotron_parity_and_exact_conversion(nt, tmp_path):
     back_config = nt.from_hf.get_nanotron_config(hf_loaded.config)
     for name in config.modality_names():
         assert back_config.modality(name).get("band") == config.modality(name).get("band")
-    assert back_config.modality("galaxies")["image_format"] == "rgb"
+    assert back_config.modality("galaxies_r")["image_format"] == "rgb"
+    assert back_config.modality("galaxies_r")["band"] == "rgb-r"
     nt_back = build_nt_model(nt, back_config).eval()
     nt.from_hf.convert_hf_to_nt(hf_loaded, nt_back, config)
     for name, parameter in nt_back.named_parameters():

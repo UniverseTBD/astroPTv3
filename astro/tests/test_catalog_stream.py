@@ -377,7 +377,7 @@ def test_configured_loader_preserves_alignment_across_echoes(recipe, offline):
 def test_recipe_and_shared_builder(recipe, offline):
     dataset_args = recipe["data_stages"][0]["data"]["dataset"]
     assert dataset_args["echo_factor"] == 4
-    assert len(recipe["model"]["model_config"]["modalities"]) == 51
+    assert len(recipe["model"]["model_config"]["modalities"]) == 53
     batches = loader.build_astropt3_dataloader(
         SimpleNamespace(**dataset_args), SimpleNamespace(**recipe["model"]["model_config"]),
         micro_batch_size=1, sequence_length=2048, dp_rank=0, dp_size=1, num_workers=0,
@@ -398,7 +398,8 @@ def test_recipe_and_shared_builder(recipe, offline):
                 assert batch[f"{name}_values"].shape == (144, 64)
             assert batch["spectra_values"].shape == (122, 64)
             assert batch["sdss_spectra_values"].shape == (8, 64)
-            assert batch["galaxies_values"].shape == (256, 192)
+            for name in ("galaxies_r", "galaxies_g", "galaxies_b"):
+                assert batch[f"{name}_values"].shape == (144, 64)
             assert batch["gwh_redshift_values"].shape == (1, 1)
     assert len(offline.streams) == 1
     assert offline.closed == ["client", "cluster"]
@@ -747,10 +748,15 @@ def test_galaxies_with_hats_png_scalars_and_sentinels(recipe):
     np.testing.assert_array_equal(first, second)
     assert not np.array_equal(image["flux"], first)
     values = ObjectSequencer(config).build(record).values
-    tokens = values["galaxies"]
-    assert tokens.shape == (256, 192)
-    resized = torch.nn.functional.avg_pool2d(torch.from_numpy(image["flux"]), 2)
-    torch.testing.assert_close(antispiralise(tokens), patchify_image(resized * RGB_SCALE, 8))
+    resized = torch.nn.functional.interpolate(
+        torch.from_numpy(image["flux"]).unsqueeze(0), size=(96, 96), mode="area"
+    ).squeeze(0)
+    for idx, ch in enumerate("rgb"):
+        tokens = values[f"galaxies_{ch}"]
+        assert tokens.shape == (144, 64)
+        torch.testing.assert_close(
+            antispiralise(tokens), patchify_image(resized[idx : idx + 1] * RGB_SCALE, 8)
+        )
     torch.testing.assert_close(values["gwh_redshift"], torch.log1p(torch.tensor([[0.1]])))
     assert values["gwh_gz_bar"].shape == (1, 2)  # one joint span per Galaxy Zoo question
     torch.testing.assert_close(values["gwh_gz_bar"], torch.tensor([[-0.5, 0.0]]))
@@ -771,7 +777,7 @@ def test_unmatched_anchor_has_no_galaxy_modalities(recipe):
     assert record is not None
     assert record["object_id"] == "legacy:legacy-1"
     assert "galaxy_image" not in record and not any(key.startswith("gwh_") for key in record)
-    assert "galaxies" not in ObjectSequencer(config).build(record).values
+    assert {"galaxies_r", "galaxies_g", "galaxies_b"}.isdisjoint(ObjectSequencer(config).build(record).values)
 
 
 def test_unmatched_galaxy_keeps_its_identity_and_modalities(recipe):
@@ -785,7 +791,7 @@ def test_unmatched_galaxy_keeps_its_identity_and_modalities(recipe):
     # same galaxies modalities as when matched; the fixture's placeholder scalars fail some gates either way
     matched = ObjectSequencer(config).build(_decode(stream, _row(spec))).values
     gwh = {m["name"] for m in config.modalities if m["source"] == "galaxies_with_hats"}
-    assert "galaxies" in gwh & set(matched)
+    assert {"galaxies_r", "galaxies_g", "galaxies_b"} <= gwh & set(matched)
     assert set(ObjectSequencer(config).build(record).values) == gwh & set(matched)
 
 

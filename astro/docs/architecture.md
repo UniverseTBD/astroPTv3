@@ -71,9 +71,10 @@ survey data to model input (using LegacySurvey and DESI as examples):
    - calibrated images → select a channel by its configured `band` label,
      crop to 96×96, then form **144 patches of 64 floats per band** (8×8),
      with integer positions restarting at zero for each band;
-   - display RGB (`image_format: rgb`) → keep all three channels together.
-     Galaxies-with-hats area-downsamples the full 256×256 frame to 128×128:
-     **256 patches of 192 floats** (8×8×3);
+   - display RGB (`image_format: rgb`) → when `band` is set (`rgb-{r,g,b}`),
+     select that single channel; omit `band` to keep all three channels together.
+     Galaxies-with-hats area-downsamples the full 256×256 frame to 96×96 per
+     channel: **144 patches of 64 floats per `galaxies_{r,g,b}` span** (8×8);
    - spectra → pad 7781→7808 → **122 patches of 64 floats**, each with a
      *continuous* position: the patch's mean wavelength, normalized
      `(λ−3000)/7000`.
@@ -110,11 +111,12 @@ survey data to model input (using LegacySurvey and DESI as examples):
 | Legacy North | `legacy_north_{g,r,z}` | 160–168 | 439 |
 | Legacy South | `legacy_south_{g,r,i,z}` | 169–180 | 585 |
 | HSC | `hsc_{g,r,i,z,y}` | 181–195 | 731 |
-| Galaxies-with-hats | `galaxies` (display RGB) | 23–25 | 259 |
+| Galaxies-with-hats | `galaxies_{r,g,b}` (display RGB) | 217–225 | 439 |
 
 Each row's IDs are assigned in consecutive triplets per category. Training
 recipes use a 256-row vocabulary; there is no text vocabulary. The
-survey-wide image blocks at 2–4, 20–22, and 53–55 stay reserved. The ladder
+survey-wide image blocks at 2–4, 20–22, and 53–55 (and the legacy composite
+`galaxies` block at 23–25) stay reserved. The ladder
 leaves 38–52 unassigned and uses 196–216 for its seven additional survey
 scalar blocks, preserving marker meanings across recipes. HF and
 Nanotron checkpoints carry the same modality definitions, including `band`
@@ -123,7 +125,7 @@ embedding, flow and head. Train the band models from scratch; resume requires
 a checkpoint with the same modality definitions.
 
 The offline packing test puts each Legacy anchor on a separate object, with
-HSC and RGB partners. The two image-only objects use 3000 of 4096 slots when
+HSC and RGB partners. The two image-only objects use 3360 of 4096 slots when
 packed together. This checks length and packing arithmetic, not utilization
 or throughput of the live training stream.
 

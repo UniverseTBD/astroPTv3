@@ -317,6 +317,38 @@ def test_render_sampled_tokens_inverts_rgb_rescale_and_size(tmp_path, monkeypatc
     np.testing.assert_allclose(captured["truth"], expected, atol=1e-6)
     assert pngs["galaxies"].stat().st_size > 0
 
+    rgb_r = {
+        "name": "galaxies_r",
+        "family": "image",
+        "source": "galaxies_with_hats",
+        "record_keys": ["galaxy_image"],
+        "image_format": "rgb",
+        "band": "rgb-r",
+        "token_ids": [217, 218, 219],
+        "input_size": 64,
+        "patch_size": 8,
+        "max_positions": 144,
+        "image_crop": 0,
+        "image_resize": 96,
+    }
+    config_r = AstroPT3Config(modalities=[rgb_r], spiral=True)
+    template_r = ObjectSequencer(config_r).build(record)
+    pngs_r = render_sampled_tokens(
+        SimpleNamespace(config=config_r),
+        record,
+        template_r,
+        {"galaxies_r": template_r.values["galaxies_r"].unsqueeze(0)},
+        out_dir=tmp_path,
+        tag="rgb_r",
+        show_truth=True,
+    )
+    expected_r = torch.nn.functional.interpolate(flux[0:1].unsqueeze(0), size=(96, 96), mode="area").squeeze(0).numpy()
+    assert captured["values"].shape == (1, 1, 96, 96)
+    assert captured["truth"].shape == (1, 96, 96)
+    np.testing.assert_allclose(captured["values"][0], expected_r, atol=1e-6)
+    np.testing.assert_allclose(captured["truth"], expected_r, atol=1e-6)
+    assert pngs_r["galaxies_r"].stat().st_size > 0
+
 
 def test_save_spectra_png_guards_shared_ylim_against_single_bin_outliers(tmp_path, monkeypatch):
     import matplotlib.pyplot as plt

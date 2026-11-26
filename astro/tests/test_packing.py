@@ -195,6 +195,12 @@ def test_image_config_requires_band_and_single_channel_width():
         ModalityConfig(input_size=64, band="des-g", image_resize=10, **base)
     with pytest.raises(ValueError, match="max_positions"):
         ModalityConfig(input_size=64, band="des-g", max_positions=16, image_resize=64, **base)
+    rgb_base = {**base, "name": "galaxies_r", "source": "galaxies_with_hats", "record_keys": ["galaxy_image"], "token_ids": [217, 218, 219], "image_format": "rgb"}
+    assert ModalityConfig(input_size=64, band="rgb-r", **rgb_base).band == "rgb-r"
+    with pytest.raises(ValueError, match="rgb-"):
+        ModalityConfig(input_size=64, band="des-g", **{**rgb_base, "name": "custom_rgb", "token_ids": [226, 227, 228]})
+    with pytest.raises(ValueError, match="input_size"):
+        ModalityConfig(input_size=192, band="rgb-r", **rgb_base)
 
 
 def test_image_resize_downsamples_full_frame_and_propagates_fill_mask():
@@ -228,6 +234,33 @@ def test_image_resize_downsamples_full_frame_and_propagates_fill_mask():
     torch.testing.assert_close(recovered[1:], expected[1:])
     torch.testing.assert_close(recovered[0, 1:], expected[0, 1:])
     assert not torch.isclose(recovered[0, 0, 0], expected[0, 0, 0])  # invalidated block was noise-filled
+
+    # Single-channel RGB spans select one channel and downsample 256x256 -> 96x96.
+    split_mods = [
+        {
+            "name": f"galaxies_{ch}",
+            "family": "image",
+            "source": "galaxies_with_hats",
+            "record_keys": ["galaxy_image"],
+            "image_format": "rgb",
+            "band": f"rgb-{ch}",
+            "token_ids": [217 + 3 * idx, 218 + 3 * idx, 219 + 3 * idx],
+            "input_size": 64,
+            "patch_size": 8,
+            "max_positions": 144,
+            "image_crop": 0,
+            "image_resize": 96,
+        }
+        for idx, ch in enumerate("rgb")
+    ]
+    split_seq = ObjectSequencer(AstroPT3Config(modalities=split_mods, spiral=True)).build(
+        {"object_id": "g1", "galaxy_image": {"band": ["rgb-r", "rgb-g", "rgb-b"], "flux": flux}}
+    )
+    expected_96 = torch.nn.functional.interpolate(flux.unsqueeze(0), size=(96, 96), mode="area").squeeze(0) * RGB_SCALE
+    for idx, ch in enumerate("rgb"):
+        assert split_seq.values[f"galaxies_{ch}"].shape == (144, 64)
+        rec_ch = unpatchify_image(antispiralise(split_seq.values[f"galaxies_{ch}"]), patch_size=8, channels=1, side=96)
+        torch.testing.assert_close(rec_ch, expected_96[idx : idx + 1])
 
     small = torch.full((3, 64, 64), 0.5)
     with pytest.raises(ValueError, match="smaller than image_resize"):

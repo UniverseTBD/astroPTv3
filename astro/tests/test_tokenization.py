@@ -42,6 +42,9 @@ def test_special_token_ids_frozen():
     frozen_tokens = special_token_map()
     assert all(frozen_tokens[name] == token_id for name, token_id in active_tokens.items())
     assert modality_token_ids("galaxies") == (23, 24, 25)
+    assert modality_token_ids("galaxies_r") == (217, 218, 219)
+    assert modality_token_ids("galaxies_g") == (220, 221, 222)
+    assert modality_token_ids("galaxies_b") == (223, 224, 225)
     for name in ("images", "hsc_images", "legacy_south_images"):
         assert f"<|{name}|>" not in frozen_tokens
 
