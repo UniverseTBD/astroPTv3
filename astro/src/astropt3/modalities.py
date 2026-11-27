@@ -101,7 +101,7 @@ class ModalityConfig:
             )
         if fixed := FIXED_IMAGE_CATEGORIES.get(self.name):
             source, band, _ = fixed
-            image_format = "rgb" if (band is None or band in RAW_BANDS) else "physical"
+            image_format = "rgb" if band in RAW_BANDS else "physical"
             if (self.family, self.source, self.band, self.image_format) != ("image", source, band, image_format):
                 raise ValueError(f"modality {self.name!r} must use source {source!r} and "
                                  f"band {band!r} ({image_format} image)")

@@ -115,9 +115,8 @@ survey data to model input (using LegacySurvey and DESI as examples):
 
 Each row's IDs are assigned in consecutive triplets per category. Training
 recipes use a 256-row vocabulary; there is no text vocabulary. The
-survey-wide image blocks at 2–4, 20–22, and 53–55 (and the legacy composite
-`galaxies` block at 23–25) stay reserved. The ladder
-leaves 38–52 unassigned and uses 196–216 for its seven additional survey
+survey-wide image blocks at 2–4, 20–22, and 53–55 stay reserved. The ladder
+leaves 23–25 and 38–52 unassigned and uses 196–216 for its seven additional survey
 scalar blocks, preserving marker meanings across recipes. HF and
 Nanotron checkpoints carry the same modality definitions, including `band`
 and `image_format` where applicable. Each band has its own encoder, position

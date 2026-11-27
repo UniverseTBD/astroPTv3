@@ -41,11 +41,10 @@ def test_special_token_ids_frozen():
     assert len(set(active_tokens.values())) == 23
     frozen_tokens = special_token_map()
     assert all(frozen_tokens[name] == token_id for name, token_id in active_tokens.items())
-    assert modality_token_ids("galaxies") == (23, 24, 25)
     assert modality_token_ids("galaxies_r") == (217, 218, 219)
     assert modality_token_ids("galaxies_g") == (220, 221, 222)
     assert modality_token_ids("galaxies_b") == (223, 224, 225)
-    for name in ("images", "hsc_images", "legacy_south_images"):
+    for name in ("images", "hsc_images", "legacy_south_images", "galaxies"):
         assert f"<|{name}|>" not in frozen_tokens
 
 
@@ -59,14 +58,14 @@ def test_new_token_blocks_fill_reservation_then_enlarge_vocab():
             "source": "test",
             "record_keys": [f"extra_{index}"],
         }
-        for index in range(13)
+        for index in range(14)
     ]
     config = AstroPT3Config(modalities=modalities)
     by_name = {modality["name"]: modality for modality in config.modalities}
     assert by_name["extra_0"]["token_ids"] == [17, 18, 19]
-    assert by_name["extra_1"]["token_ids"] == [26, 27, 28]
-    assert by_name["extra_11"]["token_ids"] == [59, 60, 61]
-    assert by_name["extra_12"]["token_ids"] == [64, 65, 66]
+    assert by_name["extra_1"]["token_ids"] == [23, 24, 25]
+    assert by_name["extra_12"]["token_ids"] == [59, 60, 61]
+    assert by_name["extra_13"]["token_ids"] == [64, 65, 66]
     assert config.vocab_size == 67
     with pytest.raises(ValueError, match="vocab_size=64"):
         AstroPT3Config(modalities=modalities, vocab_size=64)
