@@ -879,6 +879,25 @@ top-level field. Plain pyarrow skips the unused `ivar` (152 → 84 MB). Of
 the bytes read, unused `ivar` is ~49% of DESI and ~47% of HSC; South uses
 `ivar` only as a validity test (~34% of its bytes).
 
+## Finite-field modality audit (2026-11-22)
+
+Twenty-four seeded 300-arcsecond fields (eight each in North-only, South-only
+and overlap coverage) plus targeted COSMOS produced 2,022 records: 1,503 anchors
+and 519 outer-only records. All 6,012 independent anchor/partner comparisons
+agreed, with no distance ties or duplicate partner IDs across anchor paths.
+
+The seeded fields contain 1,728 records: 1,251 have one catalogue source, 200
+contain Galaxies, 63 have usable SFR labels, and 105 contain DESI. COSMOS is
+reported separately. All 64 selected payload records decoded with finite tokens;
+offline replay preserved 43,704 nonpad tokens in 12 packed rows. No entirely
+filled inputs or read-budget skips occurred. The CPU run took 86.7 minutes with
+partly warm caches and returned 4.87 GiB in logged ranges; peak RAM was not measured.
+
+These finite fields and selected payloads do not estimate the weighted training
+mixture, packing efficiency or model learning. The
+[audit guide and aggregate results](docs/modality-coverage-audit.md) record the
+method, immutable inputs, limits and reproduction commands.
+
 ## Open items / not pursued
 
 - **Paired-object echo weighting**: echo paired objects more often than
