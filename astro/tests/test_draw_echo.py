@@ -95,9 +95,9 @@ def _assert_tensors_equal(actual, expected):
 
 def test_draw_schedule_counts_first_exposures_and_keeps_payloads(tiny_config, records):
     bases = [
-        _pack(tiny_config, [[_only(records[0], "image")]], 256),
-        _pack(tiny_config, [[_only(records[1], "spectrum")]], 256),
-        _pack(tiny_config, [[records[2]]], 256),
+        _pack(tiny_config, [[_only(records[0], "image")]], 300),
+        _pack(tiny_config, [[_only(records[1], "spectrum")]], 300),
+        _pack(tiny_config, [[records[2]]], 300),
     ]
     snapshots = [{key: value.clone() for key, value in batch.items()} for batch in bases]
     python_rng, torch_rng = random.getstate(), torch.random.get_rng_state()
@@ -142,7 +142,7 @@ def test_draw_schedule_counts_first_exposures_and_keeps_payloads(tiny_config, re
     assert [_payload_key(batch) for batch in different] != [_payload_key(batch) for batch in emitted]
 
 
-@pytest.mark.parametrize("modality,seq_len", [("image", 200), ("spectrum", 40), (None, 200)])
+@pytest.mark.parametrize("modality,seq_len", [("image", 200), ("spectrum", 160), (None, 300)])
 def test_two_draws_never_mix_or_fetch_early_and_keep_tail(
     tiny_config, records, modality, seq_len, monkeypatch
 ):
@@ -228,7 +228,7 @@ def test_worker_metadata_is_stripped_with_telemetry_off_or_on(
             dict(_only(records[1], "spectrum"), anchor_path="south", anchor=None),
             dict(records[2], anchor_path="south")]
     dataset = FiniteDraws(
-        tiny_config, 1, 180, catalog_stream=TINY_CATALOG_STREAM,
+        tiny_config, 1, 271, catalog_stream=TINY_CATALOG_STREAM,
         draws=[draw], echo_factor=3, seed=7,
     )
     loader = torch.utils.data.DataLoader(
@@ -253,7 +253,7 @@ def test_worker_metadata_is_stripped_with_telemetry_off_or_on(
         assert record["echo_index"] == index
         assert record["echo_factor"] == 3
         assert record["micro_batches"] == 1
-        assert record["tokens_total"] == 180
+        assert record["tokens_total"] == 271
         assert record["tokens_nonpad"] == int((batch["input_ids"] != PAD_ID).sum())
         assert record["rows"] == 1
         anchor = "south" if batch["spectra_mask"].any() else "north"
@@ -280,7 +280,7 @@ def test_worker_metadata_is_stripped_with_telemetry_off_or_on(
 
 def test_telemetry_accumulates_actual_fresh_and_replayed_batches(tiny_config, records, monkeypatch, tmp_path):
     monkeypatch.setenv(telemetry.TELEMETRY_DIR_ENV, str(tmp_path))
-    bases = [_pack(tiny_config, [[record]], 200) for record in records[:3]]
+    bases = [_pack(tiny_config, [[record]], 300) for record in records[:3]]
     batches = echo_draw(bases, tiny_config, echo_factor=3, seed=42)
     assert len(list(telemetry.instrument(batches, echo_factor=3))) == 9
     record = telemetry.drain_step()
@@ -303,7 +303,7 @@ def test_invalid_factors_fail_before_data_open(tiny_config, factor):
             tiny_config, 1, 200, catalog_stream=TINY_CATALOG_STREAM, echo_factor=factor
         )
     with pytest.raises(ValueError, match="positive integer"):
-        build_astropt3_dataloader(SimpleNamespace(echo_factor=factor), object(), 1, 200, 0)
+        build_astropt3_dataloader(SimpleNamespace(echo_factor=factor), object(), 1, 200, 0, 1)
 
 
 def test_dp_ranks_echo_their_draws_independently(tiny_config, records, monkeypatch):
@@ -311,7 +311,7 @@ def test_dp_ranks_echo_their_draws_independently(tiny_config, records, monkeypat
     exposures = {}
     for rank in (0, 1):
         dataset = FiniteDraws(
-            tiny_config, 1, 200, catalog_stream=TINY_CATALOG_STREAM,
+            tiny_config, 1, 300, catalog_stream=TINY_CATALOG_STREAM,
             draws=[records], echo_factor=3, seed=7, rank=rank,
         )
         delivered = list(dataset)
@@ -328,6 +328,6 @@ def test_builder_wires_echo_factor(tiny_config, factor):
     args = SimpleNamespace(catalog_stream=TINY_CATALOG_STREAM)
     if factor is not None:
         args.echo_factor = factor
-    loader = build_astropt3_dataloader(args, tiny_config, 1, 200, 0)
+    loader = build_astropt3_dataloader(args, tiny_config, 1, 200, 0, 1)
     assert loader.dataset.echo_factor == (factor or 1)
     assert isinstance(loader, telemetry.TelemetryLoader) == (factor == 3)

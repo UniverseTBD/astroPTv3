@@ -19,7 +19,6 @@ import sys
 from collections import deque
 from pathlib import Path
 
-import numpy as np
 import torch
 import yaml
 
@@ -94,6 +93,7 @@ def wandb_config(config: dict, max_steps: int | None) -> dict:
     }
     for stage in training["data_stages"]:
         stage["data"]["dataset"].pop("catalog_stream", None)
+    training["tokens"].pop("validation_manifest", None)
     if "path" in training["model"].get("init_method", {}):
         training["model"].pop("init_method")
     training["seed"] = config["general"]["seed"]
@@ -208,8 +208,7 @@ def main():
 
     sys.path.insert(0, str(REPO / "nanotron"))
     from benchmark_throughput import revision
-    from nanotron.random import RandomState, RandomStates
-    from nanotron.serialize.random import load_random_states
+    from nanotron.astropt3_metrics import reduce_loss_metrics
     from run_train import (  # pyright: ignore[reportMissingImports] -- nanotron added above
         DistributedTrainer,
         get_dataloader,
@@ -217,13 +216,6 @@ def main():
 
     class LoggedTrainer(DistributedTrainer):
         step_metrics = None
-
-        def save_checkpoint(self):
-            stage = self.metadata.current_stage
-            stage.consumed_tokens_per_dataset_folder = {
-                "catalog-stream": stage.consumed_train_samples * self.sequence_length
-            }
-            return super().save_checkpoint()
 
         def training_step(self, dataloader):
             result = super().training_step(dataloader)
@@ -234,9 +226,8 @@ def main():
             }
             if self.config.optimizer.clip_grad is not None:
                 self.step_metrics["train/grad_norm"] = self.grad_norm_unclipped.item()
-            for key in outputs[0]:
-                if key.endswith("_loss") and isinstance(outputs[0][key], torch.Tensor):
-                    self.step_metrics[f"train/{key}"] = torch.stack([item[key] for item in outputs]).mean().item()
+            metrics = reduce_loss_metrics(outputs, self.model_config.modality_names(), loss_prefix="train/")
+            self.step_metrics.update(metrics)
             if not all(math.isfinite(value) for value in self.step_metrics.values()):
                 raise ValueError("Non-finite loss or gradient; refusing to continue or save this step")
             return result
@@ -261,15 +252,7 @@ def main():
         trainer = LoggedTrainer(str(effective), benchmark=True)
         if args.resume_from and trainer.init_checkpoint_path is None:
             raise ValueError("Explicit resume did not load; refusing random initialization")
-        if trainer.init_checkpoint_path is not None:
-            with torch.serialization.safe_globals([
-                RandomState, RandomStates, np.ndarray, np.dtype, type(np.dtype(np.uint32)),
-                np._core.multiarray._reconstruct,  # pyright: ignore[reportAttributeAccessIssue] -- checkpoint's NumPy pickle type
-            ]):
-                restored = load_random_states(trainer.parallel_context, trainer.init_checkpoint_path)
-            for name, random_state in restored.items():
-                trainer.random_states[name] = random_state
-            assert trainer.random_states == restored
+        if trainer.rng_restored:
             state["rng_restored"] = True
         trainer.config.save_as_yaml(output / "resolved.yaml")
         dataloaders = get_dataloader(trainer)
@@ -301,6 +284,7 @@ def main():
                 original_write(step, record, rank)
                 metrics = throughput.observe(step, record)
                 metrics.update(trainer.step_metrics or {})
+                metrics.update(trainer.validation_metrics)
                 metrics["gpu/allocated_bytes"] = torch.cuda.memory_allocated()
                 metrics["gpu/peak_allocated_bytes"] = torch.cuda.max_memory_allocated()
                 run.log(metrics, step=step)
@@ -309,7 +293,7 @@ def main():
                     (output / "progress.json").write_text(json.dumps({**state, "metrics": metrics}, indent=2) + "\n")
 
             telemetry.write_step = write_step
-            trainer.train(dataloaders, max_steps=args.max_steps)
+            trainer.train(dataloaders, max_steps=args.max_steps, enable_validation=True)
             state.update(status="startup-check-passed" if args.max_steps else "finished",
                          completed_steps=trainer.metadata.last_train_step)
             if not args.max_steps and state["completed_steps"] != target_steps:

@@ -125,6 +125,19 @@ def save_spectra_png(
         ax.plot(lam, f, lw=0.7, color=color)
         ax.set_title(label, fontsize="small")
         ax.set_ylabel("f$_\\lambda$ [$10^{-17}$ erg s$^{-1}$ cm$^{-2}$ $\\AA^{-1}$]")
+    bounds = []
+    for _, f in panels:
+        finite = f[np.isfinite(f)]
+        if finite.size:
+            # Keep narrow lines in truth visible while ignoring rare single-bin sample spikes.
+            q = (0.1, 99.9) if truth is not None and f is truth else (0.5, 99.5)
+            bounds.append(np.percentile(finite, q))
+    if bounds:
+        lo = min(float(b[0]) for b in bounds)
+        hi = max(float(b[1]) for b in bounds)
+        span = hi - lo
+        pad = 0.05 * span if span > 0 else max(abs(lo) * 0.1, 1.0)
+        axes[0, 0].set_ylim(lo - pad, hi + pad)
     axes[-1, 0].set_xlabel("wavelength [$\\AA$]")
     fig.suptitle(title)
     fig.tight_layout()

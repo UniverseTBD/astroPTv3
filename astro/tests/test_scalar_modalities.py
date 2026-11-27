@@ -13,7 +13,7 @@ from astropt3.modalities import gmm_nll
 
 
 def test_scalar_registry_roundtrip_and_unknown_raises():
-    x = torch.tensor([0.0, 0.03, 0.7, 1.5, 42.0])
+    x = torch.tensor([0.03, 0.7, 1.5, 42.0])  # positive: several maps are log10
     for name in (
         "Z",
         "sdss_Z",
@@ -22,19 +22,21 @@ def test_scalar_registry_roundtrip_and_unknown_raises():
         "provabgs_Z_MW",
         "provabgs_TAGE_MW",
         "provabgs_AVG_SFR",
-        "gwh_smooth-or-featured_smooth_fraction",
+        "gwh_gz_smooth-or-featured",
+        "gwh_W50",
+        "sdss_vdisp",
+        "provabgs_MAG_W1",
         "ebv",
         "photometry",
         # ADR 0014 A8 free scalars
         "fiberflux",
         "psf_fwhm",
-        "hsc_extendedness",
         "hsc_shape",
         "hsc_psf_shape",
     ):
         rt = scalar_inverse(name, scalar_normalize(name, x))
         assert torch.allclose(rt, x, atol=1e-5), name
-    for unknown in ("sSFR", "gwh_undocumented_fraction"):
+    for unknown in ("sSFR", "gwh_smooth-or-featured_smooth_fraction", "gwh_gz_undocumented"):
         with pytest.raises(NotImplementedError):
             scalar_normalize(unknown, x)
 
@@ -167,6 +169,26 @@ def test_unconditional_generation_covers_scalars(single_band_config):
     assert all(torch.isfinite(v).all() for v in sampled.values())
 
 
+def test_sampled_galaxy_zoo_fractions_leave_valid_probability_for_omitted_answer(monkeypatch):
+    from astropt3 import AstroPT3Config, AstroPT3Model, generation
+    from astropt3.data.packing import ObjectSequencer
+
+    name = "gwh_gz_smooth-or-featured"
+    config = AstroPT3Config(
+        hidden_size=32, intermediate_size=64, num_hidden_layers=1,
+        num_attention_heads=4, num_key_value_heads=2,
+        modalities=[{"name": name, "family": "scalar", "source": "galaxies_with_hats",
+                     "input_size": 2, "patch_size": 1, "record_keys": ["smooth", "featured"]}],
+    )
+    model = AstroPT3Model(config)
+    template = ObjectSequencer(config).build({"object_id": "fixture", "smooth": 0.4, "featured": 0.5})
+    monkeypatch.setattr(generation, "sample_gmm", lambda *args, **kwargs: torch.tensor([[-0.2, 0.6], [-2.0, -0.5]]))
+    samples = generation.generate(model, template, {name}, n=2)[name]
+    fractions = scalar_inverse(name, samples[:, 0])
+    torch.testing.assert_close(fractions, torch.tensor([[1 / 3, 2 / 3], [0.0, 0.25]]))
+    assert (fractions >= 0).all() and (1 - fractions.sum(dim=-1) >= 0).all()
+
+
 def test_scalar_head_metrics(single_band_model, single_band_sequencer):
     """Model-side: given objects whose Z span is pinned last, score the head."""
     from legacy_fixture import record_stream
@@ -198,3 +220,127 @@ def test_scalar_head_metrics(single_band_model, single_band_sequencer):
     for key in ("nmad", "outlier_frac", "coverage_1sig", "bias", "r2"):
         assert torch.isfinite(torch.tensor(result[key])), key
     assert result["r2"] <= 1.0
+
+
+def test_scalar_predicates_ranges_and_quality_gates():
+    from astropt3.data.scalar_registry import scalar_valid
+
+    good = {"sdss_ZWARNING": 0.0}
+    assert scalar_valid("sdss_Z", [-0.01], good)
+    assert not scalar_valid("sdss_Z", [-1.0], good)
+    assert not scalar_valid("sdss_Z", [-0.999999999], good)  # rounds to -1 in fp32
+    assert not scalar_valid("Z", [0.3], {"ZWARN": -1})
+    assert not scalar_valid("sdss_Z", [0.3], {"sdss_ZWARNING": -1})
+    assert scalar_valid("sdss_vdisp", [150.0], good)
+    assert not scalar_valid("sdss_vdisp", [0.0], good)  # 0 = no measurement
+    assert not scalar_valid("sdss_vdisp", [850.0], good)  # SDSS cap
+    assert not scalar_valid("sdss_vdisp", [150.0], {"sdss_ZWARNING": 1.0})
+    assert not scalar_valid("sdss_vdisp", [150.0], {})  # unknown quality is not reliable
+    assert not scalar_valid("gwh_total_sfr_median", [-99.0], {"gwh_total_sfr_flag": 0.0})
+    errors = {f"hsc_{band}_cmodel_magerr": 0.01 for band in "grizy"}
+    assert scalar_valid("hsc_cmodel_mag", [21.0] * 5, errors)
+    assert not scalar_valid("hsc_cmodel_mag", [21.0] * 5, {**errors, "hsc_y_cmodel_magerr": 0.2})
+    assert not scalar_valid("hsc_cmodel_mag", [21.0, 21.0, float("nan"), 21.0, 21.0], errors)
+    with pytest.raises(ValueError, match="non-numeric"):
+        scalar_valid("ebv", ["dusty"], {})
+
+
+def test_maps_undefined_at_zero_have_a_positive_valid_range():
+    """A log map without a lower bound would emit NaN tokens for x <= 0."""
+    from astropt3.data.scalar_registry import SCALAR_TRANSFORMS, VALID_RANGES
+
+    for name in SCALAR_TRANSFORMS:
+        edge = scalar_normalize(name, torch.tensor([-0.5, 0.0]))
+        if not torch.isfinite(edge).all():
+            assert VALID_RANGES[name][0] >= 0.0, name
+
+
+def test_recipe_galaxy_zoo_spans_match_registry_questions():
+    from pathlib import Path
+
+    import yaml
+
+    from astropt3.data.scalar_registry import GZ_QUESTIONS
+
+    recipe = Path(__file__).resolve().parents[1] / "configs/nanotron/astropt3-70m.yaml"
+    modalities = yaml.safe_load(recipe.read_text())["model"]["model_config"]["modalities"]
+    spans = {m["name"]: m for m in modalities if m["name"].startswith("gwh_gz_")}
+    assert set(spans) == {f"gwh_gz_{question}" for question in GZ_QUESTIONS}
+    for question, answers in GZ_QUESTIONS.items():
+        span = spans[f"gwh_gz_{question}"]
+        assert span["record_keys"] == [f"gwh_{question}_{answer}_fraction" for answer in answers]
+        assert span["input_size"] == len(answers)
+
+
+@pytest.fixture
+def categorical_model(tiny_config, categorical_label):
+    from astropt3 import AstroPT3Config, AstroPT3Model
+
+    config = AstroPT3Config(**{**tiny_config.to_dict(), "modalities": [*tiny_config.modalities, categorical_label]})
+    torch.manual_seed(0)
+    return AstroPT3Model(config).eval()
+
+
+def test_categorical_scalar_is_one_hot_with_cross_entropy(categorical_model, full_record):
+    from astropt3.data.packing import ObjectSequencer
+    from astropt3.data.scalar_registry import scalar_valid
+    from astropt3.modalities import CategoricalHead
+    from astropt3.modeling_astropt3 import left_shift_mask
+
+    model = categorical_model
+    assert isinstance(model.decoders["test_label"], CategoricalHead)
+    assert "test_label" in model.scalar_names and "test_label" not in model.flows
+    sequencer = ObjectSequencer(model.config)
+    obj = sequencer.build({**full_record, "test_label": 3})
+    torch.testing.assert_close(obj.values["test_label"], torch.nn.functional.one_hot(torch.tensor([3]), 4).float())
+    assert scalar_inverse("test_label", obj.values["test_label"]).item() == 3
+    for bad in (4, -1, 2.5):  # out of range, or not a class index
+        assert not scalar_valid("test_label", [bad], {})
+        assert "test_label" not in sequencer.build({**full_record, "test_label": bad}).masks
+    from astropt3.data.packing import PackedCollator
+
+    batch = PackedCollator(model.config, seq_len=896)([obj])
+    with torch.no_grad():
+        out = model(**batch)
+    mask = batch["modality_masks"]["test_label"]
+    logits = model.decoders["test_label"](out.last_hidden_state[left_shift_mask(mask)])
+    expected = torch.nn.functional.cross_entropy(logits.float(), torch.tensor([3]))
+    torch.testing.assert_close(out.modality_losses["test_label"], expected)
+    assert out.predictions["test_label"].shape == (1, 4)
+
+
+def test_categorical_generation_samples_one_hot_classes(categorical_model, full_record):
+    from astropt3.data.packing import ObjectSequencer
+    from astropt3.generation import generate
+
+    sequencer = ObjectSequencer(categorical_model.config)
+    record = {**full_record, "test_label": 3}
+    order = list(sequencer.build(full_record).masks)
+    template = sequencer.build(record, modality_order=[*order, "test_label"])
+    sampled = generate(categorical_model, template, {"test_label"}, n=4,
+                       generator=torch.Generator().manual_seed(0))["test_label"]
+    assert sampled.shape == (4, 1, 4)
+    assert torch.equal(sampled.sum(-1), torch.ones(4, 1)) and set(sampled.unique().tolist()) <= {0.0, 1.0}
+
+
+@pytest.mark.parametrize("patch", [{"family": "spectrum"}, {"input_size": 3}, {"categories": 1, "input_size": 1}])
+def test_categorical_config_is_validated(categorical_label, patch):
+    from astropt3.modalities import ModalityConfig
+
+    with pytest.raises(ValueError, match="categorical"):
+        ModalityConfig(**{**categorical_label, **patch})
+
+
+def test_catalog_rejects_categorical_head_with_wrong_class_count(categorical_label):
+    from copy import deepcopy
+
+    from legacy_fixture import TINY_CATALOG_STREAM
+
+    from astropt3 import AstroPT3Config
+    from astropt3.data.catalog_stream import CatalogStream
+
+    spec = deepcopy(TINY_CATALOG_STREAM)
+    spec["anchors"][0]["scalar_columns"]["test_label"] = "test_label"
+    wrong = {**categorical_label, "categories": 3, "input_size": 3}
+    with pytest.raises(ValueError, match="categories disagree"):
+        CatalogStream(spec, AstroPT3Config(modalities=[wrong]))

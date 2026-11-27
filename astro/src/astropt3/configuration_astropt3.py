@@ -39,10 +39,11 @@ DEFAULT_MODALITIES = [
     *_legacy_bands("legacy_north", "image", "grz"),
     {
         "name": "spectra",
-        "input_size": 256,
-        "patch_size": 256,
+        "input_size": 64,
+        "patch_size": 64,
         "pos_type": "continuous",
         "pos_input_size": 1,
+        "max_positions": 256,
         "family": "spectrum",
         "source": "desi",
         "record_keys": ["spectrum"],

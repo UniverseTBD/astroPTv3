@@ -6,6 +6,7 @@ import torch
 
 from astropt3.data.spectral import (
     _DIV_FACTOR,
+    CLAMP_FNU_NMGY,
     DESI_LAMBDA_BINS,
     DESI_LAMBDA_GRID,
     DESI_LAMBDA_MIN,
@@ -54,10 +55,13 @@ def test_non_default_divisor_changes_output_and_roundtrips():
 
 
 def test_sdss_log_grid_roundtrips_and_rejects_wrong_steps():
-    lam = 10 ** (torch.log10(torch.tensor(3800.0)) + 1e-4 * torch.arange(3800))
-    flux = torch.randn(len(lam), dtype=torch.float64)
-    tokens = spectral_normalize(flux, lam, source="sdss")
-    assert torch.allclose(spectral_inverse(tokens, lam, source="sdss"), flux, atol=1e-9)
+    for start, bins in ((3800.0, 3800), (3553.0, 4664)):  # SDSS-I/II and DR17 BOSS/eBOSS
+        lam = (
+            10.0 ** (torch.log10(torch.tensor(start, dtype=torch.float64)) + 1e-4 * torch.arange(bins, dtype=torch.float64))
+        ).float()
+        flux = torch.randn(len(lam), dtype=torch.float64)
+        tokens = spectral_normalize(flux, lam, source="sdss")
+        assert torch.allclose(spectral_inverse(tokens, lam, source="sdss"), flux, atol=1e-9)
     with pytest.raises(NotImplementedError, match="SDSS"):
         spectral_normalize(flux, lam + torch.linspace(0, 10, len(lam)), source="sdss")
     with pytest.raises(NotImplementedError, match="unknown spectrum source"):
@@ -102,10 +106,35 @@ def test_sequencer_uses_config_divisor(tiny_config):
     flux = torch.as_tensor(record["spectrum"]["flux"])
     lam = torch.as_tensor(record["spectrum"]["lambda"])
     expected, _ = patchify_spectrum(
-        spectral_normalize(flux, lam, divisor=3.16), lam, 256
+        spectral_normalize(flux, lam, divisor=3.16), lam, 64
     )
-    n = len(flux)  # the tail padding is fill noise (packing.noise_fill), not data
+    n = len(flux)  # tail padding is zeroed and masked out of loss
     assert torch.allclose(seq.values["spectra"].flatten()[:n], expected.flatten()[:n])
     default_seq = ObjectSequencer(tiny_config).build(record)
     assert not torch.allclose(seq.values["spectra"], default_seq.values["spectra"])
     assert _DIV_FACTOR == 10.0
+
+
+def test_spectral_clamp_bounds_extreme_flux_and_tail_tokens():
+    import math
+
+    lam = DESI_LAMBDA_GRID
+    ceiling = math.asinh(CLAMP_FNU_NMGY / _DIV_FACTOR)
+    max_flam = CLAMP_FNU_NMGY / (lam**2 * FNU_NMGY_PER_FLAM)
+
+    # Extreme raw flux clamps symmetrically in normalize -> inverse.
+    bright = torch.full((DESI_LAMBDA_BINS,), 1e6, dtype=torch.float64)
+    tokens = spectral_normalize(bright, lam)
+    torch.testing.assert_close(tokens, torch.full_like(tokens, ceiling))
+    torch.testing.assert_close(spectral_inverse(tokens, lam), max_flam)
+    torch.testing.assert_close(spectral_inverse(-tokens, lam), -max_flam)
+
+    # Rare flow/GMM tail draws (|token| >> ceiling) clamp before sinh() and stay finite.
+    spikes = torch.zeros(DESI_LAMBDA_BINS, dtype=torch.float64)
+    spikes[0] = 20.0
+    spikes[1] = -25.0
+    decoded = spectral_inverse(spikes, lam)
+    assert torch.isfinite(decoded).all()
+    torch.testing.assert_close(decoded[0], max_flam[0])
+    torch.testing.assert_close(decoded[1], -max_flam[1])
+    assert (decoded.abs() <= max_flam + 1e-9).all()

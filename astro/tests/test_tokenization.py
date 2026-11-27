@@ -98,9 +98,9 @@ def test_image_patchify_roundtrip():
 def test_spectrum_patchify_roundtrip():
     flux = torch.randn(7781)
     lam = torch.linspace(3600.0, 9824.0, 7781)
-    patches, lam_mean = patchify_spectrum(flux, lam, patch_size=256)
-    expected_patch_shape = (31, 256)
-    expected_position_shape = (31,)
+    patches, lam_mean = patchify_spectrum(flux, lam, patch_size=64)
+    expected_patch_shape = (122, 64)
+    expected_position_shape = (122,)
     assert patches.shape == expected_patch_shape
     assert lam_mean.shape == expected_position_shape
     back = unpatchify_spectrum(patches, length=7781)
@@ -110,9 +110,9 @@ def test_spectrum_patchify_roundtrip():
 def test_spectrum_last_patch_position_ignores_padding():
     flux = torch.randn(7781)
     lam = torch.linspace(3600.0, 9824.0, 7781)
-    _, lam_mean = patchify_spectrum(flux, lam, patch_size=256)
-    # last patch holds 7781 - 30*256 = 101 real bins + 155 padded zeros
-    expected = lam[30 * 256 :].mean()
+    _, lam_mean = patchify_spectrum(flux, lam, patch_size=64)
+    # last patch holds 7781 - 121*64 = 37 real bins + 27 padded zeros
+    expected = lam[121 * 64 :].mean()
     assert torch.allclose(lam_mean[-1], expected)
     # a padded-mean would be dragged far below the true value
     assert lam_mean[-1] > lam_mean[-2]

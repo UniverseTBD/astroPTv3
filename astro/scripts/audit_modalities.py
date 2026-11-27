@@ -41,7 +41,7 @@ from astropt3.data import catalog_stream as streaming
 from astropt3.data import telemetry
 from astropt3.data.nanotron_loader import _finite_scalar
 from astropt3.data.packing import ObjectSequencer
-from astropt3.data.scalar_registry import MISSING_SENTINELS
+from astropt3.data.scalar_registry import CATEGORICAL, QUALITY_GATES, VALID_RANGES
 
 
 DIAGNOSTICS = {
@@ -51,6 +51,7 @@ DIAGNOSTICS = {
     "sdss_spectrum": ["Z", "Z_ERR", "ZWARNING"],
     "hsc_image": ["g_cmodel_mag", "r_cmodel_mag", "i_cmodel_mag"],
     "rgb_png": [],
+    "scalars": [],
 }
 
 
@@ -148,8 +149,12 @@ def scalar_status(modality, record, sequencer):
         return "missing"
     if any(not math.isfinite(float(v)) for v in raw):
         return "nonfinite"
-    if any(v == MISSING_SENTINELS.get(modality.name) for v in raw):
-        return "sentinel"
+    low, high = VALID_RANGES.get(modality.name, (-math.inf, math.inf))
+    if any(not low < float(v) < high for v in raw):
+        return "range_rejected"
+    classes = CATEGORICAL.get(modality.name)
+    if classes is not None and any(not float(v).is_integer() or not 0 <= float(v) < classes for v in raw):
+        return "range_rejected"
     if sequencer._scalar_value(modality.name, record) is None:
         return "quality_rejected"
     if not torch.isfinite(sequencer._scalar_tokens(modality.name, record)[0]).all():
@@ -165,9 +170,12 @@ def scalar_record(row, star):
         for key, column in cat["scalar_columns"].items():
             value = row.get(column + suffix)
             record[key] = None if value is None or value is pd.NA else float(value)
-        # The production decoder conservatively rejects a missing/invalid ZWARN.
-        if "ZWARN" in cat["scalar_columns"] and _finite_scalar(record.get("ZWARN")) is None:
-            record["ZWARN"] = 1.0
+    # The decoder drops nonfinite quality flags before the sequencer sees them.
+    # Preserve nonfinite target values above so their rejection stays visible.
+    for gates in QUALITY_GATES.values():
+        for key in gates:
+            if key in record:
+                record[key] = _finite_scalar(record[key])
     return record
 
 
@@ -306,6 +314,10 @@ def verify_star(frame, star, opened, footprint, field, radius):
                 consumed.add(actual)
             checked += 1
         uncertain -= consumed
+        if cat.get('how', 'outer') == 'left':
+            if any(present(value) for value in outer[id_col + '_' + cat['name']]):
+                raise AssertionError(f"{cat['name']}: left-joined labels must not appear in outer records")
+            continue
         right_core = core(inside_footprint(candidates))
         expected_outer = Counter(identifier for identifier in right_core[id_col].astype(str)
                                  if identifier not in consumed | uncertain)
@@ -416,7 +428,7 @@ def bound_payload_selection(selected, limit):
 
 
 def payload_quality(record, sequencer):
-    """Audit exactly the cropped input and production sequence, without a model."""
+    """Audit the resized/padded input and production sequence, without a model."""
     obj = sequencer.build(record)
     modalities = {}
     for name, tokens in obj.values.items():
@@ -429,16 +441,32 @@ def payload_quality(record, sequencer):
             if mod.family == "image":
                 channel = slice(None) if mod.image_format == "rgb" else [list(value["band"]).index(mod.band)]
                 flux = flux[channel]
-                fill = np.asarray(value.get("fill_mask", np.asarray(value["flux"]) == 0))[channel]
+                fill = np.asarray(value["fill_mask"], dtype=bool)[channel] if "fill_mask" in value else None
                 if mod.image_crop:
                     h, w = flux.shape[-2:]
                     y, x = max(0, (h - mod.image_crop) // 2), max(0, (w - mod.image_crop) // 2)
                     region = (..., slice(y, y + mod.image_crop), slice(x, x + mod.image_crop))
-                    flux, fill = flux[region], fill[region]
+                    flux = flux[region]
+                    if fill is not None:
+                        fill = fill[region]
+                if mod.image_resize and flux.shape[-2:] != (mod.image_resize, mod.image_resize):
+                    def resize(array):
+                        return torch.nn.functional.interpolate(
+                            torch.as_tensor(array, dtype=torch.float32).unsqueeze(0),
+                            size=(mod.image_resize, mod.image_resize), mode="area").squeeze(0).numpy()
+                    flux = resize(flux)
+                    if fill is not None:
+                        fill = resize(fill) > 0
+                if fill is None:
+                    fill = flux == 0
                 details["validity_rule"] = "published mask/ivar" if "fill_mask" in value else "zero-fill proxy"
             else:
-                fill = np.asarray(value["mask"], dtype=bool)
-                details["validity_rule"] = "published spectrum mask"
+                fill = np.asarray(value["mask"], dtype=bool) | (flux == 0)
+                padding = tokens.numel() - flux.size
+                flux = np.pad(flux, (0, padding))
+                fill = np.pad(fill, (0, padding), constant_values=True)
+                details["padding_values"] = padding
+                details["validity_rule"] = "published spectrum mask, exact zeros and tail padding"
             details.update(input_values=int(flux.size), filled_values=int(fill.sum()),
                            nonfinite_input_values=int((~np.isfinite(flux)).sum()),
                            all_input_filled=bool(fill.all()))
@@ -679,6 +707,20 @@ def write_summary(output, manifest, fields, summaries, checks, reads):
     })
 
 
+def validate_catalogs(configured):
+    """Require pinned North/South inputs with outer payloads and left-only labels."""
+    if [s.catalogs[0]["name"] for s in configured.stars] != ["legacy", "legacy_south"]:
+        raise ValueError("This stratified audit requires the North/South anchor recipe")
+    if configured.spec["how"] != "outer":
+        raise ValueError("This audit requires default outer joins")
+    for cat in configured.catalogs:
+        expected = "left" if cat["decoder"] == "scalars" else "outer"
+        if cat.get("how", configured.spec["how"]) != expected:
+            raise ValueError("This audit requires outer payload joins and left scalar-only joins")
+        if not re.search(r"@[0-9a-f]{40}(?:/|$)", cat["repo"]):
+            raise ValueError("Audit inputs must use immutable 40-character revisions")
+
+
 def run(args):
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -696,13 +738,7 @@ def run(args):
                               if k != "is_astropt3_config"})
     configured = streaming.CatalogStream(spec, config)
     sequencer = ObjectSequencer(config)
-    if [s.catalogs[0]["name"] for s in configured.stars] != ["legacy", "legacy_south"]:
-        raise ValueError("This stratified audit requires the North/South anchor recipe")
-    if any(c.get("how", configured.spec["how"]) != "outer" for c in configured.catalogs):
-        raise ValueError("This audit expects the margin-enabled outer-join recipe")
-    for cat in configured.catalogs:
-        if not re.search(r"@[0-9a-f]{40}(?:/|$)", cat["repo"]):
-            raise ValueError("Audit inputs must use immutable 40-character revisions")
+    validate_catalogs(configured)
     manifest = {"schema_version": 1, "status": "running", "recipe_sha256": fingerprint(args.recipe),
                 "seed": args.seed, "argv": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
                 "packages": {p: version(p) for p in ("lsdb", "hats", "numpy", "pyarrow", "torch",
@@ -722,7 +758,10 @@ def run(args):
         opened[cat['name']] = base
         save(output / 'metadata.json', metadata)
         margin = base.margin
-        if margin is None or margin.hc_structure.catalog_info.margin_threshold < 2 * configured.spec["radius_arcsec"]:
+        is_anchor = cat['name'] in {star.catalogs[0]['name'] for star in configured.stars}
+        factor = 1 if is_anchor or cat.get('how') == 'left' else 2
+        threshold = margin.hc_structure.catalog_info.margin_threshold if margin is not None else None
+        if threshold is None or threshold < factor * configured.spec["radius_arcsec"]:
             raise ValueError(f"{cat['name']} has no sufficient margin")
     print('Planning exact recipe footprints and star joins', flush=True)
     streams = configured._streams(opened, None, args.seed)

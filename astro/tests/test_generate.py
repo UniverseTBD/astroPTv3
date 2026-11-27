@@ -87,12 +87,12 @@ def test_unconditional_shapes(smoke_model, template):
     out = generate(smoke_model, template, {"legacy_north_g", "spectra"}, n=2, generator=g)
     assert set(out) == {"legacy_north_g", "spectra"}
     assert out["legacy_north_g"].shape == (2, 144, 64)
-    assert out["spectra"].shape == (2, 31, 256)
+    assert out["spectra"].shape == (2, 122, 64)
     assert all(torch.isfinite(v).all() for v in out.values())
 
 
 def test_seeding_reproducible(smoke_model, template):
-    # spectra-only (31 tokens): the full-span draw above is the expensive one
+    # spectra-only (122 tokens): the full-span draw above is the expensive one
     def draw(seed):
         g = torch.Generator().manual_seed(seed)
         return generate(smoke_model, template, {"spectra"}, n=2, generator=g)["spectra"]
@@ -112,7 +112,7 @@ def test_image_to_spectra_teacher_forces_images(smoke_model, template):
     g = torch.Generator().manual_seed(0)
     out = generate(smoke_model, template, {"spectra"}, n=1, generator=g)
     assert set(out) == {"spectra"}  # teacher-forced spans are not returned
-    assert out["spectra"].shape == (1, 31, 256)
+    assert out["spectra"].shape == (1, 122, 64)
 
 
 def test_generate_rejects_missing_span(smoke_model, jet_config):
@@ -126,14 +126,14 @@ def test_generate_rejects_missing_span(smoke_model, jet_config):
 def test_reconstruct_shapes(smoke_model, template):
     preds = reconstruct(smoke_model, template)
     assert preds["legacy_north_g"].shape == (144, 64)
-    assert preds["spectra"].shape == (31, 256)
+    assert preds["spectra"].shape == (122, 64)
     assert all(torch.isfinite(v).all() for v in preds.values())
 
 
 def test_sample_template_modes(smoke_model, template):
     recon = sample_template(smoke_model, template, "reconstruct")
     assert recon["legacy_north_g"].shape == (1, 144, 64)
-    assert recon["spectra"].shape == (1, 31, 256)
+    assert recon["spectra"].shape == (1, 122, 64)
 
     # spectra-only draws: the full-span unconditional cost is already paid
     # by test_unconditional_shapes
@@ -145,7 +145,7 @@ def test_sample_template_modes(smoke_model, template):
 
     a = draw(0)
     assert set(a) == {"spectra"}  # teacher-forced images are not returned
-    assert a["spectra"].shape == (1, 31, 256)
+    assert a["spectra"].shape == (1, 122, 64)
     assert torch.allclose(draw(0)["spectra"], a["spectra"])  # same seed reproduces
 
     with pytest.raises(ValueError, match="unknown mode"):
@@ -267,3 +267,107 @@ def test_sample_checkpoint_generates_one_south_band(jet_config, tmp_path):
                              band="legacy_south_i", n=1, out_dir=tmp_path / "samples", device="cpu")
     assert set(pngs) == {"spectra-to-images/legacy_south_i/south-match", "image-to-spectra/spectra/south-match"}
     assert all(Path(p).stat().st_size > 0 for p in pngs.values())
+
+
+def test_render_sampled_tokens_inverts_rgb_rescale_and_size(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from astropt3.eval import samples as samples_mod
+
+    rgb = {
+        "name": "galaxies",
+        "family": "image",
+        "source": "galaxies_with_hats",
+        "record_keys": ["galaxy_image"],
+        "image_format": "rgb",
+        "token_ids": [23, 24, 25],
+        "input_size": 192,
+        "patch_size": 8,
+        "max_positions": 256,
+        "image_crop": 0,
+        "image_resize": 128,
+    }
+    config = AstroPT3Config(modalities=[rgb], spiral=True)
+    flux = torch.linspace(0.1, 0.9, 3 * 256 * 256, dtype=torch.float32).reshape(3, 256, 256)
+    record = {"object_id": "g-rgb", "galaxy_image": {"band": ["rgb-r", "rgb-g", "rgb-b"], "flux": flux}}
+    template = ObjectSequencer(config).build(record)
+
+    captured = {}
+    orig_save = samples_mod.save_image_png
+
+    def spy_save(values, path, title, truth=None, truth_label="truth"):
+        captured["values"] = values
+        captured["truth"] = truth
+        return orig_save(values, path, title, truth=truth, truth_label=truth_label)
+
+    monkeypatch.setattr(samples_mod, "save_image_png", spy_save)
+    pngs = render_sampled_tokens(
+        SimpleNamespace(config=config),
+        record,
+        template,
+        {"galaxies": template.values["galaxies"].unsqueeze(0)},
+        out_dir=tmp_path,
+        tag="rgb",
+        show_truth=True,
+    )
+    expected = torch.nn.functional.avg_pool2d(flux, 2).numpy()
+    assert captured["values"].shape == (1, 3, 128, 128)
+    assert captured["truth"].shape == (3, 128, 128)
+    np.testing.assert_allclose(captured["values"][0], expected, atol=1e-6)
+    np.testing.assert_allclose(captured["truth"], expected, atol=1e-6)
+    assert pngs["galaxies"].stat().st_size > 0
+
+
+def test_save_spectra_png_guards_shared_ylim_against_single_bin_outliers(tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+
+    from astropt3.eval.samples import save_spectra_png
+
+    lam = np.linspace(3600.0, 9824.0, 7781)
+    truth = np.linspace(2.0, 20.0, len(lam))
+    truth[3000:3020] = 60.0  # narrow emission line in truth
+    samples = np.tile(np.linspace(1.5, 22.0, len(lam)), (4, 1))
+    samples[0, [10, 200, 5000]] = 500_000.0  # rare tail spikes
+    samples[2, [100, 4000]] = -250_000.0
+
+    captured = {}
+    orig_close = plt.close
+
+    def capture_close(fig):
+        captured["ylim"] = fig.axes[0].get_ylim()
+        return orig_close(fig)
+
+    monkeypatch.setattr(plt, "close", capture_close)
+    out = tmp_path / "spectra.png"
+    save_spectra_png(samples, lam, out, "spike-guard", truth=truth)
+    assert out.exists() and out.stat().st_size > 0
+    lo, hi = captured["ylim"]
+    assert -10.0 < lo < 5.0
+    assert 55.0 < hi < 100.0  # emission line preserved, 500k spike does not flatten panels
+
+
+def test_generate_and_reconstruct_ignore_masked_spectral_garbage(smoke_model):
+    seq = ObjectSequencer(smoke_model.config)
+
+    def make_masked(garbage):
+        rec = make_record(5, image_only_fraction=0.0)
+        spec = {k: v.copy() for k, v in rec["spectrum"].items()}
+        spec["mask"][128:256] = True
+        spec["flux"][128:256] = garbage
+        spec["flux"][500:520] = 0.0
+        rec["spectrum"] = spec
+        return build_template(seq, rec, "unconditional")
+
+    t_pos = make_masked(1e6)
+    t_neg = make_masked(-1e6)
+
+    gen_spec = generate(smoke_model, t_pos, {"spectra"}, n=2, generator=torch.Generator().manual_seed(0))
+    assert gen_spec["spectra"].shape == (2, 122, 64)
+    assert torch.isfinite(gen_spec["spectra"]).all()
+    rec_out = reconstruct(smoke_model, t_pos)
+    assert rec_out["spectra"].shape == (122, 64)
+    assert torch.isfinite(rec_out["spectra"]).all()
+
+    img_pos = generate(smoke_model, t_pos, {"legacy_north_g"}, n=1, argmax=True)["legacy_north_g"]
+    img_neg = generate(smoke_model, t_neg, {"legacy_north_g"}, n=1, argmax=True)["legacy_north_g"]
+    torch.testing.assert_close(img_pos, img_neg, atol=0.0, rtol=0.0)

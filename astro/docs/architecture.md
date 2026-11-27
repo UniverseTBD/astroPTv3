@@ -4,9 +4,10 @@
 [`training.md`](training.md).*
 
 Training uses live LSDB access to YAML-configured catalogs and modality lists.
-The training recipes combine Legacy Survey North, Legacy Survey South, HSC and
-galaxies-with-hats images with DESI and SDSS spectra and nine galaxies-with-hats
-scalars. This document focuses on the survey-to-model contract.
+The training recipes combine Legacy Survey North, Legacy Survey South and HSC
+image bands, galaxies-with-hats RGB images, DESI and SDSS spectra,
+and 42 scalar modalities including PROVABGS and Galaxy Zoo vote fractions.
+This document focuses on the survey-to-model contract.
 
 ## What this is
 
@@ -47,29 +48,33 @@ survey data to model input (using LegacySurvey and DESI as examples):
    clamp survey-flagged bright pixels (per-band `m_bright` ceiling) →
    `arcsinh(flux/0.01)` (flux in knee units: 0.01 nMgy = 10 picomaggies,
    so tokens are O(1)). No data-driven calibration; unknown bands
-   raise, `rgb-*` composites pass through raw. Invertible up to the clamp
+   raise, `rgb-*` composites are scaled by `RGB_SCALE` (5.0, matching the
+   physical bands' token scale and inverted in `physical_inverse`). Invertible up to the clamp
    (`physical_inverse`). Spectra get the symmetric treatment
-   (`data/spectral.py`, ADR 0007): masked bins zeroed → DESI f_λ converted
+   (`data/spectral.py`, ADR 0007): masked and exact-zero bins zeroed → DESI f_λ converted
    to AB nanomaggies per-pixel (`f_ν = f_λ·λ²/c`; the DESI grid is a format
    constant, 3600–9824 Å × 0.8 Å, so the map inverts with no side info) →
-   `arcsinh(f_ν/10)` (knee = 10 nMgy, the fiber sky-noise scale). Exactly
-   invertible (`spectral_inverse`); unknown grids raise.
-   **Noise fill** (`packing.noise_fill`): after normalization, masked
-   spectral bins, the last spectral patch's tail padding and exact-zero
-   (no-data) image pixels are replaced with N(0, σ) noise at the channel's
-   own pixel-noise level (floor 0.01), seeded on `(object_id, modality,
-   epoch)`. Exact constants are point masses the continuous likelihood can
-   drive to −∞; on the 70M run they took ~95% of the gradient norm by
-   step 10k. Filled entries carry no signal, so invertibility on real data
-   is unchanged.
+   clamped to ±10,000 nMgy (`CLAMP_FNU_NMGY`) →
+   `arcsinh(f_ν/10)` (knee = 10 nMgy, the fiber sky-noise scale). Invertible up
+   to the clamp (`spectral_inverse`, which applies the matching symmetric token
+   clamp before `sinh`); unknown grids raise.
+   **Noise fill** (`packing.noise_fill`): exact-zero (no-data) image pixels
+   are replaced with N(0, σ) noise at the channel's own pixel-noise level
+   (floor 0.01), seeded on `(object_id, modality, epoch)`, because exact
+   constants are point masses a continuous likelihood can drive to −∞. Masked,
+   exact-zero, and tail-padded spectral bins use the same seeded pixel noise
+   centered on the linearly interpolated local continuum (holding robust end
+   medians on leading/tail padding) rather than zero, avoiding a spurious
+   zero-flux mode while keeping invertibility on real bins unchanged.
 
 3. **Patchify** (`tokenization.py`):
    - calibrated images → select a channel by its configured `band` label,
      crop to 96×96, then form **144 patches of 64 floats per band** (8×8),
      with integer positions restarting at zero for each band;
    - display RGB (`image_format: rgb`) → keep all three channels together.
-     Galaxies-with-hats uses its whole 256×256 image: **256 patches of 768 floats** (16×16×3);
-   - spectra → pad 7781→7936 → **31 patches of 256 floats**, each with a
+     Galaxies-with-hats area-downsamples the full 256×256 frame to 128×128:
+     **256 patches of 192 floats** (8×8×3);
+   - spectra → pad 7781→7808 → **122 patches of 64 floats**, each with a
      *continuous* position: the patch's mean wavelength, normalized
      `(λ−3000)/7000`.
 
@@ -82,7 +87,7 @@ survey data to model input (using LegacySurvey and DESI as examples):
    `legacy_north_g`, `legacy_south_g` and `hsc_g` are separate categories
    regardless of patch index or span order. Absent sources contribute no spans;
    a present cube must contain each configured band exactly once. A DESI
-   spectrum contributes 31 patches and an optional scalar contributes one token.
+   spectrum contributes 122 patches and an optional scalar contributes one token.
    See [image categories](#image-categories-and-checkpoints) for the token budget.
 
 5. **Packing** (`PackedCollator`): whole objects (never split) are packed
@@ -105,12 +110,13 @@ survey data to model input (using LegacySurvey and DESI as examples):
 | Legacy North | `legacy_north_{g,r,z}` | 160–168 | 439 |
 | Legacy South | `legacy_south_{g,r,i,z}` | 169–180 | 585 |
 | HSC | `hsc_{g,r,i,z,y}` | 181–195 | 731 |
-| Galaxies-with-hats | `galaxies` (fused display RGB) | 23–25 | 259 |
+| Galaxies-with-hats | `galaxies` (display RGB) | 23–25 | 259 |
 
 Each row's IDs are assigned in consecutive triplets per category. Training
-recipes use a 256-row vocabulary; there is no text vocabulary. IDs 2–4,
-20–22, and 53–55 are reserved and never assigned to bands. Spectral, scalar,
-and RGB IDs are unchanged. HF and
+recipes use a 256-row vocabulary; there is no text vocabulary. The
+survey-wide image blocks at 2–4, 20–22, and 53–55 stay reserved. The ladder
+leaves 38–52 unassigned and uses 196–216 for its seven additional survey
+scalar blocks, preserving marker meanings across recipes. HF and
 Nanotron checkpoints carry the same modality definitions, including `band`
 and `image_format` where applicable. Each band has its own encoder, position
 embedding, flow and head. Train the band models from scratch; resume requires
@@ -137,8 +143,9 @@ reference):
   modality also has a per-modality normalizing flow (`JetFormerFlow`, ViT
   conditioners over each object's modality span; `docs/jetformer-flow.md`)
   that maps its raw patch values to latents z — z is both what gets embedded and what
-  the `GMMHead` decoder predicts; scalar modalities (`Z`, `ebv`, `photometry`)
-  skip the flow and feed a `GMMHead` directly on the raw normalized value.
+  the `GMMHead` decoder predicts. Scalars bypass the flow: continuous values
+  use a `GMMHead` on the normalized value; categorical values are one-hot on
+  input and use a `CategoricalHead` with cross-entropy.
 - **Body**: the stock SmolLM3 decoder stack, consuming `inputs_embeds`.
   RoPE θ=100k, **NoPE every 4th layer** (`no_rope_layer: 4` /
   `no_rope_layer_interval: 4`), GQA, RMSNorm ε=1e-6, SwiGLU, bf16 training.
@@ -146,9 +153,12 @@ reference):
   (may be negative) computed at positions **one to the left** of each
   modality token — `<|begin_m|>` predicts patch 0, patch *i* predicts patch
   *i+1* (AstroPT's `starts−1` alignment, implemented via `left_shift_mask`).
-  The loss averages present modalities within image/spectrum/scalar, then
-  combines present family means at 1:1:0.1. Special tokens and
-  pads carry no loss.
+  Each family (image, spectrum, scalar) takes one mean over all of its
+  tokens, so a modality counts in proportion to its tokens in the batch;
+  image and spectrum token NLLs are first divided by the modality's
+  `input_size` (nats per dimension), so patch size does not set the weight.
+  Present families combine at 1:1:0.1. Per-modality losses are logged as raw
+  per-token means. Special tokens and pads carry no loss.
 - **Init**: stock SmolLM3 `_init_weights`, normal(0, 0.02).
 
 ### Size family (Pythia-mirrored nominal sizes, no vocab head)

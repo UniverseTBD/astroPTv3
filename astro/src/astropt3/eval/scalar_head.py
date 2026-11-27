@@ -25,7 +25,11 @@ OUTLIER_THRESHOLD = 0.15  # |d log(1+z)| — the standard photo-z outlier cut
 def scalar_head_metrics(
     model, objects, targets, *, target="Z", seq_len=896, objects_per_batch=8
 ):
-    """Teacher-forced GMM read-out at the target span; metrics in normalized space."""
+    """Report normalized-space metrics for the target span. Call ``model.eval()`` first."""
+    if model.training:
+        raise ValueError("Call model.eval() before scoring scalar predictions")
+    if target in model.categorical_names:
+        raise ValueError(f"{target!r} is categorical; score it by accuracy, not regression metrics")
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
     collator = PackedCollator(model.config, seq_len=seq_len)

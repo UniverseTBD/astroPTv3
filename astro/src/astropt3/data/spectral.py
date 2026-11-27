@@ -19,6 +19,8 @@ sources or grids raise rather than silently pass through.
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 # f_ν[nMgy] = f_λ[10⁻¹⁷ erg s⁻¹ cm⁻² Å⁻¹] · λ_Å² · FNU_NMGY_PER_FLAM
@@ -31,6 +33,11 @@ FNU_NMGY_PER_FLAM = 1e-17 / (_C_ANGSTROM_PER_S * _NMGY_ERG_S_CM2_HZ)  # ≈9.19e
 # knee (0.01 nMgy = broadband sky noise). Tokens land O(1): noise p50 ≈ 0.19,
 # signal p50 ≈ 0.30, max ≈ 5.2.
 _DIV_FACTOR = 10.0
+
+# Physical bright ceiling in AB nanomaggies (m_AB = 12.5 → 10_000 nMgy,
+# |token| <= arcsinh(1000) ≈ 7.60 at divisor=10), matching band_registry's
+# symmetric clamp pattern so rare flow/GMM tail draws cannot explode sinh().
+CLAMP_FNU_NMGY = 10.0 ** ((22.5 - 12.5) / 2.5)
 
 # The DESI coadd wavelength grid, a constant of the data format.
 DESI_LAMBDA_MIN = 3600.0
@@ -84,16 +91,16 @@ def spectral_normalize(
     divisor: float = _DIV_FACTOR,
     source: str = "desi",
 ) -> torch.Tensor:
-    """DESI f_λ → ``arcsinh(f_ν/divisor)``: flux in knee units of 10 nMgy.
+    """f_λ → clamp to ``±CLAMP_FNU_NMGY`` → ``arcsinh(f_ν/divisor)``.
 
-    ``lam`` is the record's wavelength grid in Å (broadcast against ``flux``);
-    it must be the DESI format grid. ``divisor`` is the arcsinh knee in
-    nanomaggies — pass the checkpoint's ``config.spectra_norm_divisor`` so
-    data and inverse stay in the regime the model was trained on. Mask-zeroed
-    pixels stay 0 (``arcsinh(0) = 0``).
+    ``lam`` is the record's wavelength grid in Å (broadcast against ``flux``).
+    ``divisor`` is the arcsinh knee in nanomaggies — pass the checkpoint's
+    ``config.spectra_norm_divisor`` so data and inverse stay in the regime the
+    model was trained on. Zero stays 0 (``arcsinh(0) = 0``).
     """
     _check_grid(source, lam)
     fnu = flux * lam.to(flux.dtype) ** 2 * FNU_NMGY_PER_FLAM
+    fnu = fnu.clamp(min=-CLAMP_FNU_NMGY, max=CLAMP_FNU_NMGY)
     return torch.arcsinh(fnu / divisor)
 
 
@@ -103,11 +110,14 @@ def spectral_inverse(
     divisor: float = _DIV_FACTOR,
     source: str = "desi",
 ) -> torch.Tensor:
-    """Invert :func:`spectral_normalize` back to DESI f_λ units.
+    """Invert :func:`spectral_normalize` back to survey f_λ units.
 
-    Exact (no clamp on this modality); ``divisor`` must match the forward
-    pass (the checkpoint's ``config.spectra_norm_divisor``).
+    Model output is clamped to the symmetric compressed ceiling first so
+    ``sinh`` cannot explode on rare flow/GMM tail draws; ``divisor`` must
+    match the forward pass (the checkpoint's ``config.spectra_norm_divisor``).
     """
     _check_grid(source, lam)
+    ceiling = math.asinh(CLAMP_FNU_NMGY / divisor)
+    tokens = tokens.clamp(min=-ceiling, max=ceiling)
     fnu = torch.sinh(tokens) * divisor
     return fnu / (lam.to(tokens.dtype) ** 2 * FNU_NMGY_PER_FLAM)

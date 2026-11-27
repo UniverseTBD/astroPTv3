@@ -195,6 +195,7 @@ def smoke_config(nt, workdir):
     stage["name"] = "lsdb-experimental"
     stage["data"]["num_loading_workers"] = 0
     stage["data"]["dataset"]["echo_factor"] = 1
+    stage["data"]["dataset"]["is_astropt3_streaming"] = False  # Loader dispatch, not this flag, sets the ledger.
     config["parallelism"]["dp"] = 1  # the recipe's cluster DP; the smoke run uses one GPU
     config["optimizer"]["zero_stage"] = 0
     config["optimizer"]["learning_rate_scheduler"].update(lr_warmup_steps=10, lr_decay_steps=40)
@@ -223,13 +224,13 @@ def build_nt_model(nt, nt_config):
     return model
 
 
-def micro_batch(hf_config, device="cuda", skip=0, catalog_stream=TINY_CATALOG_STREAM):
+def micro_batch(hf_config, device="cuda", skip=0, catalog_stream=TINY_CATALOG_STREAM, record=make_record):
     from astropt3.data.nanotron_loader import PackedMicroBatches
 
     # The spec must cover the config's modalities; its streams are never opened.
     dataset = PackedMicroBatches(hf_config, MBS, SEQ_LEN, catalog_stream=catalog_stream)
     # Parity needs deterministic tensors, not a live LSDB connection.
-    records = (make_record(i) for i in count())
+    records = (record(i) for i in count())
     flat = next(islice(dataset._pack_records(records), skip, None))
     return {k: v.to(device) for k, v in flat.items()}
 
@@ -248,8 +249,11 @@ def matched_models(nt):
     from astropt3 import AstroPT3Model
 
     nt_config = tiny_nt_config(nt, jetformer_flow_hidden=32)
+    nt_config.modality("legacy_north_g")["pre_flow_noise_max"] = 0.4
     hf_config = nt.to_hf.get_hf_config(nt_config)
     assert hf_config.jetformer_flow_hidden == 32
+    assert hf_config.modality_registry().get_config("legacy_north_g").pre_flow_noise_max == 0.4
+    assert nt.from_hf.get_nanotron_config(hf_config).modality("legacy_north_g")["pre_flow_noise_max"] == 0.4
     torch.manual_seed(0)
     hf_model = AstroPT3Model(hf_config)
     nt_model = build_nt_model(nt, nt_config)
@@ -261,32 +265,100 @@ def matched_models(nt):
     return hf_model, nt_model, nt_config, hf_config
 
 
-def test_forward_loss_parity(nt, matched_models):
+def assert_loss_metrics(nt_out, hf_out, config, flat):
+    from nanotron.astropt3_metrics import FAMILIES, reduce_loss_metrics
+
+    names = config.modality_names()
+    metrics = reduce_loss_metrics([nt_out], names)
+    counts = {name: len(flat[f"{name}_values"]) for name in names}
+    for name in names:
+        assert metrics[f"loss_count/{name}"] == counts[name]
+        if counts[name]:
+            assert metrics[f"{name}_loss"] == pytest.approx(hf_out.modality_losses[name].item(), rel=REL_TOL)
+        else:
+            assert f"{name}_loss" not in metrics
+    for family in FAMILIES:
+        members = [n for n in names if counts[n] and config.modality(n)["family"] == family]
+        count = sum(counts[n] for n in members)
+        assert metrics[f"loss_count/{family}_family"] == count
+        if count:
+            loss_sum = sum(hf_out.modality_losses[n].item() * counts[n]
+                           / (1 if family == "scalar" else config.modality(n)["input_size"]) for n in members)
+            assert metrics[f"{family}_family_loss"] == pytest.approx(loss_sum / count, rel=REL_TOL)
+        else:
+            assert f"{family}_family_loss" not in metrics
+
+
+@pytest.mark.parametrize("training, frac", [(False, 1 / 3), (True, 1 / 3), (True, 1.0)])
+def test_forward_loss_parity(nt, matched_models, training, frac):
     hf_model, nt_model, nt_config, hf_config = matched_models
     flat = micro_batch(hf_config)
     names = hf_config.modality_registry().names()
-    with torch.no_grad():
-        nt_out = nt_model(**flat)
-        hf_out = hf_model(**regroup(flat, names))
+    for model in (hf_model, nt_model):
+        model.train(training)
+        model.set_jet_noise_frac(frac)
+    try:
+        with torch.no_grad():
+            torch.manual_seed(17)
+            nt_out = nt_model(**flat)
+            torch.manual_seed(17)
+            hf_out = hf_model(**regroup(flat, names))
+    finally:
+        hf_model.eval()
+        nt_model.eval()
 
     nt_loss = nt_out["loss"].item()
     hf_loss = hf_out.loss.item()
     assert nt_loss == pytest.approx(hf_loss, rel=REL_TOL), f"NT={nt_loss}, HF={hf_loss}"
-    for name in names:
-        nt_mod = nt_out[f"{name}_loss"].item()
-        if name not in hf_out.modality_losses:
-            # absent from this batch: HF omits the key, nanotron reports 0.0
-            assert nt_mod == 0.0, f"{name}: NT={nt_mod} for an absent modality"
-            continue
-        hf_mod = hf_out.modality_losses[name].item()
-        assert nt_mod == pytest.approx(hf_mod, rel=REL_TOL), (
-            f"{name}: NT={nt_mod}, HF={hf_mod}"
-        )
-    for family, hf_family in hf_out.family_losses.items():
-        nt_family = nt_out[f"{family}_family_loss"].item()
-        assert nt_family == pytest.approx(hf_family.item(), rel=REL_TOL), (
-            f"{family}: NT={nt_family}, HF={hf_family.item()}"
-        )
+    assert_loss_metrics(nt_out, hf_out, nt_config, flat)
+
+
+def test_heavily_padded_large_microbatch_forward_and_parity(nt, matched_models):
+    """32x4096 (>65,535 pad tokens) stays under FA2's CUDA grid limit and matches unpadded loss."""
+    _, nt_model, nt_config, hf_config = matched_models
+    base = micro_batch(hf_config, device="cuda")
+    mbs, seq_len = 32, 4096
+    padded = {}
+    for key, val in base.items():
+        if key in ("input_ids", "position_ids") or key.endswith("_mask"):
+            full = torch.zeros((mbs, seq_len), dtype=val.dtype, device=val.device)
+            full[: val.shape[0], : val.shape[1]] = val
+            padded[key] = full
+        else:
+            padded[key] = val
+
+    with torch.no_grad():
+        base_out = nt_model(**base)
+        padded_out = nt_model(**padded)
+
+    assert torch.isfinite(padded_out["loss"])
+    assert padded_out["loss"].item() == pytest.approx(base_out["loss"].item(), rel=1e-3)
+    # Also verify backward succeeds on >65,535 pad tokens (FA2 varlen backward uses the same cu_seqlens grid).
+    nt_model.zero_grad(set_to_none=True)
+    nt_model(**padded)["loss"].backward()
+    nt_model.zero_grad(set_to_none=True)
+
+
+def test_validation_disables_noise_and_restores_training(nt, matched_models):
+    from nanotron.astropt3_validation import evaluate_validation_shard
+
+    _, model, nt_config, hf_config = matched_models
+    model.train()
+    model.set_jet_noise_frac(0.0)
+    batch = micro_batch(hf_config, device="cpu")
+    names = nt_config.modality_names()
+    expected = sum(batch[f"{name}_mask"].sum().item() for name in names if nt_config.modality(name)["family"] == "image")
+    metrics = []
+    try:
+        for _ in range(2):
+            result = evaluate_validation_shard(model, [batch], names, "cuda", nt.parallel_context.dp_pg)
+            assert model.training and model.model.token_position_embeddings.pp_block.training
+            assert result["loss_count/val/image_family"] == expected > 0
+            result.pop("val/seconds")
+            metrics.append(result)
+    finally:
+        model.eval()  # shared fixture
+    assert metrics[0] == pytest.approx(metrics[1], rel=0, abs=1e-6)
 
 
 def test_conversion_roundtrip_exact(nt, matched_models):
@@ -336,11 +408,16 @@ def test_50step_live_run_and_checkpoint_conversion(nt, tmp_path_factory):
     stdout = run_train(config, workdir, "test-tiny")
     losses = losses_from(stdout)
     assert len(losses) >= 40, f"expected ~50 logged losses, got {len(losses)}"
-    # Likelihood loss can cross zero, so a ratio is not a learning criterion.
-    assert losses[-1] < losses[0] - 10.0, f"nanotron smoke did not learn: {losses[0]:.4f} -> {losses[-1]:.4f}"
+    # Likelihood loss can cross zero, so a ratio is not a learning criterion;
+    # patch losses are nats per dimension, so the drop is O(1), not O(10).
+    assert losses[-1] < losses[0] - 1.0, f"nanotron smoke did not learn: {losses[0]:.4f} -> {losses[-1]:.4f}"
 
     checkpoint = workdir / "checkpoints" / "50"
+    assert (checkpoint.parent / "latest.txt").read_text().strip() == "50"
     assert (checkpoint / "model_config.json").exists()
+    # resume validates TrainingMetadata's token ledger against consumed_tokens_total
+    meta = nt.serialize.load_meta(parallel_context=nt.parallel_context, root_folder=checkpoint).metas
+    assert meta.data_stages[0].consumed_tokens_per_dataset_folder == {"catalog-stream": meta.consumed_tokens_total}
 
     # convert in a subprocess: the converter builds its own ParallelContext
     save_path = workdir / "hf"
@@ -389,3 +466,41 @@ def test_50step_live_run_and_checkpoint_conversion(nt, tmp_path_factory):
         nt_loss = nt_model(**flat)["loss"].item()
         hf_loss = hf_model(**regroup(flat, names)).loss.item()
     assert hf_loss == pytest.approx(nt_loss, rel=REL_TOL), f"NT={nt_loss}, HF={hf_loss}"
+
+
+def test_categorical_scalar_parity_and_conversion(nt, categorical_label):
+    """A categorical scalar (one-hot in, cross-entropy out) matches across the twins."""
+    from copy import deepcopy
+
+    import astropt3  # noqa: F401 -- registers Auto classes
+    from astropt3 import AstroPT3Model
+
+    nt_config = tiny_nt_config(nt, jetformer_flow_hidden=32,
+                               modalities=[*DEFAULT_MODALITIES, categorical_label])
+    hf_config = nt.to_hf.get_hf_config(nt_config)
+    torch.manual_seed(0)
+    hf_model = AstroPT3Model(hf_config)
+    nt_model = build_nt_model(nt, nt_config)
+    nt.from_hf.convert_hf_to_nt(hf_model, nt_model, nt_config)
+    torch.nn.Module.cuda(hf_model)
+    torch.nn.Module.to(hf_model, dtype=torch.bfloat16)
+    hf_model.eval()
+    nt_model.eval()
+    spec = deepcopy(TINY_CATALOG_STREAM)
+    spec["anchors"][0]["scalar_columns"]["test_label"] = "test_label"
+    flat = micro_batch(hf_config, catalog_stream=spec, record=lambda i: {**make_record(i), "test_label": i % 4})
+    assert flat["test_label_mask"].any()
+    names = hf_config.modality_registry().names()
+    with torch.no_grad():
+        nt_out = nt_model(**flat)
+        hf_out = hf_model(**regroup(flat, names))
+    assert_loss_metrics(nt_out, hf_out, nt_config, flat)
+    assert nt_out["loss"].item() == pytest.approx(hf_out.loss.item(), rel=REL_TOL)
+    hf_back = AstroPT3Model(hf_config)
+    torch.nn.Module.cuda(hf_back)
+    torch.nn.Module.to(hf_back, dtype=torch.bfloat16)
+    nt.to_hf.convert_nt_to_hf(nt_model, hf_back, nt_config)
+    original = hf_model.state_dict()
+    for key, value in hf_back.state_dict().items():
+        assert torch.equal(value, original[key]), f"roundtrip drift in {key}"
+    assert original["decoders.test_label.proj.weight"].shape == (4, hf_config.hidden_size)

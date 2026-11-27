@@ -54,10 +54,11 @@ stages is implicit and easy to break, so understand it before editing:
    `min_catalogs` selects sky coverage, not a per-record modality count;
    unknown settings are rejected.
    Each worker owns a dask `LocalCluster`
-   (threads only, `partitions_per_chunk=4`) so the next draw's fetch
-   overlaps the current one's decode; rows decode through
-   `NestedFrame.map_rows`, never `iterrows`. `num_loading_workers` counts
-   concurrent LSDB readers per DP rank — watch box-wide RSS. The stream is
+   (threads only, default `partitions_per_chunk=4` for joins, 1 for anchor-only)
+   so the next draw's fetch overlaps the current one's decode; rows decode
+   through `NestedFrame.map_rows`, never `iterrows`. `num_loading_workers`
+   counts concurrent LSDB readers per DP rank — watch box-wide RSS. Native
+   Nanotron loads on one rank per TP group and broadcasts the packed batch. The stream is
    **cursorless**: checkpoints restore weights/optimizer/scheduler/RNG,
    never the record position, so resume opens a fresh stream and may
    revisit records (ADR 0015; `docs/training.md` §5). Recognized
@@ -73,8 +74,8 @@ stages is implicit and easy to break, so understand it before editing:
    O(1) values, keyed on the record's band names — no per-corpus
    calibration; unknown bands raise; spectra get the symmetric ADR 0007
    treatment in `data/spectral.py`: DESI f_λ → AB nMgy via `f_ν = f_λ·λ²/c`
-   on the fixed DESI grid, then `arcsinh(f_ν/10 nMgy)`, invertible with no
-   side info; unknown grids raise) + patchify (`tokenization.py`) per
+   on the fixed DESI grid, clamped to ±10,000 nMgy, then `arcsinh(f_ν/10 nMgy)`,
+   invertible up to the clamp with no side info; unknown grids raise) + patchify (`tokenization.py`) per
    modality — no per-patch standardization: the jetformer tokeniser's
    exact-likelihood loss needs an invertible record -> token map, and
    standardization would discard each patch's mean/std — wrapped in frozen
@@ -84,11 +85,12 @@ stages is implicit and easy to break, so understand it before editing:
    conditional among the present spans lands in training; ADR 0008,
    generalizing 0005's bimodal 50/50 flip). Calibrated images have separate
    source-and-band spans, each with 144 patch-8 tokens (64 floats); display
-   RGB stays one span. DESI spectra → 31 patch-256 tokens with normalized per-patch
-   mean wavelength as a continuous position; ADR 0008 adds one-token
+   RGB stays one span. DESI spectra → 122 patch-64 tokens with normalized per-patch
+   mean wavelength as a continuous position (masked, exact-zero, and tail-padded
+   bins are noise-filled along the linearly interpolated local continuum); ADR 0008 adds one-token
    **scalar modalities** (`Z` gated on ZWARN==0, `ebv`, joint 3-band
    `photometry`; `data/scalar_registry.py` fixed transforms; the scalar family
-   is weighted 0.1) predicted by `GMMHead`s (`scalar_gmm_k`) directly — no flow, no
+   is weighted 0.1) predicted by `GMMHead`s (`scalar_gmm_k`) directly (categorical scalars, `categories > 0`, take a one-hot input and a `CategoricalHead` with cross-entropy instead) — no flow, no
    logdet, plain `gmm_nll` on the raw normalized value. The
    linear probe builds scalar-free sequences (`include_scalars=False`)
    so R² stays a representation metric; `eval/scalar_head.py` is the
@@ -115,10 +117,14 @@ stages is implicit and easy to break, so understand it before editing:
    embedded and predicted by a per-modality `GMMHead`, with loss the exact
    patch-space likelihood `mean(NLL_GMM(z) - logdet)` at positions one left
    of each modality token (`<|begin_m|>` predicts patch 0 — astroPT's
-   `starts-1` alignment), via `left_shift_mask`; the loss can go negative;
-   weighted mean over modalities present. A noise curriculum
-   (`jetformer_noise_max` -> `_min`, driven via `set_jet_noise_frac`)
-   perturbs only the embedded z copy in training mode. Scalar modalities
+   `starts-1` alignment), via `left_shift_mask`; the loss can go negative.
+   Each family's loss is one mean over all its tokens (patch-token NLL
+   divided by `input_size`, i.e. nats per dimension; scalar tokens as-is),
+   and present families combine at image:spectrum:scalar 1:1:0.1. Training can
+   add pre-flow noise (`pre_flow_noise_max` per modality), cosine-decayed to
+   zero, so the embedded z, target z and logdet use the same flow input. Separate
+   linear latent noise (`jetformer_noise_max` -> `_min`) perturbs only the
+   embedded z copy. Both schedules use `set_jet_noise_frac`. Scalar modalities
    (`Z`, `ebv`, `photometry`) bypass the flow and go straight to a
    `GMMHead` on the raw normalized value. The nanotron fork mirrors all of
    it (flows/GMM heads on the embedding/head blocks, z+logdet routed to
@@ -153,8 +159,9 @@ in `checkpoint_schedule.py`, lazy-imported by the fork's trainer);
 `latest.txt` is written last, so any step dir it covers is complete.
 Checkpoints carry weights/optimizer/scheduler/RNG and **nothing else** —
 the LSDB stream is cursorless, so resume opens a fresh stream and records
-may be revisited (ADR 0015; `docs/training.md` §5). Evaluation never runs
-in the trainer: convert a checkpoint with the fork's
+may be revisited (ADR 0015; `docs/training.md` §5). The trainer only scores
+the fixed held-out panel (`val/*`, `docs/training.md` §6); for other
+evaluation, convert a checkpoint with the fork's
 `tools/astropt3/convert_nanotron_to_hf.py`, then score the HF artifact
 with `astropt3.eval` (`val_loss`, `linear_probe`, `scalar_head`,
 `samples`).

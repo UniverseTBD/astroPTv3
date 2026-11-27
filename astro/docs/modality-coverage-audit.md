@@ -30,15 +30,20 @@ reads retain the selected rows instead of downloading a complete catalogue.
 The run saves its recipe and executing source, input hashes, fields, per-field
 coverage, selected payloads, decoder checks and generated plots. The offline
 verifier reads these files and writes `verification.json`; it never executes
-the archived source. Raw runs, caches and generated figures belong outside the
+the archived source. Replay with the same production decoder/sequencer version
+and dependencies used for the measurement; input pins alone do not freeze
+tokenization. Raw runs, caches and generated figures belong outside the
 tracked contribution.
 
 ## Checks and limits
 
-- Coverage counts use all emitted records, including unmatched partners, as
+- Coverage counts use all emitted records, including unmatched outer partners, as
   their denominator. Scalar counts distinguish usable, missing, nonfinite,
-  sentinel, quality-rejected and invalid-transform values using the production
+  range-rejected, quality-rejected and invalid-transform values using the production
   sequencer's rules. Catalogue presence and usable labels are separate measures.
+- Payload catalogues use outer joins. Scalar-only PROVABGS labels use a left
+  join: matched labels decorate anchor records; unmatched labels must not create
+  standalone objects or attach to outer-only partner records.
 - An independent Astropy reference checks anchor IDs, nearest partners and
   unmatched partner IDs against primary rows. For an aperture of radius `R`
   and matching radius `r`, it reads anchors to `R+r` and partners to `R+2r`.
@@ -71,13 +76,41 @@ South image groups and the larger field sample. Reads are sequential. These
 limits describe projected uncompressed sizes, not peak RAM or exact wire bytes.
 An oversized group or exhausted budget is reported as a failed payload check.
 
-Input fill fractions follow published South image and spectrum masks;
-North/HSC use zero-fill proxies and RGB is checked after dequantization.
+Image fill fractions use decoded validity masks when present and otherwise a
+zero-fill proxy, after the configured crop and resize. Current South cutouts
+use the proxy; RGB is checked after dequantization and resizing. Spectrum fill
+fractions include published masks, exact zeros and tail padding, matching the
+production sequencer.
 Entirely filled inputs are reported even if their tokens are finite. These
 checks do not establish scientific calibration or label accuracy. Sequential
 packing checks tensor integrity, not streaming-packer efficiency or throughput.
 
+## Current recipe check (2026-11-27)
+
+A compatibility run against main `a85de8a` used only the `cosmos_targeted`
+entry in the fixed field manifest, with an eight-record payload cap, 256 MiB
+per row group and 1024 MiB per catalogue. Its 294 records contained 227 anchors,
+67 outer-only records and 29 matched PROVABGS rows. All 1,135 anchor/partner
+comparisons and 67 unmatched IDs passed the independent reference.
+
+All eight selected payload records passed decoding and offline replay,
+including four with PROVABGS labels. Replay checked 54 coordinate values and
+310 scalar values and preserved 9,033 nonpad tokens in three packed rows.
+The live run took 10.4 minutes with partly warm caches. This single-field check
+validates compatibility with the current recipe, not catalogue-wide coverage.
+
+The Linux CPU suite finished with 558 passed, 8 skipped and 24 deselected.
+One existing worker-startup test in `test_hf_listing.py` hit its 30-second
+DataLoader timeout under WSL; the same failure reproduced on clean main
+`a85de8a`. That test and all 49 audit tests passed natively on Windows. All
+named model parameter counts were within tolerance.
+
 ## Recorded validation (2026-11-22)
+
+This is the historical six-catalogue, 25-field measurement. It predates the
+current PROVABGS labels, scalar quality rules and resized RGB tokens. Running
+the command above audits the current recipe; it does not reproduce these old
+counts or token statistics. The field sample is not a full-catalogue audit.
 
 The [aggregate results](assets/modality-audit/results.json) record the exact
 catalogue revisions, field-manifest hash, package versions and source hashes.

@@ -3,7 +3,7 @@
 Per object (only the modalities present):
 
     <|bos|> <|begin_legacy_north_g|> p0 ... p143 <|end_legacy_north_g|>
-            <|begin_spectra|> s0 ... s30 <|end_spectra|>
+            <|begin_spectra|> s0 ... s121 <|end_spectra|>
             <|begin_Z|> z <|end_Z|> ...
 
 Multi-span objects serialize their spans in a UNIFORM random order, seeded
@@ -13,10 +13,10 @@ conditional among the present spans lands in the training distribution;
 the seed changes each epoch, and being a pure function of (object_id,
 epoch) the order is exact under checkpoint resume (no ambient RNG state).
 
-ADR 0008 scalar modalities (Z / ebv / photometry) are one-token spans over
-the record's catalog scalars, normalized by ``data/scalar_registry.py``;
-``Z`` is gated on DESI's ``ZWARN == 0`` reliability flag. A missing scalar
-is an absent span — the ordinary modality-optional path.
+ADR 0008 scalar modalities are one-token spans over the record's catalog
+scalars, normalized by ``data/scalar_registry.py``. A missing scalar, or one
+failing its registry range or quality gate (e.g. ``Z`` needs DESI's
+``ZWARN == 0``), is an absent span — the ordinary modality-optional path.
 
 The collator packs whole objects greedily into rows of ``seq_len`` tokens;
 objects are never split. ``position_ids`` restart at 0 on each object, which
@@ -33,14 +33,14 @@ row-major (batch, time) order — the same order a boolean mask lookup
 
 from __future__ import annotations
 
-import math
 import random
 import zlib
 from collections.abc import Collection
 from dataclasses import dataclass
-from typing import Any
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 
 from ..configuration_astropt3 import AstroPT3Config
 from ..modalities import ModalityConfig
@@ -53,7 +53,7 @@ from ..tokenization import (
     spiralise,
 )
 from .band_registry import RGB_CHANNELS, physical_normalize, validate_physical_bands
-from .scalar_registry import MISSING_SENTINELS, scalar_normalize
+from .scalar_registry import scalar_normalize, scalar_valid
 from .spectral import spectral_normalize
 
 # side of the central image crop applied before patchify, in pixels
@@ -66,9 +66,12 @@ SPAN_ORDER_VERSION = "adr0008_uniform_v1"
 
 
 def has_modality(modality, record: dict) -> bool:
-    """Whether a record carries a modality; ``Z`` also needs ``ZWARN`` 0 or absent."""
-    return (all(key in record for key in modality.record_keys)
-            and (modality.name != "Z" or not record.get("ZWARN")))
+    """Whether a record carries a modality; a scalar must also pass its
+    ``scalar_registry`` range and quality predicates."""
+    values = [record.get(key) for key in modality.record_keys]
+    if any(value is None for value in values):
+        return False
+    return modality.family != "scalar" or scalar_valid(modality.name, values, record)
 
 
 def span_order(names, object_id: str, epoch: int = 0) -> list[str]:
@@ -89,14 +92,20 @@ def span_order(names, object_id: str, epoch: int = 0) -> list[str]:
 FILL_SIGMA_MIN = 0.01
 
 
-def noise_fill(values: torch.Tensor, fill: torch.Tensor, seed: int) -> torch.Tensor:
-    """Replace ``fill`` entries of ``values`` (C, ...) with N(0, sigma_c) noise.
+def noise_fill(
+    values: torch.Tensor,
+    fill: torch.Tensor,
+    seed: int,
+    center: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Replace ``fill`` entries of ``values`` (C, ...) with N(center, sigma_c) noise.
 
     Masked bins, tail padding and no-data pixels are exact constants: point
     masses whose continuous likelihood the model can drive to -inf, which
     eventually dominates the gradient. Noise at each channel's own pixel-noise
     level (robust std of last-axis neighbour differences / sqrt 2, floored at
-    ``FILL_SIGMA_MIN``) bounds it. Filled entries carried no signal, so the map
+    ``FILL_SIGMA_MIN``) bounds it; optional ``center`` shifts the fill onto a
+    local continuum baseline. Filled entries carried no signal, so the map
     stays invertible on real data. Seeded, so tokens remain a pure function of
     the record (resume-exact, deterministic eval).
     """
@@ -110,6 +119,8 @@ def noise_fill(values: torch.Tensor, fill: torch.Tensor, seed: int) -> torch.Ten
     sigma = torch.nan_to_num(sigma, nan=FILL_SIGMA_MIN).clamp(min=FILL_SIGMA_MIN)
     gen = torch.Generator().manual_seed(seed)
     noise = torch.randn(values.shape, generator=gen) * sigma.view(-1, *[1] * (values.ndim - 1))
+    if center is not None:
+        noise = noise + center
     return torch.where(fill, noise.to(values.dtype), values)
 
 
@@ -185,6 +196,18 @@ class ObjectSequencer:
             flux = flux[region]
             if fill is not None:
                 fill = fill[region]
+        resize = mod.image_resize  # 0 keeps the native/cropped size
+        if resize:
+            h, w = flux.shape[-2:]
+            if h < resize or w < resize:
+                raise ValueError(
+                    f"image modality {name!r} input size {(h, w)} is smaller than image_resize {resize}"
+                )
+            if (h, w) != (resize, resize):
+                flux = F.interpolate(flux.unsqueeze(0), size=(resize, resize), mode="area").squeeze(0)
+                if fill is not None:
+                    # Any invalid source pixel invalidates the averaged output pixel.
+                    fill = F.interpolate(fill.float().unsqueeze(0), size=(resize, resize), mode="area").squeeze(0) > 0
         flux = physical_normalize(flux, bands[selected], divisor=self.image_norm_divisor)
         # Use the published pixel validity when available; do not erase measured zeros.
         flux = noise_fill(flux, flux == 0 if fill is None else fill, seed)
@@ -200,16 +223,34 @@ class ObjectSequencer:
         flux = torch.as_tensor(spec["flux"], dtype=torch.float32)
         lam = torch.as_tensor(spec["lambda"], dtype=torch.float32)
         mask = torch.as_tensor(spec["mask"], dtype=torch.bool)
-        # zero first so masked garbage never reaches the normalization
-        flux = torch.where(mask, torch.zeros_like(flux), flux)
+        # Masked and exact-zero bins carry no measurement; zero before normalization
+        # so masked garbage never reaches arcsinh, then fill along the local continuum.
+        invalid = mask | (flux == 0)
+        flux = torch.where(invalid, torch.zeros_like(flux), flux)
         flux = spectral_normalize(
             flux, lam, divisor=self.spectra_norm_divisor, source=mod.source or ""
         )
         patches, lam_mean = patchify_spectrum(flux, lam, mod.patch_size)
-        # masked bins and the last patch's tail padding become noise, not exact zeros
         fill = torch.ones(patches.numel(), dtype=torch.bool)
-        fill[: len(mask)] = mask
-        patches = noise_fill(patches.reshape(1, -1), fill.reshape(1, -1), seed).view_as(patches)
+        fill[: len(invalid)] = invalid
+        flat = patches.reshape(-1)
+        center = None
+        if fill.any() and (~fill).any():
+            # Linearly interpolate across interior masked bins (and hold robust end
+            # medians on leading/tail padding) so noise_fill tracks the local continuum
+            # instead of teaching a zero-flux mode.
+            idx = np.arange(flat.numel())
+            valid_idx = idx[(~fill).numpy()]
+            valid_vals = flat.numpy()[valid_idx]
+            interp = np.interp(
+                idx,
+                valid_idx,
+                valid_vals,
+                left=float(np.median(valid_vals[:16])),
+                right=float(np.median(valid_vals[-16:])),
+            ).astype(np.float32)
+            center = torch.from_numpy(interp).unsqueeze(0)
+        patches = noise_fill(flat.unsqueeze(0), fill.unsqueeze(0), seed, center=center).view_as(patches)
         positions = normalize_wavelength(lam_mean).unsqueeze(-1)
         return patches, positions
 
@@ -217,29 +258,13 @@ class ObjectSequencer:
         """The record's raw value(s) for a scalar modality, or None if absent.
 
         Per-scalar missingness IS the modality-optional path: a None here
-        just means no span. ``Z`` additionally gates on DESI's ``ZWARN``
-        reliability flag (ADR 0008 reuses ADR 0005's cut; a missing flag on
-        a Z-bearing record — synthetic pre-ZWARN fixtures — passes).
+        just means no span. Values outside the scalar's valid range, or with
+        a failing quality gate (``Z`` needs ``ZWARN == 0``), are absent too.
         """
         mod = self.registry.get_config(name)
-        values = []
-        for key in mod.record_keys:
-            raw_value: Any = record.get(key)
-            if raw_value is None:
-                return None
-            try:
-                values.append(float(raw_value))
-            except (TypeError, ValueError) as error:
-                raise ValueError(
-                    f"modality {name!r} has a non-numeric value"
-                ) from error
-        if not all(math.isfinite(value) for value in values):
-            return None
-        if any(value == MISSING_SENTINELS.get(name) for value in values):
-            return None
         if not has_modality(mod, record):
             return None
-        return values
+        return [float(record[key]) for key in mod.record_keys]
 
     def _scalar_tokens(self, name: str, record: dict):
         value = self._scalar_value(name, record)
@@ -345,7 +370,10 @@ class PackedCollator:
         self.modality_names = config.modality_registry().names()
 
     def __call__(self, objects: list[ObjectSeq]) -> dict:
-        """Greedily pack a flat object list, then collate the rows it makes."""
+        return self.collate_rows(self.pack_rows(objects))
+
+    def pack_rows(self, objects: list[ObjectSeq]) -> list[list[ObjectSeq]]:
+        """Greedily pack a flat object list into rows without materializing tensors."""
         rows: list[list[ObjectSeq]] = [[]]
         used = 0
         for obj in objects:
@@ -360,7 +388,7 @@ class PackedCollator:
             used += len(obj)
         if not rows[-1]:
             rows.pop()
-        return self.collate_rows(rows)
+        return rows
 
     def collate_rows(self, rows: list[list[ObjectSeq]]) -> dict:
         """Collate rows the caller has already formed.

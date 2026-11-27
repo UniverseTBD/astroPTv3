@@ -16,10 +16,13 @@ import httpx
 import numpy as np
 import pandas as pd
 import torch
+import torch.distributed as dist
 
 from ..configuration_astropt3 import AstroPT3Config
 from .echo import echo_draw, validate_echo_factor
+from .hf_listing import share_hats_metadata, share_hf_listing
 from .packing import ObjectSequencer, PackedCollator
+from . import telemetry
 from .telemetry import ANCHOR_METADATA, install_byte_probe, instrument, telemetry_dir
 
 IMAGE_SHAPE = (3, 152, 152)
@@ -144,43 +147,30 @@ def _row_from_map_rows(mapped: Mapping, nested: dict[str, tuple[str, ...]]) -> d
     return row
 
 
-def decode_legacy_image(value: Any) -> dict:
+def decode_legacy_image(value: Any, *, shape: tuple[int, int, int] = IMAGE_SHAPE) -> dict:
     """Decode one LegacySurvey image payload to the ``ObjectSequencer`` contract."""
     image = _as_mapping(value)
     bands = [str(band) for band in image.get("band", ())]
-    flux = _stack_nested(image.get("flux")).astype(np.float32, copy=False)
-    if flux.shape != IMAGE_SHAPE:
-        raise ValueError(f"image flux has shape {flux.shape}, expected {IMAGE_SHAPE}")
-    if len(bands) != IMAGE_SHAPE[0]:
-        raise ValueError(f"image has {len(bands)} bands, expected {IMAGE_SHAPE[0]}")
+    if (values := image.get("flux")) is None:
+        raise ValueError("image is missing flux")
+    flux = _stack_nested(values).astype(np.float32, copy=False)
+    if flux.shape != shape:
+        raise ValueError(f"image flux has shape {flux.shape}, expected {shape}")
+    if len(bands) != shape[0]:
+        raise ValueError(f"image has {len(bands)} bands, expected {shape[0]}")
     return {"flux": flux, "band": bands}
 
 
 def decode_legacy_south_image(value: Any) -> dict:
-    """Decode the DR10 South griz cube. MMU's boolean mask is True for clean pixels."""
+    """Decode the DR10 South griz cube with Legacy's zero-as-missing rule."""
     image = _as_mapping(value)
     bands = list(image.get("band", ()))
     if bands != ["des-g", "des-r", "des-i", "des-z"]:
         raise ValueError(f"Legacy South bands must be ordered des-g/r/i/z, got {bands}")
-    scale = np.asarray(image.get("scale"), dtype=np.float32)
-    if scale.shape != (4,) or not np.allclose(scale, 0.262, rtol=1e-6, atol=0):
-        raise ValueError("Legacy South pixel scale must be 0.262 arcsec/pixel in every band")
-
-    def cube(field):
-        if image.get(field) is None:
-            raise ValueError(f"Legacy South image is missing {field}")
-        array = _stack_nested(image[field])
-        if array.shape != (4, 160, 160):
-            raise ValueError(f"Legacy South {field} has shape {array.shape}, expected (4, 160, 160)")
-        return array
-
-    flux = cube("flux").astype(np.float32, copy=False)
-    clean = cube("mask")
-    if clean.dtype != np.bool_:
-        raise ValueError("Legacy South mask must be boolean (True = clean)")
-    ivar = cube("ivar")
-    good = clean & np.isfinite(flux) & np.isfinite(ivar) & (ivar > 0)
-    return {"flux": np.where(good, flux, np.float32(0)), "band": bands, "fill_mask": ~good}
+    decoded = decode_legacy_image(image, shape=(4, 160, 160))
+    flux = decoded["flux"]
+    decoded["flux"] = np.where(np.isfinite(flux), flux, np.float32(0))
+    return decoded
 
 
 def _decode_spectrum(value: Any) -> dict:
@@ -234,6 +224,7 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
         *,
         catalog_stream: dict,
         rank: int = 0,
+        dp_size: int = 1,
         seed: int = 0,
         echo_factor: int = 1,
     ):
@@ -246,6 +237,7 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
         self.micro_batch_size = micro_batch_size
         self.seq_len = seq_len
         self.rank = rank
+        self.dp_size = dp_size
         self.seed = seed
         self.catalog_stream = CatalogStream(catalog_stream, config)
         self._epoch = 0  # InfiniteStream partition-draw nonce for span ordering
@@ -258,8 +250,10 @@ class PackedMicroBatches(torch.utils.data.IterableDataset):
 
     def _open_draws(self, worker):
         """Yield finite record iterators, one per upstream catalog draw."""
+        worker_id, workers = (worker.id, worker.num_workers) if worker else (0, 1)
         for epoch, records in self.catalog_stream.draws(
-            seed=self.seed, rank=self.rank, worker_id=worker.id if worker else 0,
+            seed=self.seed, rank=self.rank, worker_id=worker_id,
+            shard=(self.rank * workers + worker_id, self.dp_size * workers),
         ):
             self._epoch = epoch
             yield records
@@ -326,11 +320,12 @@ def build_astropt3_dataloader(
     micro_batch_size: int,
     sequence_length: int,
     dp_rank: int,
+    dp_size: int,
     num_workers: int = 0,
     seed: int = 0,
     multiprocessing_context: str | None = None,
 ) -> Any:
-    """Build worker-side draw echoing, then main-process telemetry/device inputs."""
+    """Build the loader, collectively on all ranks when training under torch.distributed."""
     echo_factor = getattr(dataset_args, "echo_factor", 1)
     validate_echo_factor(echo_factor)
     # Each DP rank echoes its own draws (rank-seeded shuffle), so DP needs no coordination.
@@ -357,10 +352,20 @@ def build_astropt3_dataloader(
         micro_batch_size,
         sequence_length,
         rank=dp_rank,
+        dp_size=dp_size,
         seed=seed,
         echo_factor=echo_factor,
         catalog_stream=catalog_stream,
     )
+    if dist.is_initialized():
+        stream = dataset.catalog_stream
+        telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in stream.catalogs})
+        if dist.get_world_size() == 1 or dist.get_rank() == 0:
+            install_byte_probe(dp_rank, None)
+        stream.hf_listing = share_hf_listing(cat["repo"] for cat in stream.catalogs)
+        stream.hats_metadata = share_hats_metadata(
+            (cat["repo"] for cat in stream.catalogs), listing=stream.hf_listing
+        )
     if num_workers and multiprocessing_context is None:
         multiprocessing_context = "spawn"
     loader = torch.utils.data.DataLoader(
@@ -369,5 +374,45 @@ def build_astropt3_dataloader(
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
         multiprocessing_context=multiprocessing_context,
+        in_order=False,  # each worker owns a fixed sky shard; a sparse one must not stall the rest
     )
     return instrument(loader, echo_factor=echo_factor)
+
+
+def share_tp_batches(loader_factory, tp_group, world_group):
+    """Build collectively, then read one stream per DP replica and share its batches."""
+    source = dist.get_global_rank(tp_group, 0)
+    is_source = dist.get_rank(tp_group) == 0
+    device = torch.device("cuda" if dist.get_backend(tp_group) == "nccl" else "cpu")
+    failed = torch.zeros((), device=device, dtype=torch.int32)
+    batches = setup_error = None
+    try:
+        loader = loader_factory()  # All ranks receive the listing; only TP leaders start workers.
+        batches = iter(loader) if is_source else None
+        del loader
+    except Exception as exc:
+        setup_error = exc
+    while True:
+        batch: dict[str, torch.Tensor] = {}
+        header: list[list[tuple[str, torch.Size, torch.dtype]] | None] = [None]
+        error = setup_error
+        if batches is not None:
+            try:
+                batch = {k: v.to(device, non_blocking=True).contiguous() for k, v in next(batches).items()}
+                header[0] = [(k, v.shape, v.dtype) for k, v in batch.items()]
+            except Exception as exc:
+                error = exc
+        # Fail across DP replicas too, before any rank enters model collectives.
+        failed.fill_(error is not None)
+        dist.all_reduce(failed, op=dist.ReduceOp.MAX, group=world_group)
+        if failed.item():
+            raise RuntimeError("An AstroPT3 catalog reader failed before broadcasting its batch") from error
+
+        dist.broadcast_object_list(header, src=source, group=tp_group, device=device)
+        if not is_source:
+            assert header[0] is not None
+            batch = {k: torch.empty(shape, dtype=dtype, device=device) for k, shape, dtype in header[0]}
+        for tensor in batch.values():
+            if tensor.numel():
+                dist.broadcast(tensor, src=source, group=tp_group)
+        yield batch

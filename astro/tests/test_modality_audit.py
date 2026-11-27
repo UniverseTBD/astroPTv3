@@ -47,7 +47,7 @@ def test_coverage_uses_all_emitted_rows_and_keeps_rejection_reasons(scalar_case)
     assert report["outer_only_rows"] == 1
     assert report["source_presence"] == {"legacy": 2, "galaxies": 2}
     scalar = report["scalars"]["gwh_mass_med_photoz"]
-    assert scalar["counts"] == {"sentinel": 1, "missing": 1, "usable": 1}
+    assert scalar["counts"] == {"range_rejected": 1, "missing": 1, "usable": 1}
     assert scalar["raw_usable"]["median"] == 10
 
 
@@ -56,7 +56,7 @@ def test_scalar_zero_is_usable_and_nonfinite_is_separate(scalar_case):
     mod = sequencer.registry.get_config("gwh_mass_med_photoz")
     assert audit.scalar_status(mod, {mod.name: 0.0}, sequencer) == "usable"
     assert audit.scalar_status(mod, {mod.name: np.inf}, sequencer) == "nonfinite"
-    assert audit.scalar_status(mod, {mod.name: -99}, sequencer) == "sentinel"
+    assert audit.scalar_status(mod, {mod.name: -99}, sequencer) == "range_rejected"
 
 
 def test_hash_sample_is_stable_when_rows_are_reordered(scalar_case):
@@ -103,7 +103,7 @@ def test_real_margin_star_counts_outer_singletons(scalar_case):
     assert report["rows"] == 2
     assert report["source_combinations"] == {"galaxies": 1, "legacy+galaxies": 1}
     assert report["repeated_source_tuples"] == 0
-    assert report["scalars"]["gwh_mass_med_photoz"]["counts"] == {"sentinel": 1, "usable": 1}
+    assert report["scalars"]["gwh_mass_med_photoz"]["counts"] == {"range_rejected": 1, "usable": 1}
     field = {'name': 'fixture', 'ra': 10., 'dec': 0., 'radius_arcsec': 60.}
     with dask.config.set(scheduler='synchronous'):
         checked = audit.verify_star(frame, star, opened, stream.footprint, field, 1.)
@@ -312,3 +312,154 @@ def test_payload_lookup_reuses_projection_and_checks_source_row_order(tmp_path, 
         audit.pq.write_table(pa.table({'dr8_id': ['b', 'a']}), projected / relative)
         with pytest.raises(ValueError, match='row order changed'):
             audit.fetch_payloads(None, str(primary), source, {'b': (10., 0.)}, output, 1, 1, projected)
+
+
+def current_recipe():
+    path = Path(__file__).resolve().parents[1] / 'configs/nanotron/astropt3-70m.yaml'
+    recipe = audit.yaml.safe_load(path.read_text(encoding='utf-8'))
+    config = AstroPT3Config(**{k: v for k, v in recipe['model']['model_config'].items()
+                              if k != 'is_astropt3_config'})
+    return config, CatalogStream(recipe['data_stages'][0]['data']['dataset']['catalog_stream'], config)
+
+
+def test_current_recipe_accepts_pinned_scalar_labels_without_network():
+    config, configured = current_recipe()
+    audit.validate_catalogs(configured)
+    labels = next(cat for cat in configured.catalogs if cat['name'] == 'provabgs')
+    assert labels['decoder'] == 'scalars' and labels['how'] == 'left'
+    assert set(labels['scalar_columns']) <= set(config.modality_registry().names())
+    labels['how'] = 'outer'
+    with pytest.raises(ValueError, match='left scalar-only joins'):
+        audit.validate_catalogs(configured)
+
+
+@pytest.mark.parametrize('flag', [None, np.nan, np.inf, -np.inf, 1., 0.])
+@pytest.mark.parametrize('name', ['Z', 'sdss_vdisp', 'gwh_total_sfr_median', 'hsc_cmodel_mag'])
+def test_quality_flags_agree_with_production_decoder(name, flag):
+    config, configured = current_recipe()
+    sequencer = ObjectSequencer(config)
+    mod = sequencer.registry.get_config(name)
+    values = {'Z': .1, 'sdss_vdisp': 200., 'gwh_total_sfr_median': 1., 'hsc_cmodel_mag': 20.}
+    record = {key: values[name] for key in mod.record_keys}
+    record.update({key: flag for key in audit.QUALITY_GATES[name]})
+    star = configured.stars[0]
+    row = {}
+    for index, cat in enumerate(star.catalogs):
+        suffix = '' if index == 0 else '_' + cat['name']
+        row[audit.streaming._ID_COLUMNS.get(cat['decoder'], 'object_id') + suffix] = cat['name']
+        for key, column in cat['scalar_columns'].items():
+            row[column + suffix] = record.get(key)
+    actual = audit.scalar_status(mod, audit.scalar_record(row, star), sequencer)
+    decoded = star.decode_row(row)['record']
+    assert (actual == 'usable') == (decoded is not None and sequencer._scalar_value(name, decoded) is not None)
+    assert actual == ('usable' if flag == 0 else 'quality_rejected')
+
+
+def test_mixed_star_checks_labels_without_emitting_label_only_rows(scalar_case):
+    config, original, _ = scalar_case
+    labels = {'name': 'provabgs', 'repo': 'offline/labels', 'decoder': 'scalars', 'how': 'left',
+              'scalar_columns': {'provabgs_LOG_MSTAR': 'LOG_MSTAR'}}
+    configured = CatalogStream({'anchors': [{**original.catalogs[0], 'draw_weight': 1}],
+                                'catalogs': [original.catalogs[1], labels], 'how': 'outer', 'min_catalogs': 1}, config)
+    star = configured.stars[0]
+
+    def catalog(rows, name):
+        frame = pa.Table.from_pylist(rows).to_pandas(types_mapper=pd.ArrowDtype)
+        return lsdb.from_dataframe(frame, catalog_name=name, margin_threshold=10,
+                                   lowest_order=0, highest_order=0, ra_column='ra', dec_column='dec')
+
+    opened = {
+        'legacy': catalog([{'object_id': 'a', 'ra': 10., 'dec': 0.}], 'legacy'),
+        'galaxies': catalog([{'dr8_id': 'x', 'ra': 10.0001, 'dec': 0., 'mass': 10.},
+                             {'dr8_id': 'y', 'ra': 10.01, 'dec': 0., 'mass': 11.}], 'galaxies'),
+        'provabgs': catalog([{'object_id': key, 'ra': ra, 'dec': 0., 'LOG_MSTAR': 10.}
+                             for key, ra in [('matched', 10.0002), ('near_outer', 10.01),
+                                             ('isolated', 10.015)]], 'provabgs'),
+    }
+    stream, = configured._streams(opened, None, 42)
+    field = {'name': 'mixed', 'ra': 10., 'dec': 0., 'radius_arcsec': 60.}
+    with dask.config.set(scheduler='synchronous'):
+        frame = pd.concat([stream._delayed_partition(p).compute() for p in stream._pixels])
+        checked = audit.verify_star(frame, star, opened, stream.footprint, field, 1.)
+        assert len(frame) == 2
+        assert checked['checked_anchor_partner_pairs'] == 2
+        assert checked['checked_outer_rows'] == 1
+        assert frame['object_id_provabgs'].dropna().tolist() == ['matched']
+        broken = frame.copy()
+        broken.loc[broken['object_id'].notna(), 'object_id_provabgs'] = 'isolated'
+        with pytest.raises(AssertionError, match='reference'):
+            audit.verify_star(broken, star, opened, stream.footprint, field, 1.)
+        extra = {column: None for column in frame.columns}
+        extra.update(object_id_provabgs='isolated', ra_provabgs=10.015, dec_provabgs=0.,
+                     _ra=10.015, _dec=0.)
+        broken = pd.concat([frame, pd.DataFrame([extra])])
+        with pytest.raises(AssertionError, match='left-joined labels'):
+            audit.verify_star(broken, star, opened, stream.footprint, field, 1.)
+
+
+def test_scalar_only_primary_rows_are_saved_decoded_and_verified(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / 'scripts'))
+    import verify_modality_audit as verifier
+
+    config, configured = current_recipe()
+    star = configured.stars[0]
+    source = next(cat for cat in star.catalogs if cat['name'] == 'provabgs')
+    relative = 'dataset/Norder=0/Dir=0/Npix=4.parquet'
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True)
+    primary = dict(object_id='label', ra=10., dec=0., LOG_MSTAR=10., Z_MW=.01,
+                   TAGE_MW=5., AVG_SFR=1., MAG_W1=18.)
+    audit.pq.write_table(pa.Table.from_pylist([primary]), path)
+    monkeypatch.setattr(audit, 'HfFileSystem', lambda **kwargs: SimpleNamespace(
+        open=lambda uri, **options: open(uri, 'rb')))
+    monkeypatch.setattr(audit, 'primary_pixel', lambda *args: SimpleNamespace(order=0, pixel=4))
+    found, log = audit.fetch_payloads(None, str(tmp_path), source, {'label': (10., 0.)}, tmp_path, 1, 1)
+    assert found == {'label': primary} and log[0]['status'] == 'read'
+    row = {'object_id': 'anchor', **{key + '_provabgs': value for key, value in primary.items()}}
+    payloads = {cat['name']: {} for cat in star.catalogs}
+    payloads['legacy']['anchor'] = {'ra': 10., 'dec': 0.}
+    payloads['provabgs'] = found
+    # No image data is needed to decode a matched scalar-only partner.
+    record = star.decode_row(row)['record']
+    sequencer = ObjectSequencer(config)
+    assert set(sequencer.build(record).values) == set(source['scalar_columns'])
+    row.update(ra=10., dec=0.)
+    assert verifier.check_primary_values(row, star, payloads)[1] >= len(source['scalar_columns'])
+    row['LOG_MSTAR_provabgs'] = 99.
+    with pytest.raises(ValueError, match='Joined value differs from primary'):
+        verifier.check_primary_values(row, star, payloads)
+
+
+@pytest.mark.parametrize('published_mask', [True, False])
+def test_fill_counts_follow_image_resize(published_mask):
+    config = AstroPT3Config(modalities=[{
+        'name': 'legacy_south_r', 'family': 'image', 'source': 'legacy_south', 'band': 'des-r',
+        'record_keys': ['image'], 'input_size': 4, 'patch_size': 2, 'image_resize': 4,
+    }])
+    flux = np.ones((1, 8, 8), dtype=np.float32)
+    flux[:, :2, :2] = 0
+    image = {'band': ['des-r'], 'flux': flux}
+    if published_mask:
+        image['fill_mask'] = np.zeros_like(flux, dtype=bool)
+        image['fill_mask'][:, 7, 7] = True
+    result = audit.payload_quality({'object_id': 'a', 'image': image}, ObjectSequencer(config))
+    details = result['modalities']['legacy_south_r']
+    assert details['input_values'] == details['values'] == 16
+    assert details['filled_values'] == 1
+    assert details['finite_tokens']
+
+
+def test_spectrum_fill_counts_include_zeros_and_padding():
+    config = AstroPT3Config(modalities=[{
+        'name': 'sdss', 'family': 'spectrum', 'source': 'sdss', 'record_keys': ['spectrum'],
+        'input_size': 4, 'patch_size': 4,
+    }])
+    record = {'object_id': 'a', 'spectrum': {
+        'flux': np.array([1., 0., 2., 3., 4.]), 'lambda': 10 ** (3.6 + np.arange(5) * 1e-4),
+        'mask': np.array([False, False, False, True, False]),
+    }}
+    result = audit.payload_quality(record, ObjectSequencer(config))['modalities']['sdss']
+    assert result['input_values'] == result['values'] == 8
+    assert result['padding_values'] == 3
+    assert result['filled_values'] == 5
+    assert result['finite_tokens']

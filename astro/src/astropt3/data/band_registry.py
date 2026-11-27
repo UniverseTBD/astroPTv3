@@ -12,9 +12,11 @@ pixels.
 Everything is keyed to LegacySurvey: nanomaggies with AB zeropoint 22.5 and
 0.262 arcsec/pixel (``m_AB = 22.5 - 2.5*log10(flux_nmgy)``).
 
-Records with bands that are all in :data:`RAW_BANDS` pass through untouched;
-records mixing RAW and registry bands raise (not a real case for us — records
-are all-``des-*`` or all-``rgb-*``).
+Records with bands that are all in :data:`RAW_BANDS` skip physical flux
+calibration and are multiplied by :data:`RGB_SCALE` (invertibly in
+:func:`physical_inverse`) so their token scale matches arcsinh-normalized
+physical bands; records mixing RAW and registry bands raise (not a real case
+for us — records are all-``des-*`` or all-``rgb-*``).
 
 Constants and citations
 ------------------------
@@ -84,14 +86,16 @@ BAND_REGISTRY: dict[str, tuple[float, float, float]] = {
 }
 
 
-# Bands passed through with NO physical normalization (no rescale / clamp /
-# arcsinh). RGB composites are already display-stretched 8-bit imagery, not
-# calibrated flux, so the physical pipeline does not apply. Named by channel
-# (rgb-*), not by file format, since the encoding (PNG/JPG) is irrelevant once
-# decoded to pixels. Deliberately separate from BAND_REGISTRY: unknown bands
-# (e.g. euclid-*) must still raise, only these pass through.
+# Display-stretched 8-bit RGB composites scaled to [0, 1] skip physical flux
+# calibration (no zeropoint rescale / clamp / arcsinh) and are multiplied by
+# RGB_SCALE so token std (~0.78 vs ~0.155 unscaled) matches arcsinh-normalized
+# physical bands under the shared JetFormer noise schedule and flow bounds.
+# Named by channel (rgb-*), not by file format, since the encoding (PNG/JPG) is
+# irrelevant once decoded to pixels. Deliberately separate from BAND_REGISTRY:
+# unknown bands (e.g. euclid-*) must still raise.
 RGB_CHANNELS = ("rgb-r", "rgb-g", "rgb-b")
 RAW_BANDS = frozenset(RGB_CHANNELS)
+RGB_SCALE = 5.0
 
 
 def rescale_factors(band: str) -> tuple[float, float]:
@@ -155,8 +159,8 @@ def physical_normalize(
     """Rescale to nanomaggies -> clamp bright pixels (lossy) -> arcsinh.
 
     The physical, invertible-up-to-the-clamp forward normalization. Raw bands
-    (RGB composites) pass through untouched; an empty band list is vacuously
-    all-RAW and also passes through (nothing to key the physics on).
+    (RGB composites in [0, 1]) are rescaled by :data:`RGB_SCALE`; an empty band
+    list passes through untouched (nothing to key normalization on).
     ``divisor`` is the arcsinh knee in nanomaggies — pass the checkpoint's
     ``config.image_norm_divisor`` so data and inverse stay in the regime the
     model was trained on.
@@ -167,8 +171,10 @@ def physical_normalize(
     ceiling ~11.3) matters for the jetformer exact-likelihood path, which
     feeds these values to the flow/GMM unstandardized.
     """
-    if all(b in RAW_BANDS for b in bands):
+    if not bands:
         return flux
+    if all(b in RAW_BANDS for b in bands):
+        return flux * RGB_SCALE
     rescale, clamp = physical_factors(bands, flux.device, flux.dtype)
     flux = flux * rescale
     flux = flux.clamp(min=-clamp, max=clamp)
@@ -178,7 +184,7 @@ def physical_normalize(
 def physical_inverse(
     flux: torch.Tensor, bands: list[str], divisor: float = _DIV_FACTOR
 ) -> torch.Tensor:
-    """Invert :func:`physical_normalize`: sinh -> un-rescale.
+    """Invert :func:`physical_normalize`: sinh -> un-rescale (or divide RGB by :data:`RGB_SCALE`).
 
     The clamp is lossy: bright pixels above the ceiling are not recoverable
     (accepted, see the galactiktok ADR). Model output is clamped to the
@@ -187,8 +193,10 @@ def physical_inverse(
     not extra information loss. ``divisor`` must match the forward pass
     (the checkpoint's ``config.image_norm_divisor``).
     """
-    if all(b in RAW_BANDS for b in bands):
+    if not bands:
         return flux
+    if all(b in RAW_BANDS for b in bands):
+        return flux / RGB_SCALE
     rescale, clamp = physical_factors(bands, flux.device, flux.dtype)
     ceiling = torch.arcsinh(clamp / divisor)
     flux = flux.clamp(min=-ceiling, max=ceiling)

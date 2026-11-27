@@ -8,33 +8,45 @@ import io
 import math
 import re
 import time
+import zlib
 from contextlib import suppress
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+from dask._task_spec import Task, TaskRef
+from dask.delayed import Delayed, delayed
 from dask.distributed import Client, LocalCluster
+from hats.pixel_math.healpix_pixel import HealpixPixel
 from lsdb.loaders.hats.read_hats import open_catalog
 from lsdb.streams.catalog_streams import (
     CrossMatchStream,
     InfiniteStream,
+    _assemble_star_pixel,
     _data_coverage,
+    _partition_delayeds,
     _restrict_to_footprint,
 )
+
+_LSDB_CROSSMATCH_STREAM = CrossMatchStream
+_MAX_ROWGROUP_FILTERS = 10
+_ORDER0_PIXEL_ARCSEC = 210_962.0  # sqrt(4*pi / 12) in arcseconds
 from mocpy import MOC
 from PIL import Image
 
 from . import nanotron_loader as loader
 from . import telemetry
+from .hf_io import enable_hf_coalesced_parquet_reads, enable_hf_concurrent_ranges
+from .hf_listing import load_hats_metadata, seed_hf_listing
 from .packing import has_modality
-from .scalar_registry import _transforms
+from .scalar_registry import CATEGORICAL, QUALITY_GATES, _transforms
 
 # Decoder names describe verified payload contracts, not arbitrary calibrations.
 _PROFILES = {
     "legacy_image": ("image", ("band", "flux"), "image"),
-    "legacy_south_image": ("image", ("band", "flux", "ivar", "mask", "scale"), "image"),
+    "legacy_south_image": ("image", ("band", "flux"), "image"),
     "hsc_image": ("image", ("band", "flux", "scale"), "image"),
     "desi_spectrum": ("spectrum", ("flux", "lambda", "mask"), "spectrum"),
     "sdss_spectrum": ("spectrum", ("flux", "lambda", "mask"), "spectrum"),
@@ -134,6 +146,8 @@ class _Star:
             modality = registry.get_config(name)
             if modality.family == "scalar":
                 _transforms(name)  # Reject uncalibrated scalars before opening catalogs.
+                if modality.categories != CATEGORICAL.get(name, 0):
+                    raise ValueError(f"modality {name!r} categories disagree with scalar_registry.CATEGORICAL")
             decoder = None
             if modality.family == "image":
                 decoder = _IMAGE_SOURCE_DECODERS.get(modality.source or "")
@@ -144,12 +158,13 @@ class _Star:
                     raise ValueError(f"modality {name!r} has no compatible catalog output for {key!r}")
                 if decoder is not None and outputs[key][1] != decoder:
                     raise ValueError(f"modality {name!r} source disagrees with its {modality.family} decoder")
-            if name == "Z" and ("ZWARN" not in outputs or any(
-                outputs[key][2] != outputs["ZWARN"][2] for key in modality.record_keys
-            )):
-                raise ValueError("Z requires an explicit ZWARN scalar column from the same catalog")
+            for flag in QUALITY_GATES.get(name, ()):
+                if flag not in outputs or any(
+                    outputs[key][2] != outputs[flag][2] for key in modality.record_keys
+                ):
+                    raise ValueError(f"{name} requires an explicit {flag} scalar column from the same catalog")
 
-    def decode_row(self, mapped):
+    def decode_row(self, mapped, *, dequantize_seed=None):
         row = loader._row_from_map_rows(mapped, self.nested)
         record, source_ids = {}, {}
         for index, catalog in enumerate(self.catalogs):
@@ -166,10 +181,6 @@ class _Star:
                 key: loader._finite_scalar(row.get(f"{column}{suffix}"))
                 for key, column in catalog["scalar_columns"].items()
             }
-            # A missing/invalid quality flag must not make a redshift look reliable.
-            if ("ZWARN" in scalars and scalars["ZWARN"] is None
-                    and (value is not None or any(number is not None for number in scalars.values()))):
-                scalars["ZWARN"] = 1.0
             scalars = {key: number for key, number in scalars.items() if number is not None}
             if value is None and not scalars:
                 continue
@@ -198,7 +209,10 @@ class _Star:
                     rgb = np.asarray(png.convert("RGB"), dtype=np.float32)
                 # Uniform dequantization: a continuous likelihood on exact k/255 levels
                 # rewards piling density onto the 8-bit grid instead of modelling galaxies.
-                rgb = (rgb + _DEQUANTIZE.random(rgb.shape, dtype=np.float32)) / 255.0
+                rng = _DEQUANTIZE if dequantize_seed is None else np.random.default_rng(
+                    zlib.crc32(f"{name}:{source_ids[name]}".encode(), dequantize_seed)
+                )
+                rgb = (rgb + rng.random(rgb.shape, dtype=np.float32)) / 255.0
                 result = {"flux": rgb.transpose(2, 0, 1), "band": ["rgb-r", "rgb-g", "rgb-b"]}
             else:
                 result = loader._decode_spectrum(value)
@@ -227,6 +241,193 @@ def _split_sky(split):
     return validation if split == "validation" else validation.to_order(10).extended().complement()
 
 
+def _shard_sky(anchor, footprint, index, count):
+    # Whole HATS partitions (similar row counts) per consumer, so no two consumers fetch
+    # the same anchor file; more consumers than partitions share them round-robin.
+    # shortcut: no seam collar, so an outer partner row within radius_arcsec of a shard
+    # seam can appear in two shards; add a guard like the anchors' if that matters.
+    pixels = anchor.moc_search(footprint).get_healpix_pixels()
+    step = min(count, len(pixels))
+    if not step:
+        return footprint
+    mine = pixels[index % step::step]
+    orders = np.array([p.order for p in mine], dtype=np.uint8)
+    cells = MOC.from_healpix_cells(np.array([p.pixel for p in mine], dtype=np.uint64), orders, int(orders.max(initial=0)))
+    return footprint.intersection(cells)
+
+
+def _project_anchor_margin(anchor):
+    """Strip payload columns from an anchor's margin catalog.
+
+    In outer crossmatches, LSDB only uses ``left.margin`` coordinates to suppress
+    unmatched right rows near a partition seam; every visitor match is dropped before
+    output assembly, so payload columns on ``anchor.margin`` are fetched only to be
+    discarded.
+    """
+    margin = getattr(anchor, "margin", None)
+    if (
+        margin is None
+        or not hasattr(margin, "hc_structure")
+        or not getattr(margin._operation, "is_reloadable", False)
+        or margin.hc_structure.catalog_base_dir is None
+        or margin.hc_structure.original_schema is None
+    ):
+        return anchor
+    info = margin.hc_structure.catalog_info
+    coords = [col for col in (info.ra_column, info.dec_column) if col]
+    if not coords or list(margin.columns) == coords:
+        return anchor
+    import hats as hc
+    from lsdb.loaders.hats.hats_loading_config import HatsLoadingConfig
+    from lsdb.loaders.hats.read_hats import _load_catalog
+
+    old = getattr(margin, "loading_config", None)
+    hc_margin = margin._create_modified_hc_structure(updated_schema=margin.hc_structure.original_schema)
+    config = HatsLoadingConfig(
+        columns=coords,
+        margin_cache=None,
+        error_empty_filter=False,
+        path_generator=old.path_generator if old and old.path_generator else hc.io.pixel_catalog_file,
+        filters=old.filters if old else None,
+        kwargs=dict(old.kwargs) if old and old.kwargs else {},
+        show_statistics=old.show_statistics if old else False,
+    )
+    anchor.margin = _load_catalog(hc_margin, config)
+    return anchor
+
+
+def _open_from_hats_metadata(hc_catalog, margin_hc_catalog, *, columns, margin_columns=None):
+    """Build an LSDB Catalog directly from broadcast HATS metadata without Hub reads."""
+    import hats as hc
+    from lsdb.catalog.margin_catalog import _validate_margin_catalog
+    from lsdb.loaders.hats.read_hats import _read_dataset
+
+    if isinstance(hc_catalog, hc.catalog.CatalogCollection):
+        catalog = _read_dataset(hc_catalog.main_catalog, columns=columns)
+        catalog.hc_collection = hc_catalog
+    else:
+        catalog = _read_dataset(hc_catalog, columns=columns)
+    if margin_hc_catalog is not None:
+        margin = _read_dataset(margin_hc_catalog, columns=margin_columns or columns)
+        if margin_columns is None:
+            _validate_margin_catalog(margin, catalog)
+        catalog.margin = margin
+    return catalog
+
+
+def _healpix_29_filters_for_pixel(
+    pixel: HealpixPixel, radius_arcsec: float, index_column: str = "_healpix_29"
+) -> list[list[tuple[str, str, int]]]:
+    """Return DNF ``_healpix_29`` row-group bounds covering ``pixel`` plus a >=4x collar."""
+    collar_order = int(math.floor(math.log2(_ORDER0_PIXEL_ARCSEC / max(4.0 * radius_arcsec, 1.0))))
+    collar_order = max(pixel.order, min(14, collar_order))
+    moc = MOC.from_healpix_cells(
+        np.array([pixel.pixel], dtype=np.uint64),
+        np.array([pixel.order], dtype=np.uint8),
+        pixel.order,
+    ).to_order(collar_order).extended()
+    ranges = moc.to_depth29_ranges
+    if len(ranges) > _MAX_ROWGROUP_FILTERS:
+        starts, ends = ranges[:, 0], ranges[:, 1]
+        gaps = starts[1:] - ends[:-1]
+        cuts = np.sort(
+            np.argpartition(gaps, -(_MAX_ROWGROUP_FILTERS - 1))[-(_MAX_ROWGROUP_FILTERS - 1):]
+        )
+        merged = []
+        prev = 0
+        for cut in cuts:
+            merged.append((int(starts[prev]), int(ends[cut])))
+            prev = int(cut) + 1
+        merged.append((int(starts[prev]), int(ends[-1])))
+        return [[(index_column, ">=", lo), (index_column, "<", hi)] for lo, hi in merged]
+    return [[(index_column, ">=", int(lo)), (index_column, "<", int(hi))] for lo, hi in ranges]
+
+
+def _remap_task_refs(obj: Any, key_map: dict) -> Any:
+    if isinstance(obj, TaskRef):
+        return TaskRef(key_map.get(obj.key, obj.key))
+    if isinstance(obj, tuple):
+        return tuple(_remap_task_refs(item, key_map) for item in obj)
+    if isinstance(obj, list):
+        return [_remap_task_refs(item, key_map) for item in obj]
+    if isinstance(obj, dict):
+        return {k: _remap_task_refs(v, key_map) for k, v in obj.items()}
+    return obj
+
+
+def _push_coarse_pixel_filters(
+    part: Delayed, target_pixel: HealpixPixel, radius_arcsec: float
+) -> Delayed:
+    """Push ``target_pixel``'s collared ``_healpix_29`` bounds into coarser ``read_pixel`` tasks."""
+    graph = dict(part.dask)
+    rewritten: dict[Any, list[list[tuple[str, str, int]]]] = {}
+    cached_filters: dict[str, list[list[tuple[str, str, int]]]] = {}
+    for key, node in graph.items():
+        if not isinstance(node, Task) or not node.args:
+            continue
+        part_pixel = node.args[0]
+        if not isinstance(part_pixel, HealpixPixel) or part_pixel.order >= target_pixel.order:
+            continue
+        if "filters" not in node.kwargs:
+            continue
+        index_col = node.kwargs.get("index_column")
+        schema = node.kwargs.get("schema")
+        if index_col != "_healpix_29" or schema is None or index_col not in schema.names:
+            continue
+        if index_col not in cached_filters:
+            cached_filters[index_col] = _healpix_29_filters_for_pixel(
+                target_pixel, radius_arcsec, index_column=index_col
+            )
+        rewritten[key] = cached_filters[index_col]
+
+    if not rewritten:
+        return part
+
+    # Propagate rekeying to every downstream task so sibling pixels in one chunk never collide.
+    dirty = set(rewritten)
+    changed = True
+    while changed:
+        changed = False
+        for key, node in graph.items():
+            if key not in dirty and isinstance(node, Task) and (node.dependencies & dirty):
+                dirty.add(key)
+                changed = True
+
+    tag = (target_pixel.order, target_pixel.pixel)
+    key_map = {key: (key, tag) for key in dirty}
+    new_graph = {}
+    for key, node in graph.items():
+        if key not in dirty:
+            new_graph[key] = node
+            continue
+        new_key = key_map[key]
+        new_args = _remap_task_refs(node.args, key_map)
+        new_kwargs = _remap_task_refs(node.kwargs, key_map)
+        if key in rewritten:
+            new_kwargs = {**new_kwargs, "filters": rewritten[key]}
+        new_graph[new_key] = Task(new_key, node.func, *new_args, **new_kwargs)
+    return Delayed(key_map.get(part.key, part.key), new_graph)
+
+
+class _FilteredCrossMatchStream(CrossMatchStream):
+    """CrossMatchStream that pushes fine aligned-pixel bounds into coarser Parquet reads."""
+
+    def __init__(self, *args, radius_arcsec: float = 1.0, **kwargs):
+        self._pushdown_radius_arcsec = radius_arcsec
+        super().__init__(*args, **kwargs)
+
+    def _delayed_partition(self, pixel: HealpixPixel) -> Delayed:
+        right_parts = [
+            [_push_coarse_pixel_filters(p, pixel, self._pushdown_radius_arcsec) for p in _partition_delayeds(result, pixel)]
+            for result in self._results
+        ]
+        anchor_parts = [
+            _push_coarse_pixel_filters(p, pixel, self._pushdown_radius_arcsec)
+            for p in _partition_delayeds(self._anchor, pixel)
+        ]
+        return delayed(_assemble_star_pixel)(pixel, anchor_parts, right_parts, self._assembly)
+
+
 def _draw_paths(weights, offset):
     while True:
         for turn in range(max(weights)):
@@ -242,7 +443,11 @@ class CatalogStream:
     def __init__(self, spec, config):
         if not isinstance(spec, dict) or set(spec) - {*_DEFAULTS, "anchors", "catalogs", "min_catalogs", "split"}:
             raise ValueError("catalog_stream has unknown settings or is not a mapping")
-        self.spec = spec = {**_DEFAULTS, "min_catalogs": 1, **copy.deepcopy(spec)}
+        # Concatenating multiple unjoined image partitions can exceed Arrow's offset limit.
+        chunk_default = 1 if spec.get("catalogs") == [] else _DEFAULTS["partitions_per_chunk"]
+        self.spec = spec = {
+            **_DEFAULTS, "min_catalogs": 1, "partitions_per_chunk": chunk_default, **copy.deepcopy(spec),
+        }
         anchors = spec.get("anchors")
         if not isinstance(anchors, list) or not anchors or not all(isinstance(c, dict) for c in anchors):
             raise ValueError("catalog_stream.anchors must be a nonempty list of catalogs with draw_weight")
@@ -254,6 +459,8 @@ class CatalogStream:
         if not isinstance(partners, list):
             raise ValueError("catalog_stream.catalogs must be a list of partner catalogs")
         self.catalogs = [*anchors, *partners]
+        self.hf_listing: bytes | None = None
+        self.hats_metadata: bytes | None = None
         registry = config.modality_registry()
         self.stars = [_Star([anchor, *partners], registry) for anchor in anchors]
         if len({c['name'] for c in self.catalogs}) != len(self.catalogs):
@@ -285,7 +492,7 @@ class CatalogStream:
         if partners and 'min_catalogs' not in inspect.signature(CrossMatchStream).parameters:
             raise ValueError("configured catalog streams require LSDB's multi-catalog/min_catalogs API")
 
-    def _streams(self, opened, client, seed):
+    def _streams(self, opened, client, seed, shard=(0, 1)):
         claimed = None
         streams = []
         minimum = self.spec['min_catalogs']
@@ -299,7 +506,7 @@ class CatalogStream:
             footprint = None
             if minimum > 1 and len(outer) != len(rights):
                 _, footprint = _restrict_to_footprint(anchor, None, outer, minimum)
-            if len(self.stars) > 1 or 'split' in self.spec:
+            if len(self.stars) > 1 or 'split' in self.spec or shard[1] > 1:
                 if footprint is None:
                     if minimum > 1:
                         _, footprint = _restrict_to_footprint(anchor, None, outer, minimum)
@@ -314,6 +521,8 @@ class CatalogStream:
                     claimed = guard if claimed is None else claimed.union(guard)
                 if 'split' in self.spec:
                     footprint = footprint.intersection(_split_sky(self.spec['split']))
+                if shard[1] > 1:
+                    footprint = _shard_sky(anchor, footprint, *shard)
                 if footprint.empty():
                     raise ValueError(f"The selected {root['name']} footprint contains no partitions")
             kwargs: dict[str, Any] = {'client': client, 'partitions_per_chunk': self.spec['partitions_per_chunk'],
@@ -321,7 +530,12 @@ class CatalogStream:
             if joins:
                 if footprint is not None:
                     kwargs['footprint'] = footprint
-                stream = CrossMatchStream(anchor, *joins, min_catalogs=minimum, **kwargs)
+                if CrossMatchStream is _LSDB_CROSSMATCH_STREAM:
+                    stream = _FilteredCrossMatchStream(
+                        anchor, *joins, min_catalogs=minimum, radius_arcsec=self.spec['radius_arcsec'], **kwargs
+                    )
+                else:
+                    stream = CrossMatchStream(anchor, *joins, min_catalogs=minimum, **kwargs)
             else:
                 stream = InfiniteStream(anchor if footprint is None else anchor.moc_search(footprint), **kwargs)
             if not stream.npartitions:
@@ -329,9 +543,20 @@ class CatalogStream:
             streams.append(stream)
         return streams
 
-    def draws(self, *, seed, rank, worker_id):
-        """Yield (epoch, finite records) with bounded transport retries, no cursor."""
+    def draws(self, *, seed, rank, worker_id, shard=(0, 1), rows_per_draw=None):
+        """Yield (epoch, finite records) with bounded transport retries, no cursor.
+
+        ``shard=(index, count)`` keeps only every count-th anchor partition, from index.
+        """
+        fixed_sample = rows_per_draw is not None
+        if fixed_sample and self.spec.get('split') != 'validation':
+            raise ValueError('Fixed panel sampling requires the validation split')
+        seed_hf_listing(self.hf_listing)
+        enable_hf_concurrent_ranges()
+        # TODO(upstream): Remove once nested-pandas#586 & #589 are merged and released.
+        enable_hf_coalesced_parquet_reads()
         _unregister_hf_array2d_extension()
+        cached_hats = load_hats_metadata(self.hats_metadata)
         telemetry._REPO_TO_SOURCE.update({cat["repo"].split("@")[0]: cat["name"] for cat in self.catalogs})
         failures: dict[int | None, int] = {}
         generation = draw = 0
@@ -345,18 +570,35 @@ class CatalogStream:
                     protocol="inproc", memory_limit=self.spec["worker_memory_limit"],
                 ) as cluster, Client(cluster) as client:
                     opened = {}
+                    anchor_names = {star.catalogs[0]["name"] for star in self.stars}
                     for catalog in self.catalogs:
-                        payload = _PROFILES[catalog["decoder"]][0]
-                        columns = [_ID_COLUMNS.get(catalog["decoder"], "object_id"), "ra", "dec",
-                                   *([payload] if payload else []),
-                                   *catalog["scalar_columns"].values()]
-                        opened[catalog['name']] = open_catalog(
-                            f"hf://datasets/{catalog['repo']}", columns=list(dict.fromkeys(columns)),
-                        )
+                        decoder = catalog["decoder"]
+                        payload, fields, family = _PROFILES[decoder]
+                        columns = [_ID_COLUMNS.get(decoder, "object_id"), "ra", "dec"]
+                        if payload and fields:
+                            columns.extend(f"{payload}.{field}" for field in fields)
+                        elif payload:
+                            columns.append(payload)
+                        columns.extend(catalog["scalar_columns"].values())
+                        dedup_cols = list(dict.fromkeys(columns))
+                        if catalog["repo"] in cached_hats:
+                            hc_cat, margin_hc = cached_hats[catalog["repo"]]
+                            margin_cols = None
+                            if catalog["name"] in anchor_names and margin_hc is not None:
+                                info = margin_hc.catalog_info
+                                margin_cols = [c for c in (info.ra_column, info.dec_column) if c] or None
+                            opened_cat = _open_from_hats_metadata(
+                                hc_cat, margin_hc, columns=dedup_cols, margin_columns=margin_cols
+                            )
+                        else:
+                            opened_cat = open_catalog(f"hf://datasets/{catalog['repo']}", columns=dedup_cols)
+                            if catalog["name"] in anchor_names:
+                                opened_cat = _project_anchor_margin(opened_cat)
+                        opened[catalog['name']] = opened_cat
                     reader_seed = loader.consumer_seed(seed, rank, worker_id, generation)
-                    streams = self._streams(opened, client, reader_seed)
+                    streams = self._streams(opened, client, reader_seed, shard)
                     failures.pop(None, None)
-                    print(f"[catalog-stream] worker={worker_id} pixels={[s.npartitions for s in streams]} "
+                    print(f"[catalog-stream] worker={worker_id} shard={shard} pixels={[s.npartitions for s in streams]} "
                           f"generation={generation} catalogs={len(opened)} "
                           f"min_catalogs={self.spec['min_catalogs']}", flush=True)
                     readers = {}
@@ -370,14 +612,20 @@ class CatalogStream:
                         epoch = draw
                         draw += 1
                         if frame.empty:
+                            if fixed_sample:
+                                yield epoch, iter(())
                             continue
                         star = self.stars[star_index]
-                        decoded = frame.map_rows(star.decode_row, columns=star.columns, infer_nesting=False)
+                        if fixed_sample:
+                            frame = frame.iloc[:rows_per_draw]
+                        decode = partial(star.decode_row, dequantize_seed=seed) if fixed_sample else star.decode_row
+                        decoded = frame.map_rows(decode, columns=star.columns, infer_nesting=False)
                         records = filter(None, decoded["record"].tolist())
                         del decoded, frame
                         yield epoch, records
             except Exception as error:
-                if not loader._retryable(error):
+                # Do not replace any part of a fixed draw sequence after a transport error.
+                if fixed_sample or not loader._retryable(error):
                     raise
                 attempts = failures[star_index] = failures.get(star_index, 0) + 1
                 if attempts > loader._MAX_NET_RETRIES:

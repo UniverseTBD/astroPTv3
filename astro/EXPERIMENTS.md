@@ -563,6 +563,322 @@ throughput benchmark. Before merging #65, run a short 70M training pilot
 with the default four partitions per draw. Report packing fill, realized
 anchor mix, useful tokens/sec, and whether loss stays finite and trends down.
 
+# Part III — Model scaling (2026-11)
+
+## 14. 1M vs 70M at 10k steps, and family-loss reweighting (2026-11-17/18)
+
+**Setup.** AstroPTv3 `15478d2` / nanotron `c3dfb40` (clean), one H200 NVL
+each, run dirs in `astroPTv3_telemetry/`. Both runs used the seven-catalog
+`min_catalogs: 3` stream, seed 42, echo factor 4, seq 4096 × micro-batch
+16, a cosine LR schedule (peak 1e-3, 2k warmup, floor 1e-4), `clip_grad` 1.0
+and 10k steps (655M tokens, ~164M of them distinct). The only differences
+were the body size and `jetformer_flow_hidden`.
+
+| run | body | flow hidden | params: body / flows / heads / total | tok/s | wandb |
+|---|---|---|---|---:|---|
+| 70M (`astropt3-70m.yaml`) | 512 × 23 | 128 | 69.4M / 43.1M / 11.0M / 125.4M | 63K | `g99ek571` |
+| 1M (`astropt3-1m.yaml`, `train_steps` 10000) | 128 × 5 | 32 | 0.94M / 3.7M / 2.8M / 7.9M | 127K | `1u7eaz9d` |
+
+The "1M" is 88% flows and heads; its transformer body is under 1M.
+
+**Result: no scaling at this budget.** Training loss only; no held-out
+eval was run. Medians over steps 9500–10000:
+
+| loss | 70M | 1M |
+|---|---:|---:|
+| `lm_loss` | −0.687 | −0.692 |
+| image / spectrum / scalar family | −0.47 / −0.71 / −2.65 | −0.49 / −0.70 / −2.58 |
+| Legacy `images` / `galaxies` / `sdss_spectra` | −64.7 / −2960 / −167 | −78.5 / −2740 / −163 |
+| `gwh_redshift` / `sdss_Z` / `provabgs_LOG_MSTAR` | −2.42 / −2.36 / −0.81 | −2.51 / −2.60 / −0.89 |
+
+The curves overlap from ~1k steps, and both still fall at the same rate
+over 5k→10k (Δ`lm_loss` −0.07 for the 70M, −0.09 for the 1M). Neither run
+diverged. In the second half the 70M's median `grad_norm` was ~20 vs 3–7
+for the 1M, and both had ~250–400 steps with a norm above 200. The 1M is
+only 2× faster, so the loader bounds it.
+
+Token mix per step (70M telemetry, ~58.8K non-pad tokens; 75% of them
+echo replays): HSC images 36%, Legacy images 33%, galaxies-with-hats images
+10%, DESI spectra 10%, SDSS spectra 0.3%, all scalars together ~3%,
+Galaxy10 ~0.1%.
+
+**Family reweighting (70M, stopped early).** The same recipe was rerun
+with configurable `family_loss_weights` (default image:spectrum:scalar
+1:1:0.1). The code was reverted after these runs.
+
+| run | weights | clip | stopped at | wandb |
+|---|---|---:|---:|---|
+| equalfam | 1 : 1 : 1 | 1 | 4,119 | `ntrwkvbk` |
+| imghalf | 0.5 : 1 : 1 | 1 | 4,247 | `n2z6iui4` |
+| equalfam-clip10 | 1 : 1 : 1 | 10 | 2,088 | `2m43ykqf` |
+| imghalf-clip10 | 0.5 : 1 : 1 | 10 | 2,201 | `uuepgsj7` |
+
+Medians over steps 3600–4000 (baseline = the 70M above; the baseline's
+IQR-based standard error is ~0.01–0.05):
+
+| loss | baseline | equalfam | imghalf |
+|---|---:|---:|---:|
+| image / spectrum / scalar family | **−0.40 / −0.61 / −1.47** | −0.28 / −0.50 / −1.22 | −0.19 / −0.52 / −1.14 |
+| `sdss_Z` / `provabgs_LOG_MSTAR` / `hsc_cmodel_mag` | **−1.21 / −0.50 / −3.58** | −1.16 / −0.35 / −2.94 | −1.05 / −0.33 / −2.97 |
+| `grad_norm` | 7.9 | 97 | 89 |
+
+Both reweightings were worse than 1:1:0.1 on every family, including the
+scalars they upweighted. At step ~2k (LR peak) imghalf was briefly level
+or slightly ahead on spectra and scalars; this reversed by 4k. Raising
+`clip_grad` to 10 did not help: at ~1.9k steps the clip-10 runs were
+level with or worse than the clip-1 runs, at a 4× rather than 8× clip
+ratio. Under AdamW a uniform clip rescale mostly cancels, so clipping was
+never a good explanation. More likely, upweighting ~2K spiky scalar
+tokens per step lets their gradients dominate the shared body and slows
+every family. **1:1:0.1 stays the default.**
+
+**Hypotheses for why 70M ≈ 1M** (untested; most informative first):
+
+1. **The flows, not the body, carry the likelihood.** Both sizes put
+   ~6.5M (1M) and ~54M (70M) parameters into per-modality flows and GMM
+   heads. The loss is `NLL_GMM(z) − logdet`, and §12 showed the flow can
+   lower it by inflating logdet without the body's prediction improving.
+   If most of the gain is per-patch marginal density (logdet), body size
+   barely matters. *Test:* log GMM-NLL and logdet separately (§12's open
+   priority) and see which term separates the two sizes.
+2. **The context is one object, and within-object prediction is local.**
+   `position_ids` restart per object, so the body never sees more than one
+   galaxy (~150–500 tokens). Next-patch prediction in a spiral-ordered
+   image may be mostly local smoothness plus noise, which a 1M body
+   already handles. *Test:* loss by patch index and by span order for both
+   sizes. If the curves coincide everywhere, there is little structure
+   left for capacity to exploit.
+3. **Irreducible sensor noise sets a floor.** Images are ~80% of the
+   tokens, and §12 found the flow fitting per-pixel noise. If both models
+   sit near the noise-entropy floor, extra capacity cannot show up in
+   training NLL. *Test:* compute the floor implied by `ivar`, or evaluate
+   on noise-whitened targets.
+4. **The noise curriculum moves both curves together.** The z noise fed to
+   the encoders anneals linearly from 0.1 to 0 over the full run, so the
+   conditioning gets cleaner every step regardless of model size. The
+   late, equal-rate decline of both runs may be the schedule, not
+   learning. *Test:* held-out eval of the step-1k…10k checkpoints at fixed
+   noise 0.
+5. **Most scalar targets are effectively unconditional.** Span order is
+   uniform random, so a scalar comes before its image or spectrum about
+   half the time and is predicted from the population prior. Only the
+   conditional half can reward capacity, and the scalar family is 0.1 of
+   the objective. *Test:* split the scalar loss by whether a
+   high-information span (image or spectrum) came first.
+6. **Budget and optimisation.** 5 tokens per parameter for the 70M, 75%
+   echo replays, training loss only, and one LR (1e-3) for both sizes. The
+   70M's rising `grad_norm` suggests its LR is on the high side. *Test:* a
+   2–3k-step LR sweep for the 70M (3e-4, 1e-4) and a held-out eval, before
+   any longer run.
+
+Hypotheses 1, 2 and 4 can be tested on the existing step-1k…10k
+checkpoints of both runs without new training.
+
+**Held-out tests of H1, H2 and H4 (2026-11-18).** The step-1k/2k/5k/10k
+checkpoints of both runs were converted to HF and scored on one fixed
+eval set: 24 micro-batches drawn from the same stream with seed 12345 and
+no echo. It holds ~1.29M patch tokens (Legacy 439K, HSC 541K, galaxies
+134K, DESI spectra 171K) plus scalars. Hooks on the flows and on
+`gmm_nll` split each token's loss into GMM NLL and −logdet; the rebuilt
+totals match the model's own per-modality loss within bf16 rounding.
+Scripts, eval set and JSON are in
+`astroPTv3_checkpoints/hf-eval/scaling-20261118/`. Some eval objects may
+have been seen in training, and there are no error bars (one eval set).
+
+Held-out loss at step 10k (nats/dim; it agrees with the training loss):
+
+| | 1M | 70M |
+|---|---:|---:|
+| Legacy images | **−0.454** | −0.379 |
+| HSC images | 0.075 | **0.067** |
+| galaxies images | −3.57 | **−3.85** |
+| DESI spectra | −0.735 | **−0.750** |
+
+- **H4 rejected.** At every step and for both sizes, scoring at the
+  training noise σ instead of σ = 0 changes the loss by ≤0.002 nats/dim.
+  The late decline is learning, not the schedule.
+- **H1 not decidable from the split.** The two sizes split the same total
+  very differently. On Legacy at 10k the 1M has NLL −0.04 and −logdet
+  −0.42; the 70M has NLL 1.32 and −logdet −1.70. Its flow stretches z ~4×
+  more, and the GMM pays for it in NLL. The split is a free rescaling of
+  z, so it cannot say which part does the work. Both terms drift during
+  training (70M Legacy NLL 0.61 → 1.64 → 1.32 over 1k/5k/10k), the §12
+  logdet-inflation pattern. Testing H1 needs an ablation instead (the
+  same flow with the body's input removed).
+- **H2 partly supported.** The 70M's HSC gain sits in the first patches
+  of each span (−0.053 nats/dim at patch 0, −0.006 over patches 36+,
+  which are 108 of the 144 per image). Seeing another image or spectrum
+  first improves image loss by only 0.02–0.04 nats/dim in either model.
+  But the 70M is better on every galaxies patch and worse on every Legacy
+  patch after the first, so "nothing to learn" is not the whole story.
+- **Conditional scalars do not reward the 70M.** An image or spectrum
+  span earlier in the object helps scalars a lot (DESI `Z` 0.21 → −2.64,
+  HSC cmodel mag −1.66 → −8.73 for the 1M), which confirms H5's premise.
+  In exactly that conditioned case, though, the 70M is worse: `Z` −2.17
+  vs −2.64, HSC cmodel mag −8.19 vs −8.73, photometry −3.29 vs −3.53. It
+  is better only on stellar mass (−1.13 vs −1.03) and on unconditioned
+  `Z` (−0.85 vs 0.21), which amounts to learning the prior. The order
+  split is confounded for spectra, many of which come "first" only
+  because their object has no image. **This points at H6 (70M
+  optimisation) over task saturation**, so the 70M LR sweep is next.
+
+**70M peak-LR sweep (2026-11-18, stopped early).** The 70M recipe
+was rerun at peak LR 3e-4 (floor 3e-5) and otherwise unchanged: the
+same 10k-step schedule, warmup and noise curriculum. It ran on one
+H200 shared with another job. Loader waits of ~1.3 s/step (vs 0.36 s in
+the baseline) halved the throughput. The run was stopped by hand at
+step 2,088 (checkpoints through 2,000 kept in
+`astroPTv3_telemetry/astropt3-70m-lr3e-4-echoconfig-*`). The planned
+1e-4 arm never started, and no held-out eval was run.
+
+Training loss, medians over steps 1701–2001 (all three runs at peak LR):
+
+| loss | 1M (1e-3) | 70M (1e-3) | 70M (3e-4) |
+|---|---:|---:|---:|
+| image / spectrum / scalar family | −0.30 / **−0.52** / **−1.15** | −0.31 / −0.38 / −0.87 | **−0.33** / −0.49 / −1.13 |
+| `sdss_Z` / `gwh_redshift` | **−1.27** / **−1.77** | −0.96 / −1.45 | −1.11 / −1.71 |
+| `hsc_cmodel_mag` / `provabgs_LOG_MSTAR` | −3.11 / −0.35 | −2.55 / −0.25 | **−3.34** / **−0.41** |
+| `grad_norm` | 3.9 | 7.8 | 5.7 |
+
+- **1e-3 was costing the 70M.** At 3e-4 it beat the 1e-3 run on every
+  family by step 2k (spectra +0.12, scalars +0.26), even though its LR
+  was 0.3× the baseline's throughout warmup. It already led on scalars
+  and spectra by step ~1.2k.
+- **The fix made the 70M level with the 1M, not better.** It was ahead on
+  images, HSC magnitudes and stellar mass, and behind on spectra and both
+  redshifts. Over steps 1254–1554 it had led the 1M on spectra and
+  scalars, so 300-step training-loss windows move by ~±0.1 between
+  runs. That is too noisy to call a scaling gap at this size.
+- **H6 is supported only in part.** Training LR is one cause of the 70M's
+  weak result, but on this evidence it does not account for the missing
+  scaling. H1 (flows and heads do the work; testing it needs a
+  body-ablation) and H2 (most tokens are noise) remain the main
+  candidates. Still open: the held-out eval of the step-2000 checkpoint
+  and the 1e-4 arm.
+
+## 15. PR #63 recipe: sizes, LR, single-survey controls and cross-modal tests (2026-11-19/23)
+
+**Setup.** AstroPTv3 `b627214` / nanotron `4b18a5b` (PR #63, which contains
+#60, plus nanotron #15) unless noted. One H200 per run except 976 (DP=2).
+Run dirs are in `astroPTv3_telemetry/`; each has a README with provenance.
+Recipes are the 70M/1M/1B YAMLs of that commit: LR 1e-3 (1B 3e-4), 2k
+warmup, cosine to 0.1×, seq 4096 × 16 rows, echo 4, sky-scatter pre-flow
+noise.
+
+| Slurm | run | W&B |
+|---:|---|---|
+| 956 / 959 / 962 | 70M / 1M / 1B, full multimodal stream, 10k steps | `85tt2442` / `qdspn9uz` / `io9mjrpm` |
+| 964 | 70M pilot: first span unscored, scalar weight 1, 2k→4k | `hy7o4di5` |
+| 971 | 1M with pre-flow noise σ0 = measured pixel spread | `wpjtswfq` |
+| 976 | 70M, DP=2, 80k steps (`run_train.py`) | `lcq37ho8` |
+| 985 | 70M, galaxies-with-hats RGB only | `ccotv2t4` |
+| 986 / 990 | 70M / 1B, Legacy South g/r/i/z only | `6vqenbxq` / `zhn2t4nl` |
+| 989 | 70M at LR 1e-3 vs 3e-4 on byte-identical replayed batches | — |
+| 991 | 70M, Legacy South g/r/i/z + DESI EDR spectra, `min_catalogs: 2` | `7he89t59` |
+
+The single-catalog runs (985/986/990) needed `catalogs: []` to pass
+nanotron's config check and `partitions_per_chunk: 1`: four galaxies or
+South partitions exceed Arrow's 2 GiB offset limit when an anchor-only
+stream shuffles whole chunks.
+
+**Sizes at 10k (956/959/962).** The 1M had lower scalar-family training
+loss than the 70M (gap 0.70 at 10k). On small held-out panels the 70M was
+ahead or level: redshift point error 0.056 vs 0.078, Legacy South flux NLL
+2.70 vs 3.15. The 1B's logged per-task losses average per-micro-batch means
+with absent tasks as zero (#68), so its curves cannot be ranked.
+
+**Peak LR (989).** Two DP=1 trainers on the 956 recipe, differing only in
+peak/floor LR, consumed the same batches (the control streamed them and
+replayed each to the other arm; batch hashes matched for all 10k steps).
+Held-out metrics are on 4 Legacy South objects.
+
+| | 1e-3 | 3e-4 |
+|---|---:|---:|
+| training loss, paired steps where this arm is lower (median gap) | 0–2% | 98–100% (0.05–0.07) |
+| held-out r-band NLL, step 4k / 10k (nats/dim) | 0.61 / −0.04 | 0.10 / −0.20 |
+| own-vs-wrong g context gain on r, step 4k / 10k | +0.0002 / +0.007 | +0.017 / +0.011 |
+| mean cross-band correlation of free samples, step 10k | 0.17 | 0.66 |
+
+**3e-4 is now the 70M default.** This completes the §14 sweep. Related
+symptoms of the hot LR: the 70M's Galaxy10 image NLL went from −0.19 to
+47 nats/dim between steps 256 and 3k, and swapping only the Galaxy10 flow
+moved the failure with it (Galaxy10 was 0.024% of image tokens; it has
+since been removed from the recipes). In 976 the galaxies RGB loss jumped
+between two levels in bursts on 13–20% of steps until ~20k, with the other
+image losses worse during bursts.
+
+**Sample quality.** No implementation fault was found: the flow inverts
+exactly, generation from the true tokens reproduces them, and a fresh
+1M-config model trained on one image through the HF forward memorises it
+in 3k steps, with free-running error equal to teacher-forced error. Poor
+samples are under-fitting:
+- *RGB is starved in the multimodal mix.* It is ~2% of tokens, sits at ~0
+  nats/dim (1.85 above the noise floor), and with 768-dim tokens gets 1/12
+  of a 64-dim band's loss weight per dimension. The same 70M recipe on
+  galaxies-with-hats only (985) gives seam-free, plausible free samples by
+  10k after 2.4M RGB presentations (vs ~47k in 956). Step 128 (31k images)
+  looks as bad as 956; step 512 already shows galaxies. Exposure and
+  cross-modal interference are not separated.
+- *Single-survey South works.* 986 gives clean, centred galaxies. The 1B
+  (990, LR 3e-4, 2.3 s/step vs 0.45) is behind it at 10k: median
+  `lm_loss` over the last 100 steps 0.50 vs 0.40, behind on every band.
+  The 1B has seen 0.06 tokens per parameter and runs at a different LR.
+- *Strong pre-flow noise (971)* removed the ~1e5 spectrum spikes (worst
+  one-token deviation 29 → 8 arcsinh units) but not the image patch seams
+  (edge/within ratio 1.1–1.8 vs ~0.93 in data), and 66–69% of its spectra
+  collapse to zero flux at the red end. Not adopted.
+
+**Cross-modal conditioning.** Gain = NLL after a wrong object's context
+minus NLL after the object's own, in nats/dim. In 956, 959 and 971 it is
+≈0 in both directions (SDSS spectra were 0.06% of tokens). 991 restricts
+the sky to the DESI SV3 overlap (82 deg² train), where 17% of streamed
+objects carry both an image and a spectrum. On 32 held-out paired objects:
+
+| step | image → spectrum | spectrum → r, first token | spectrum → r, whole span | objects with gain > 0 |
+|---:|---:|---:|---:|---|
+| 1,000 | −0.0001 ± 0.0003 | +0.007 ± 0.006 | +0.0006 ± 0.0004 | 17/32, 17/32 |
+| 10,000 | **+0.0057 ± 0.0012** | **+0.205 ± 0.047** | **+0.0016 ± 0.0004** | 29/32, 27/32 |
+
+That is ~45 nats per spectrum. Samples do not show it yet: spectrum →
+image draws match the unconditional ones, and image → spectrum draws have
+no emission lines at the template's z = 0.288. `min_catalogs` selects the
+footprint only; rows stay outer-joined (56% South-only, 27% DESI-only, 17%
+paired in train).
+
+**70M at 80k (976).** Medians per 10k-step bin, first vs last:
+
+| | 0–10k | 70–80k |
+|---|---:|---:|
+| `lm_loss` | 0.16 | −0.47 |
+| image / spectrum / scalar family | 0.67 / −0.29 / −0.85 | 0.11 / −0.75 / −3.10 |
+
+All families still fell at the end. Legacy South free samples first look
+galaxy-like at 74k (compact, centred, smaller than the data); RGB samples
+are still noise at 80k, and swapping the conditioning spectrum changes
+the rendered image draws by a mean |Δpixel| of only 3–6 (20–27 at 40k). Step 80k, with 10k–70k
+as `stepN` branches, is public as `Smith42/astroPT_v3.0-pre-alpha-70m`
+(no held-out evaluation). Its checkpoints did not resume as saved: the
+per-dataset token ledger is empty under `run_train.py`.
+
+**Suffix-only pilot (964), rejected.** Leaving each object's first span
+unscored and raising the scalar weight to 1 (resumed from 956 at 2k) was
+worse at 4k on 432 held-out objects in every family: image +0.53 nats/dim,
+spectrum +0.34, scalar +2.35 per token. Masking and reweighting are not
+separated.
+
+**Streaming bytes (991 vs 986, from `telemetry/bytes.*.jsonl`).** Loader
+wait was 3% of step time at ~20 MB/s from HF. 991 read 654 kB per fresh
+object (986: 523 kB). Partitions were downloaded more than once: DESI
+2.22× (1.72× from different workers reading the same partitions, 1.29×
+within a worker), South 1.21×, against 1.00× in 986. An inner join would
+have cost ~4 MB per paired object. Dotted sub-field projection
+(`spectrum.flux`, …) still downloads the whole struct (298.7 MB per DESI
+partition either way; cf. §5): fsspec's `open_parquet_file` prefetch, used
+by nested-pandas for remote files, truncates column names to the
+top-level field. Plain pyarrow skips the unused `ivar` (152 → 84 MB). Of
+the bytes read, unused `ivar` is ~49% of DESI and ~47% of HSC; South uses
+`ivar` only as a validity test (~34% of its bytes).
+
 ## Finite-field modality audit (2026-11-22)
 
 Twenty-four seeded 300-arcsecond fields (eight each in North-only, South-only
@@ -584,6 +900,13 @@ method, immutable inputs, limits and reproduction commands.
 
 ## Open items / not pursued
 
+- **Paired-object echo weighting**: echo paired objects more often than
+  single-modality ones (e.g. 12× vs 4×) to raise the cross-modal share
+  without more downloads; needs object-level echo in packing (§15).
+- **Per-worker sky sharding**: give each loader worker and DP rank its own
+  aligned pixels to remove the 1.2–2.2× duplicate partition reads (§15).
+- **Sub-field reads**: fix the fsspec/nested-pandas prefetch so dotted
+  struct columns skip unused `ivar` (§15).
 - **`chunk=2`**: not tested after the section-7 re-tune; the win at 4 was
   decisive enough to stop there.
 - **Compute-side MFU (`MFU_busy` ~16-18%)**: a real, wire-independent
