@@ -85,13 +85,13 @@ model:
          input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
       - {name: galaxies_r, family: image, source: galaxies_with_hats,
          record_keys: [galaxy_image], image_format: rgb, band: rgb-r, token_ids: [217, 218, 219],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 0, image_resize: 96}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 0, image_resize: 96, pre_flow_noise_max: 0.20}
       - {name: galaxies_g, family: image, source: galaxies_with_hats,
          record_keys: [galaxy_image], image_format: rgb, band: rgb-g, token_ids: [220, 221, 222],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 0, image_resize: 96}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 0, image_resize: 96, pre_flow_noise_max: 0.20}
       - {name: galaxies_b, family: image, source: galaxies_with_hats,
          record_keys: [galaxy_image], image_format: rgb, band: rgb-b, token_ids: [223, 224, 225],
-         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 0, image_resize: 96}
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 0, image_resize: 96, pre_flow_noise_max: 0.20}
       - name: Z
         family: scalar
         source: desi

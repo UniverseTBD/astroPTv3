@@ -55,6 +55,7 @@ def test_yaml_uses_current_modalities(path):
         assert rgb["image_format"] == "rgb" and rgb["band"] == f"rgb-{channel}"
         assert rgb["token_ids"] == [begin, begin + 1, begin + 2]
         assert (rgb["input_size"], rgb["patch_size"], rgb["max_positions"], rgb["image_resize"]) == (64, 8, 144, 96)
+        assert rgb["pre_flow_noise_max"] == 0.20
     spectra = {m["name"]: m for m in expected if m["family"] == "spectrum"}
     assert set(spectra) == {"spectra", "sdss_spectra"}
     for spec_mod in spectra.values():
@@ -62,14 +63,23 @@ def test_yaml_uses_current_modalities(path):
     raw = yaml.safe_load(path.read_text())
     assert Path(raw["checkpoints"]["checkpoints_path"]).name == f"{path.stem}-dual-anchor"
     model = raw["model"]["model_config"]
+    assert {
+        m["name"]: m.get("pre_flow_noise_max")
+        for m in model["modalities"]
+        if m["name"].startswith("galaxies_")
+    } == {"galaxies_r": 0.20, "galaxies_g": 0.20, "galaxies_b": 0.20}
     # Noise amplitude is a training setting, not part of the data contract.
+    expected_definitions = [
+        {key: value for key, value in m.items() if key != "pre_flow_noise_max"}
+        for m in expected
+    ]
     definitions = [
         {key: value for key, value in m.items() if key != "pre_flow_noise_max"}
         for m in model["modalities"]
     ]
     assert len(definitions) == 59
     assert {"gz10_label", "gz10_images"}.isdisjoint(m["name"] for m in definitions)
-    assert definitions[: len(expected)] == expected
+    assert definitions[: len(expected_definitions)] == expected_definitions
     south = definitions[len(expected) :]
     assert ModalityRegistry(south[: len(LEGACY_SOUTH_MODALITIES)]).to_list() == (
         ModalityRegistry(LEGACY_SOUTH_MODALITIES).to_list()
