@@ -91,7 +91,7 @@ def test_yaml_uses_current_modalities(path):
         stream = stage["data"]["dataset"]["catalog_stream"]
         north, south = stream["anchors"]
         assert [north] == original["anchors"] and north["draw_weight"] == 1
-        assert south["draw_weight"] == 2 and south["record_key"] == "legacy_south_image"
+        assert south["draw_weight"] == 4 and south["record_key"] == "legacy_south_image"
         assert stream == {**original, "anchors": [north, south]}
         CatalogStream(stream, config)
 
