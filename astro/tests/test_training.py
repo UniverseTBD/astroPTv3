@@ -69,12 +69,14 @@ def test_default_recipe_keeps_reserved_modality_tokens(default_recipe):
     assert model["vocab_size"] == 256
     assert modalities["spectra"]["token_ids"] == [5, 6, 7]
     assert modalities["sdss_spectra"]["token_ids"] == [17, 18, 19]
-    rgb = modalities["galaxies"]
-    assert rgb["image_format"] == "rgb" and "band" not in rgb
-    assert rgb["token_ids"] == [23, 24, 25]
-    assert (rgb["input_size"], rgb["patch_size"], rgb["max_positions"], rgb["image_crop"], rgb["image_resize"]) == (
-        192, 8, 256, 0, 128,
-    )
+    for index, channel in enumerate("rgb"):
+        rgb = modalities[f"galaxies_{channel}"]
+        begin = 217 + 3 * index
+        assert rgb["image_format"] == "rgb" and rgb["band"] == f"rgb-{channel}"
+        assert rgb["token_ids"] == [begin, begin + 1, begin + 2]
+        assert (rgb["input_size"], rgb["patch_size"], rgb["max_positions"], rgb["image_crop"], rgb["image_resize"]) == (
+            64, 8, 144, 0, 96,
+        )
     used_ids = {i for m in modalities.values() for i in m["token_ids"]}
     assert used_ids.isdisjoint(range(38, 56))
     assert used_ids.isdisjoint(range(142, 148))
@@ -91,7 +93,7 @@ def test_default_recipe_keeps_reserved_modality_tokens(default_recipe):
             assert modality["band"] == f"{prefix}-{band}"
             assert (modality["input_size"], modality["patch_size"], modality["max_positions"]) == (64, 8, 144)
     assert sum(m["family"] == "scalar" for m in modalities.values()) == 42
-    assert len(modalities) == 57
+    assert len(modalities) == 59
 
 
 def test_training_caps_loader_workers_on_one_gpu(tmp_path, default_recipe):

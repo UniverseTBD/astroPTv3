@@ -15,8 +15,8 @@ while growing the trunk. Ours is a convention: 8 stages, depth 4, 8 heads, and
     jetformer_flow_hidden = min(hidden_size // 4, 512)
 
 Flow parameters scale as width², like a trunk layer. The training recipes
-have one flow per calibrated band, one for the 192-wide RGB display patches,
-and one per spectrum source. `tests/test_jetformer_flow.py` enforces the
+have one flow per image band (calibrated bands plus the three 64-wide RGB display
+channels) and one per spectrum source. `tests/test_jetformer_flow.py` enforces the
 width rule on every `configs/nanotron/*.yaml`. `scripts/count_params.py`
 reports the HF size configs' flows separately from the nominal-size check.
 

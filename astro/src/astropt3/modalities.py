@@ -18,6 +18,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from .data.band_registry import RAW_BANDS
 from .tokenization import FIXED_IMAGE_CATEGORIES
 
 
@@ -100,7 +101,7 @@ class ModalityConfig:
             )
         if fixed := FIXED_IMAGE_CATEGORIES.get(self.name):
             source, band, _ = fixed
-            image_format = "rgb" if band is None else "physical"
+            image_format = "rgb" if band in RAW_BANDS else "physical"
             if (self.family, self.source, self.band, self.image_format) != ("image", source, band, image_format):
                 raise ValueError(f"modality {self.name!r} must use source {source!r} and "
                                  f"band {band!r} ({image_format} image)")
@@ -141,15 +142,16 @@ class ModalityConfig:
 
     def _validate_image(self):
         if self.image_format == "rgb":
-            if self.band is not None:
-                raise ValueError(f"RGB modality {self.name!r} cannot declare a band")
+            if self.band is not None and self.band not in RAW_BANDS:
+                raise ValueError(f"RGB modality {self.name!r} band must be None or one of {sorted(RAW_BANDS)}")
         elif self.image_format != "physical":
             raise ValueError(f"image modality {self.name!r} has invalid image_format {self.image_format!r}")
         elif not isinstance(self.band, str) or not self.band.strip() or self.band.startswith("rgb-"):
             raise ValueError(f"image modality {self.name!r} must declare one calibrated band")
         if type(self.patch_size) is not int or self.patch_size < 1:
             raise ValueError(f"image modality {self.name!r} patch_size must be a positive integer")
-        if self.input_size != (3 if self.image_format == "rgb" else 1) * self.patch_size**2:
+        channels = 3 if (self.image_format == "rgb" and self.band is None) else 1
+        if self.input_size != channels * self.patch_size**2:
             raise ValueError(f"image modality {self.name!r} input_size does not match its patch dimensions")
         if self.image_resize:
             if self.image_resize % self.patch_size:

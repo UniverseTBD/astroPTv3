@@ -76,18 +76,22 @@ def test_image_token_budget_and_packed_utilization(config):
     }
     by_source = [sequencer.build({key: payload}) for key, payload in sources.items()]
     rgb = by_source[-1]
-    assert set(rgb.masks) == {"galaxies"}
-    assert rgb.values["galaxies"].shape == (256, 192)
-    torch.testing.assert_close(rgb.values["galaxies"][0, :3], sources["galaxy_image"]["flux"][:, 0, 0] * RGB_SCALE)
+    assert set(rgb.masks) == {"galaxies_r", "galaxies_g", "galaxies_b"}
+    for idx, ch in enumerate("rgb"):
+        assert rgb.values[f"galaxies_{ch}"].shape == (144, 64)
+        torch.testing.assert_close(
+            rgb.values[f"galaxies_{ch}"][0, 0],
+            sources["galaxy_image"]["flux"][idx, 0, 0] * RGB_SCALE,
+        )
     partners = {key: sources[key] for key in ("hsc_image", "galaxy_image")}
     matched = [sequencer.build({key: sources[key], **partners}) for key in ("image", "legacy_south_image")]
     # A live object comes from one anchor path, never both Legacy surveys.
-    assert [len(obj) for obj in [*by_source, *matched]] == [439, 585, 731, 259, 1427, 1573]
+    assert [len(obj) for obj in [*by_source, *matched]] == [439, 585, 731, 439, 1607, 1753]
     collator = PackedCollator(config, seq_len=4096)
     batch = collator(matched * 3)
     ids = batch["input_ids"]
     assert ids.shape == (3, 4096)
-    assert (ids != PAD_ID).sum(dim=1).tolist() == [3000] * 3
+    assert (ids != PAD_ID).sum(dim=1).tolist() == [3360] * 3
     flat = flatten_packed_batch(collator([by_source[0]]), config, 4096)
     assert flat["legacy_north_g_values"].shape == (144, 64)
     assert not flat["legacy_south_g_mask"].any()

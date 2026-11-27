@@ -26,9 +26,8 @@ BOS_ID = 1
 
 # Survey-wide image blocks must not acquire new meanings.
 _RESERVED_IMAGE_BASES = (2, 20, 53)
-# name -> (source, payload band or None for display RGB, first marker ID)
+# name -> (source, payload band, first marker ID)
 FIXED_IMAGE_CATEGORIES = {
-    "galaxies": ("galaxies_with_hats", None, 23),
     "legacy_north_g": ("legacy_north", "des-g", 160),
     "legacy_north_r": ("legacy_north", "des-r", 163),
     "legacy_north_z": ("legacy_north", "des-z", 166),
@@ -41,6 +40,9 @@ FIXED_IMAGE_CATEGORIES = {
     "hsc_i": ("hsc", "hsc-i", 187),
     "hsc_z": ("hsc", "hsc-z", 190),
     "hsc_y": ("hsc", "hsc-y", 193),
+    "galaxies_r": ("galaxies_with_hats", "rgb-r", 217),
+    "galaxies_g": ("galaxies_with_hats", "rgb-g", 220),
+    "galaxies_b": ("galaxies_with_hats", "rgb-b", 223),
 }
 _MODALITY_ID_BLOCKS = {
     "spectra": 5,  # begin=5, placeholder=6, end=7

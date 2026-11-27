@@ -81,19 +81,15 @@ model:
       - {name: hsc_y, family: image, source: hsc,
          record_keys: [hsc_image], band: hsc-y, token_ids: [193, 194, 195],
          input_size: 64, patch_size: 8, max_positions: 144, image_crop: 96}
-      - name: galaxies
-        family: image
-        source: galaxies_with_hats
-        record_keys: [galaxy_image]
-        image_format: rgb
-        token_ids: [23, 24, 25]
-        input_size: 192 # 8 * 8 * 3: 8-bit RGB PNG rescaled to [0, 5]
-        patch_size: 8
-        pos_type: index
-        pos_input_size: 1
-        max_positions: 256 # full 256x256 frame downsampled to 128x128, (128 / 8)^2 patches
-        image_crop: 0 # keep the whole image (the galaxy fills the frame)
-        image_resize: 128
+      - {name: galaxies_r, family: image, source: galaxies_with_hats,
+         record_keys: [galaxy_image], image_format: rgb, band: rgb-r, token_ids: [217, 218, 219],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 0, image_resize: 96, pre_flow_noise_max: 0.20}
+      - {name: galaxies_g, family: image, source: galaxies_with_hats,
+         record_keys: [galaxy_image], image_format: rgb, band: rgb-g, token_ids: [220, 221, 222],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 0, image_resize: 96, pre_flow_noise_max: 0.20}
+      - {name: galaxies_b, family: image, source: galaxies_with_hats,
+         record_keys: [galaxy_image], image_format: rgb, band: rgb-b, token_ids: [223, 224, 225],
+         input_size: 64, patch_size: 8, max_positions: 144, image_crop: 0, image_resize: 96, pre_flow_noise_max: 0.20}
       - name: Z
         family: scalar
         source: desi

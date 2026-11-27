@@ -83,9 +83,10 @@ stages is implicit and easy to break, so understand it before editing:
    modality, spans serialized in a **uniform random order seeded on
    `crc32(object_id) ^ epoch`** (resume-exact, always on — every
    conditional among the present spans lands in training; ADR 0008,
-   generalizing 0005's bimodal 50/50 flip). Calibrated images have separate
-   source-and-band spans, each with 144 patch-8 tokens (64 floats); display
-   RGB stays one span. DESI spectra → 122 patch-64 tokens with normalized per-patch
+   generalizing 0005's bimodal 50/50 flip). Calibrated images and display RGB
+   channels have separate source-and-band spans, each with 144 patch-8 tokens
+   (64 floats; galaxies-with-hats RGB downsamples 256×256 to 96×96 per
+   `rgb-{r,g,b}` channel). DESI spectra → 122 patch-64 tokens with normalized per-patch
    mean wavelength as a continuous position (masked, exact-zero, and tail-padded
    bins are noise-filled along the linearly interpolated local continuum); ADR 0008 adds one-token
    **scalar modalities** (`Z` gated on ZWARN==0, `ebv`, joint 3-band
