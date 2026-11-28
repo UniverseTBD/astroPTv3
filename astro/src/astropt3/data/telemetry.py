@@ -44,7 +44,7 @@ ANCHOR_METADATA = "_astropt3_anchors"
 
 _CATALOG_SOURCES = {
     "legacy": "hf://datasets/UniverseTBD/mmu_ssl_legacysurvey_north",
-    "desi": "hf://datasets/UniverseTBD/mmu_desi_edr_sv3",
+    "desi": "hf://datasets/hugging-science/mmu_desi_DR1",
     "legacy_south": "hf://datasets/hugging-science/mmu_legacysurvey_dr10_south_21",
 }
 _REPO_TO_SOURCE = {

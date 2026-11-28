@@ -229,6 +229,8 @@ def test_scalar_predicates_ranges_and_quality_gates():
     assert scalar_valid("sdss_Z", [-0.01], good)
     assert not scalar_valid("sdss_Z", [-1.0], good)
     assert not scalar_valid("sdss_Z", [-0.999999999], good)  # rounds to -1 in fp32
+    assert scalar_valid("Z", [0.3], {"ZWARN": 0})
+    assert not scalar_valid("Z", [0.3], {"ZWARN": 4})  # DESI ZWARN_BITS non-zero bitmask
     assert not scalar_valid("Z", [0.3], {"ZWARN": -1})
     assert not scalar_valid("sdss_Z", [0.3], {"sdss_ZWARNING": -1})
     assert scalar_valid("sdss_vdisp", [150.0], good)

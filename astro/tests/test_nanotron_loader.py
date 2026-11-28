@@ -38,12 +38,12 @@ def _frame(image_only=False):
             "object_id_desi": f"desi-{i}",
             "spectrum_desi": record["spectrum"],
             "Z_desi": record["Z"],
-            "ZWARN_desi": record["ZWARN"],
+            "ZWARN_BITS_desi": int(record["ZWARN"]),
         })
     frame = nested_frame(rows, ("image", "spectrum_desi"))
     if image_only:
         # Preserve the Arrow nested dtype for an entirely unmatched right side.
-        for column in ("object_id_desi", "spectrum_desi", "Z_desi", "ZWARN_desi"):
+        for column in ("object_id_desi", "spectrum_desi", "Z_desi", "ZWARN_BITS_desi"):
             frame[column] = frame[column].mask(np.ones(len(frame), dtype=bool))
     return frame
 
