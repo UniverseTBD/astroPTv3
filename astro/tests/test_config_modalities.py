@@ -87,6 +87,13 @@ def test_yaml_uses_current_modalities(path):
     assert "gz10" not in {catalog["name"] for catalog in original["catalogs"]}
     sdss = next(catalog for catalog in original["catalogs"] if catalog["name"] == "sdss")
     assert sdss["repo"] == "UniverseTBD/mmu_sdss_dr17@091f56aa923837b7672586f6076fda490a6062dc"
+    desi = next(catalog for catalog in original["catalogs"] if catalog["name"] == "desi")
+    assert desi["repo"] == "hugging-science/mmu_desi_DR1@561be75c6fa84104205962a18034a8d53124fecf"
+    # DR1's boolean ZWARN is inverted (True when bits == 0); Z must gate on raw ZWARN_BITS.
+    assert desi["scalar_columns"] == {"Z": "Z", "ZWARN": "ZWARN_BITS"}
+    val_catalogs = yaml.safe_load((ASTRO_DIR / "src/astropt3/data/validation_catalogs.yaml").read_text())["catalogs"]
+    val_desi = next(catalog for catalog in val_catalogs if catalog["name"] == "desi")
+    assert val_desi == desi
     for stage in raw["data_stages"]:
         stream = stage["data"]["dataset"]["catalog_stream"]
         north, south = stream["anchors"]

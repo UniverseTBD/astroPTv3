@@ -7,7 +7,7 @@ Unit fixture for tests — NOT a training source (ADR 0015). The records mimic:
   noise ~0.001 nMgy — the real pilot flux scale, so the physical band
   normalization's 0.01 nMgy arcsinh knee lands in the same regime as on
   real data), ``image.band`` = des-g/r/z, plus catalog scalars.
-- ``UniverseTBD/mmu_desi_edr_sv3``: ``spectrum`` with 7781-bin ``flux``,
+- ``hugging-science/mmu_desi_DR1``: ``spectrum`` with 7781-bin ``flux``,
   ``lambda`` (3600-9824 A), ``ivar``, ``lsf_sigma``, ``mask``, plus ``Z``.
 
 Images contain a redshift-correlated Gaussian blob and spectra a continuum +
@@ -43,10 +43,10 @@ TINY_CATALOG_STREAM = {
     "catalogs": [
         {
             "name": "desi",
-            "repo": "UniverseTBD/mmu_desi_edr_sv3",
+            "repo": "hugging-science/mmu_desi_DR1",
             "decoder": "desi_spectrum",
             "record_key": "spectrum",
-            "scalar_columns": {"Z": "Z", "ZWARN": "ZWARN"},
+            "scalar_columns": {"Z": "Z", "ZWARN": "ZWARN_BITS"},
         },
     ],
     "how": "outer",

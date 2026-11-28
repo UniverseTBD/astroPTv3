@@ -40,7 +40,7 @@ def test_telemetry_is_off_without_the_env_var(monkeypatch):
 def test_source_attribution_covers_the_legacy_anchor():
     anchor = "hf://datasets/UniverseTBD/mmu_ssl_legacysurvey_north/x.parquet"
     assert telemetry.source_of_path(anchor) == "legacy"
-    assert telemetry.source_of_path("datasets/UniverseTBD/mmu_desi_edr_sv3/y.parquet") == "desi"
+    assert telemetry.source_of_path("datasets/hugging-science/mmu_desi_DR1/y.parquet") == "desi"
     assert telemetry.source_of_path("s3://somewhere/else.parquet") == "unknown"
 
 
@@ -168,7 +168,7 @@ def test_stream_probe_counts_returned_payload_not_requested_length(tmp_path, mon
     monkeypatch.setattr(HfFileSystemStreamFile, "read", lambda self, length=-1: b"abc")
     assert telemetry.install_byte_probe(rank=0)
     assert telemetry.install_byte_probe(rank=0)  # idempotent, no doubled log
-    fake = SimpleNamespace(loc=12, path="datasets/UniverseTBD/mmu_desi_edr_sv3/properties")
+    fake = SimpleNamespace(loc=12, path="datasets/hugging-science/mmu_desi_DR1/properties")
     assert HfFileSystemStreamFile.read(fake, 999) == b"abc"  # pyright: ignore[reportArgumentType] -- fake remote file
     records = (tmp_path / "bytes.rank0.main.jsonl").read_text().splitlines()
     assert len(records) == 1

@@ -531,12 +531,13 @@ data_stages:
                 sdss_VDISP: VDISP
             - name: desi
               repo: >-
-                UniverseTBD/mmu_desi_edr_sv3@9fd88ba48233cb9857701ce802a7eade2d4c4a88
+                hugging-science/mmu_desi_DR1@561be75c6fa84104205962a18034a8d53124fecf
               decoder: desi_spectrum
               record_key: spectrum
               scalar_columns:
                 Z: Z
-                ZWARN: ZWARN
+                # DR1's boolean ZWARN is inverted (True when bits == 0); gate Z on the raw bitmask.
+                ZWARN: ZWARN_BITS
             - name: hsc
               repo: >-
                 hugging-science/mmu_hsc_pdr3_wide_21@7de6b92fd99097207a00b9c42f2d2862d62662bf
